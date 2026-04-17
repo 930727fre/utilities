@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Workout Timer</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      min-height: 100vh;
+      background: #0f0f13;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'Inter', sans-serif;
+      padding: 2rem;
+      transition: background 0.5s ease;
+    }
+    body.phase-workout { background: #0a1f14; }
+    body.phase-rest    { background: #0a1428; }
+
+    .card {
+      background: #1a1a24;
+      border: 2px solid #2a2a38;
+      border-radius: 28px;
+      padding: 2.5rem 2rem;
+      width: 320px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.5rem;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+      transition: border-color 0.5s ease, box-shadow 0.5s ease;
+    }
+    .card.phase-workout {
+      border-color: #4ade80;
+      box-shadow: 0 0 40px rgba(74,222,128,0.15), 0 24px 64px rgba(0,0,0,0.5);
+    }
+    .card.phase-rest {
+      border-color: #60a5fa;
+      box-shadow: 0 0 40px rgba(96,165,250,0.15), 0 24px 64px rgba(0,0,0,0.5);
+    }
+
+    /* ring */
+    .ring-wrapper {
+      position: relative;
+      width: 220px;
+      height: 220px;
+    }
+    .ring-wrapper svg {
+      transform: rotate(-90deg);
+      position: absolute;
+      top: 0; left: 0;
+    }
+    .ring-bg { fill: none; stroke: #2a2a38; stroke-width: 10; }
+    .ring-fg {
+      fill: none;
+      stroke-width: 10;
+      stroke-linecap: round;
+      transition: stroke-dashoffset 0.25s linear, stroke 0.5s ease;
+    }
+    .ring-center {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .time-display {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 3rem;
+      font-weight: 700;
+      color: #e8e8f0;
+      letter-spacing: -0.02em;
+      transition: color 0.5s;
+    }
+    .time-display.phase-workout { color: #4ade80; }
+    .time-display.phase-rest    { color: #60a5fa; }
+
+    .sub-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #555;
+    }
+
+    /* round counter */
+    .round-info {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #444;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .round-info span {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 3rem;
+      font-weight: 700;
+      color: #ccc;
+      display: block;
+      text-align: center;
+      line-height: 1;
+      margin-top: 4px;
+    }
+
+    /* buttons */
+    .btn-row {
+      display: flex;
+      gap: 0.75rem;
+      width: 100%;
+    }
+    .btn {
+      flex: 1;
+      padding: 0.75rem;
+      border: none;
+      border-radius: 12px;
+      font-family: 'Inter', sans-serif;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.05em;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+    .btn:active { transform: scale(0.96); }
+    .btn-primary { background: #6c63ff; color: #fff; }
+    .btn-primary:hover { opacity: 0.85; }
+    .btn-secondary { background: #2a2a38; color: #aaa; }
+    .btn-secondary:hover { background: #333345; }
+  </style>
+</head>
+<body>
+
+<div class="card phase-idle" id="card">
+  <div class="ring-wrapper">
+    <svg width="220" height="220" viewBox="0 0 220 220">
+      <circle class="ring-bg" cx="110" cy="110" r="96"/>
+      <circle class="ring-fg" id="interval-ring" cx="110" cy="110" r="96"
+              stroke-dasharray="603" stroke-dashoffset="0"/>
+    </svg>
+    <div class="ring-center">
+      <div class="time-display" id="interval-display">01:00</div>
+      <div class="sub-label" id="interval-sub">ready</div>
+    </div>
+  </div>
+
+  <div class="round-info">Round <span id="round-count">1</span></div>
+
+  <div class="btn-row">
+    <button class="btn btn-primary" id="interval-start">Start</button>
+    <button class="btn btn-secondary" id="interval-reset">Reset</button>
+  </div>
+</div>
+
+<script>
+  const CIRC = 2 * Math.PI * 96; // ~603
+
+  (() => {
+    const WORKOUT = 60, REST = 30;
+    let phase = 'idle', remaining = WORKOUT, round = 1;
+    let running = false, raf = null, startTs = 0, startRemaining = WORKOUT;
+
+    const display   = document.getElementById('interval-display');
+    const sub       = document.getElementById('interval-sub');
+    const ring      = document.getElementById('interval-ring');
+    const card      = document.getElementById('card');
+    const rndCount  = document.getElementById('round-count');
+    const btnStart  = document.getElementById('interval-start');
+    const btnReset  = document.getElementById('interval-reset');
+
+    function pad(n) { return String(n).padStart(2,'0'); }
+    function fmtSec(s) { return `${pad(Math.floor(s/60))}:${pad(s%60)}`; }
+
+    function applyPhase(p) {
+      phase = p;
+      const cls = p === 'workout' ? 'phase-workout' : p === 'rest' ? 'phase-rest' : 'phase-idle';
+      card.className   = `card ${cls}`;
+      document.body.className = cls;
+      display.className = `time-display ${cls}`;
+
+      if (p === 'workout') {
+        ring.style.stroke = '#4ade80';
+        sub.textContent = '1 min';
+      } else if (p === 'rest') {
+        ring.style.stroke = '#60a5fa';
+        sub.textContent = '30 sec';
+      } else {
+        ring.style.stroke = '#6c63ff';
+        sub.textContent = 'ready';
+      }
+    }
+
+    function render(rem) {
+      display.textContent = fmtSec(Math.ceil(rem));
+      const total = phase === 'rest' ? REST : WORKOUT;
+      const frac  = Math.max(0, rem) / total;
+      ring.style.strokeDashoffset = CIRC * (1 - frac);
+    }
+
+    function nextPhase() {
+      if (phase === 'workout') {
+        remaining = REST;
+        applyPhase('rest');
+      } else {
+        remaining = WORKOUT;
+        round++;
+        rndCount.textContent = round;
+        applyPhase('workout');
+      }
+      startTs = performance.now();
+      startRemaining = remaining;
+    }
+
+    function tick() {
+      const elapsed = (performance.now() - startTs) / 1000;
+      remaining = startRemaining - elapsed;
+      if (remaining <= 0) {
+        remaining = 0;
+        render(0);
+        nextPhase();
+      } else {
+        render(remaining);
+      }
+      raf = requestAnimationFrame(tick);
+    }
+
+    btnStart.addEventListener('click', () => {
+      if (!running) {
+        running = true;
+        startTs = performance.now();
+        startRemaining = remaining;
+        btnStart.textContent = 'Pause';
+        if (phase === 'idle') applyPhase('workout');
+        tick();
+      } else {
+        cancelAnimationFrame(raf);
+        running = false;
+        btnStart.textContent = 'Resume';
+      }
+    });
+
+    btnReset.addEventListener('click', () => {
+      cancelAnimationFrame(raf);
+      running = false;
+      remaining = WORKOUT; round = 1;
+      startRemaining = WORKOUT;
+      btnStart.textContent = 'Start';
+      rndCount.textContent = 1;
+      applyPhase('idle');
+      render(WORKOUT);
+    });
+
+    applyPhase('idle');
+    render(WORKOUT);
+  })();
+</script>
+</body>
+</html>

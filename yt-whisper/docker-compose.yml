@@ -1,0 +1,41 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8080:8000"
+    volumes:
+      - ./downloads:/app/downloads
+      - ./data:/app/data
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - JOBS_FILE=/app/data/jobs.json
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: celery -A tasks worker --loglevel=info --concurrency=1 -P solo
+    volumes:
+      - ./downloads:/app/downloads
+      - ./data:/app/data
+      - ./models:/root/.cache/whisper
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - JOBS_FILE=/app/data/jobs.json
+    depends_on:
+      - redis
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<title>yt-whisper</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config={darkMode:'class'}</script>
+<style>
+  .progress-bar{transition:width .4s ease}
+  .fade-in{animation:fadeIn .3s ease}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+  .progress-pulse{background:linear-gradient(90deg,#ca8a04 0%,#fde047 50%,#ca8a04 100%);background-size:200% 100%;animation:shimmer 1.5s linear infinite}
+</style>
+</head>
+<body class="dark bg-gray-950 text-gray-100 min-h-screen p-6">
+
+<div class="max-w-3xl mx-auto">
+  <h1 class="text-2xl font-bold mb-6 text-white">🎬 yt-whisper</h1>
+
+  <!-- Submit -->
+  <div class="flex gap-3 mb-8">
+    <input id="url-input" type="text" placeholder="貼上 YouTube 網址…"
+      class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2.5 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500"/>
+    <button onclick="submitJob()"
+      class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-5 py-2.5 rounded-lg transition-colors">
+      送出
+    </button>
+  </div>
+
+  <!-- Job list -->
+  <div id="job-list" class="space-y-4"></div>
+</div>
+
+<script>
+const STATUS_COLOR = {
+  PENDING:      'bg-gray-600',
+  DOWNLOADING:  'bg-blue-600',
+  TRANSCRIBING: 'bg-yellow-500',
+  SUCCESS:      'bg-green-600',
+  FAILED:       'bg-red-600',
+};
+const STATUS_LABEL = {
+  PENDING:      '等待中',
+  DOWNLOADING:  '下載中',
+  TRANSCRIBING: '轉錄中',
+  SUCCESS:      '完成',
+  FAILED:       '失敗',
+};
+
+async function submitJob() {
+  const input = document.getElementById('url-input');
+  const url = input.value.trim();
+  if (!url) return;
+  input.value = '';
+  const res = await fetch('/api/jobs', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url}),
+  });
+  if (!res.ok) { alert('提交失敗'); return; }
+  await refresh();
+}
+
+async function retryJob(id) {
+  await fetch(`/api/jobs/${id}/retry`, {method: 'POST'});
+  await refresh();
+}
+
+async function deleteJob(id) {
+  if (!confirm('確定刪除此任務及其檔案？')) return;
+  await fetch(`/api/jobs/${id}`, {method: 'DELETE'});
+  await refresh();
+}
+
+function progressBar(pct, color) {
+  return `<div class="w-full bg-gray-700 rounded-full h-1.5 mt-2">
+    <div class="progress-bar ${color} h-1.5 rounded-full" style="width:${pct}%"></div>
+  </div>`;
+}
+
+function renderJob(job) {
+  const color = STATUS_COLOR[job.status] || 'bg-gray-600';
+  const label = STATUS_LABEL[job.status] || job.status;
+  const p = job.progress;
+
+  let progressHtml = '';
+  if (job.status === 'DOWNLOADING') {
+    progressHtml = `
+      <div class="mt-3">
+        <div class="text-xs text-gray-400 mb-1">下載中…</div>
+        <div class="w-full bg-gray-700 rounded-full h-1.5"><div class="h-1.5 rounded-full w-full" style="background:linear-gradient(90deg,#3b82f6 0%,#93c5fd 50%,#3b82f6 100%);background-size:200% 100%;animation:shimmer 1.5s linear infinite"></div></div>
+      </div>`;
+  } else if (job.status === 'TRANSCRIBING') {
+    progressHtml = `
+      <div class="mt-3">
+        <div class="text-xs text-gray-400 mb-1">轉錄中…</div>
+        <div class="w-full bg-gray-700 rounded-full h-1.5"><div class="h-1.5 rounded-full w-full" style="background:linear-gradient(90deg,#ca8a04 0%,#fde047 50%,#ca8a04 100%);background-size:200% 100%;animation:shimmer 1.5s linear infinite"></div></div>
+      </div>`;
+  }
+
+  let actionsHtml = '';
+  if (job.status === 'SUCCESS') {
+    actionsHtml = `
+      <div class="flex flex-wrap gap-2 mt-3">
+        ${job.files.mp4 ? `<a href="/${job.files.mp4}" download class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition-colors">⬇ MP4</a>` : ''}
+        ${job.files.srt ? `<a href="/${job.files.srt}" download class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition-colors">⬇ SRT</a>` : ''}
+        <button onclick="window.open('/player/${job.job_id}','_blank')"
+          class="text-xs bg-blue-700 hover:bg-blue-600 px-3 py-1.5 rounded transition-colors">▶ 播放</button>
+      </div>`;
+  }
+
+  let errorHtml = '';
+  if (job.status === 'FAILED') {
+    errorHtml = `
+      <div class="mt-3 flex items-center gap-3">
+        <button onclick="retryJob('${job.job_id}')"
+          class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition-colors">↺ 重試</button>
+        ${job.error ? `<span class="text-xs text-red-400 break-all">${job.error}</span>` : ''}
+      </div>`;
+  }
+
+  return `<div data-job-id="${job.job_id}" class="fade-in bg-gray-900 border border-gray-800 rounded-xl p-4">
+    <div class="flex items-start justify-between gap-3">
+      <div class="flex-1 min-w-0">
+        <p class="text-sm font-medium text-gray-100 truncate">${job.title}</p>
+        <p class="text-xs text-gray-500 truncate mt-0.5">${job.url}</p>
+      </div>
+      <div class="flex items-center gap-2 shrink-0">
+        <span class="text-xs font-medium px-2 py-0.5 rounded-full text-white ${color}">${label}</span>
+        <button onclick="deleteJob('${job.job_id}')"
+          class="text-gray-500 hover:text-red-400 text-lg leading-none transition-colors" title="刪除">✕</button>
+      </div>
+    </div>
+    ${progressHtml}${actionsHtml}${errorHtml}
+  </div>`;
+}
+
+async function refresh() {
+  const res = await fetch('/api/jobs');
+  const jobs = await res.json();
+  const list = document.getElementById('job-list');
+
+  if (jobs.length === 0) {
+    if (!list.querySelector('.empty-msg')) {
+      list.innerHTML = '<p class="empty-msg text-center text-gray-600 text-sm py-12">尚無任務，貼上 YouTube 網址開始吧</p>';
+    }
+    return;
+  }
+
+  const sorted = [...jobs].sort((a,b) => b.created_at.localeCompare(a.created_at));
+  const existingIds = new Set([...list.querySelectorAll('[data-job-id]')].map(el => el.dataset.jobId));
+  const newIds = new Set(sorted.map(j => j.job_id));
+
+  // remove deleted
+  for (const id of existingIds) {
+    if (!newIds.has(id)) list.querySelector(`[data-job-id="${id}"]`)?.remove();
+  }
+
+  sorted.forEach((job, i) => {
+    const html = renderJob(job);
+    const existing = list.querySelector(`[data-job-id="${job.job_id}"]`);
+    if (!existing) {
+      // insert at correct position
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      const el = tmp.firstElementChild;
+      const ref = list.children[i];
+      ref ? list.insertBefore(el, ref) : list.appendChild(el);
+    } else {
+      // only replace if content changed
+      const tmp = document.createElement('div');
+      tmp.innerHTML = html;
+      const newEl = tmp.firstElementChild;
+      if (existing.innerHTML !== newEl.innerHTML) {
+        existing.replaceWith(newEl);
+      }
+    }
+  });
+}
+
+// Allow pressing Enter in input
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('url-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitJob();
+  });
+  refresh();
+  setInterval(refresh, 2000);
+});
+</script>
+</body>
+</html>

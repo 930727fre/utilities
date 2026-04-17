@@ -1,0 +1,26 @@
+services:
+  backend:
+    build: ./backend
+    volumes:
+      - ./data:/data
+      - ./data/static:/app/static
+    ports:
+      - "8000:8000"
+    environment:
+      - DATA_DIR=/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      - backend

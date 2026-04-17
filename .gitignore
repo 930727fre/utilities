@@ -1,0 +1,22 @@
+# data & downloads
+**/data/
+**/downloads/
+**/models/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# env
+.env
+*.env
+
+# docker
+.dockerignore
+
+# os
+.DS_Store
+Thumbs.db
