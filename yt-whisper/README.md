@@ -1,5 +1,10 @@
 # yt-whisper — 專案規格書（定稿）
 
+## TODO
+- 下載與轉錄流程可正常運作，但中斷與恢復機制設計不完善。狀態管理（job status transitions、worker crash recovery、partial file cleanup）需要重新設計。
+
+---
+
 ## 核心目標
 建立一個自動化流水線，將 YouTube 影片下載為 MP4 並利用 GPU 加速轉錄字幕，提供網頁端進度監控、檔案管理與串流播放。
 

@@ -1,5 +1,7 @@
+import json
 import multiprocessing
 import os
+import tempfile
 import uuid
 from datetime import datetime, timezone
 
@@ -80,9 +82,9 @@ def process_video(self, job_id: str, url: str):
     upsert_job(job)
 
     # --- Transcribe ---
+    result_file = tempfile.mktemp(suffix=".json")
     ctx = multiprocessing.get_context("spawn")
-    out_queue = ctx.Queue()
-    proc = ctx.Process(target=_transcribe_worker, args=(base_path + ".mp4", out_queue))
+    proc = ctx.Process(target=_transcribe_worker, args=(base_path + ".mp4", result_file))
     proc.start()
 
     while True:
@@ -93,14 +95,19 @@ def process_video(self, job_id: str, url: str):
         if not current or current["status"] == "DELETED":
             proc.terminate()
             proc.join()
+            os.unlink(result_file) if os.path.exists(result_file) else None
             return
 
-    if out_queue.empty():
+    if not os.path.exists(result_file):
         _fail(job_id, "Transcription process exited unexpectedly")
         return
-    status, payload = out_queue.get()
-    if status == "err":
-        _fail(job_id, payload)
+
+    with open(result_file, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    os.unlink(result_file)
+
+    if "error" in payload:
+        _fail(job_id, payload["error"])
         return
     result = payload
 
@@ -121,7 +128,8 @@ def process_video(self, job_id: str, url: str):
     upsert_job(job)
 
 
-def _transcribe_worker(mp4_path: str, out_queue):
+def _transcribe_worker(mp4_path: str, result_file: str):
+    import json
     import torch
     import whisper
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -129,9 +137,11 @@ def _transcribe_worker(mp4_path: str, out_queue):
     try:
         model = whisper.load_model("medium", device=device)
         result = model.transcribe(mp4_path, beam_size=5, language=None, verbose=False)
-        out_queue.put(("ok", result))
+        with open(result_file, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False)
     except Exception as e:
-        out_queue.put(("err", str(e)))
+        with open(result_file, "w", encoding="utf-8") as f:
+            json.dump({"error": str(e)}, f)
 
 
 def _fail(job_id: str, error: str):

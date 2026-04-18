@@ -6,8 +6,6 @@ services:
   web:
     build: .
     command: uvicorn main:app --host 0.0.0.0 --port 8000
-    ports:
-      - "8080:8000"
     volumes:
       - ./data:/app/data
     environment:
@@ -16,6 +14,9 @@ services:
     depends_on:
       - redis
     restart: unless-stopped
+    networks:
+      - default
+      - my_network
 
   worker:
     build: .
@@ -36,4 +37,8 @@ services:
               count: 1
               capabilities: [gpu]
     restart: unless-stopped
+
+networks:
+  my_network:
+    external: true
 

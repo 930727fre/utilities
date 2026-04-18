@@ -1,5 +1,10 @@
 services:
   clock:
     build: .
-    ports:
-      - "7070:80"
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true
