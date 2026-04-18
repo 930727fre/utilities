@@ -10,6 +10,7 @@ Runs a Cloudflare Tunnel to expose all services via subdomains on your domain.
    - `clock.domain.com` → `http://clock:80`
    - `twelvereader.domain.com` → `http://frontend:3000`
    - `yt-whisper.domain.com` → `http://web:8000`
+   - `flashcard.domain.com` → `http://flashcard-frontend:80`
 4. Go to Zero Trust → Access → Applications → Add an application → Self-hosted:
    - Domain: `*.domain.com`
    - Under Policies, add a rule: **Emails → `you@gmail.com`** (one-time PIN sent to your email)
