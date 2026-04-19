@@ -1,0 +1,15 @@
+services:
+  backup:
+    build: .
+    container_name: backup
+    volumes:
+      - ../flashcard/data:/flashcard
+      - ../TwelveReader/data:/twelvereader
+    environment:
+      - RCLONE_CONFIG_R2_TYPE
+      - RCLONE_CONFIG_R2_PROVIDER
+      - RCLONE_CONFIG_R2_ACCESS_KEY_ID
+      - RCLONE_CONFIG_R2_SECRET_ACCESS_KEY
+      - RCLONE_CONFIG_R2_ENDPOINT
+      - R2_BUCKET
+    restart: unless-stopped

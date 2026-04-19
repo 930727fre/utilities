@@ -9,6 +9,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [yt-whisper](./yt-whisper) | YouTube video downloader with GPU-accelerated Whisper transcription |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
+| [backup](./backup) | Daily backup of flashcard and TwelveReader data to Cloudflare R2 at 04:00 |
 
 ## Notes
 
