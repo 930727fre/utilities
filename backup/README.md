@@ -13,7 +13,7 @@ twelvereader/YYYY-MM-DD/books/
 
 ## R2 API Token
 
-Use an **Account API token** (not User API token) with **Admin Read & Write** permission. User API tokens show "Object Read & Write" in the UI but silently deny writes at the S3 API level.
+Use a **User API token** with **Admin Read & Write** permission. "Object Read & Write" silently denies writes at the S3 API level.
 
 ## Notes
 
