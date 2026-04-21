@@ -1,6 +1,7 @@
 services:
   clock:
     build: .
+    container_name: clock
     networks:
       - default
       - my_network

@@ -1,20 +1,21 @@
 services:
-  backend:
+  flashcard-backend:
     build: ./backend
+    container_name: flashcard-backend
     restart: unless-stopped
     volumes:
       - ./data:/data
     expose:
       - "8000"
 
-  frontend:
+  flashcard-frontend:
     build:
       context: .
       dockerfile: nginx/Dockerfile
     container_name: flashcard-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      - flashcard-backend
     networks:
       - default
       - my_network

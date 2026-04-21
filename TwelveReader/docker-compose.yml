@@ -1,6 +1,7 @@
 services:
-  backend:
+  twelvereader-backend:
     build: ./backend
+    container_name: twelvereader-backend
     volumes:
       - ./data:/data
     environment:
@@ -13,13 +14,13 @@ services:
               count: 1
               capabilities: [gpu]
 
-  frontend:
+  twelvereader-frontend:
     build: ./frontend
     container_name: twelvereader-frontend
     environment:
-      - BACKEND_URL=http://backend:8000
+      - BACKEND_URL=http://twelvereader-backend:8000
     depends_on:
-      - backend
+      - twelvereader-backend
     networks:
       - default
       - my_network

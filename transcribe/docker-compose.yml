@@ -1,35 +1,37 @@
 services:
-  redis:
+  transcribe-redis:
     image: redis:7-alpine
+    container_name: transcribe-redis
     restart: unless-stopped
 
-  web:
+  transcribe-frontend:
     build: .
-    container_name: yt-whisper-frontend
+    container_name: transcribe-frontend
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./data:/app/data
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://transcribe-redis:6379/0
       - JOBS_FILE=/app/data/jobs.json
     depends_on:
-      - redis
+      - transcribe-redis
     restart: unless-stopped
     networks:
       - default
       - my_network
 
-  worker:
+  transcribe-worker:
     build: .
+    container_name: transcribe-worker
     command: celery -A tasks worker --loglevel=info --concurrency=1 -P solo
     volumes:
       - ./data:/app/data
       - ./data/models:/root/.cache/whisper
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://transcribe-redis:6379/0
       - JOBS_FILE=/app/data/jobs.json
     depends_on:
-      - redis
+      - transcribe-redis
     deploy:
       resources:
         reservations:
@@ -39,19 +41,19 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
-  beat:
+  transcribe-beat:
     build: .
+    container_name: transcribe-beat
     command: celery -A tasks beat --loglevel=info
     volumes:
       - ./data:/app/data
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=redis://transcribe-redis:6379/0
       - JOBS_FILE=/app/data/jobs.json
     depends_on:
-      - redis
+      - transcribe-redis
     restart: unless-stopped
 
 networks:
   my_network:
     external: true
-
