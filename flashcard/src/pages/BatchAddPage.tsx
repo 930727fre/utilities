@@ -175,7 +175,9 @@ export default function BatchAddPage() {
                           background: 'linear-gradient(135deg, #5f3dc4, #7950f2)',
                           boxShadow: '0 8px 20px rgba(95, 61, 196, 0.3)',
                           border: 'none',
-                          height: 56
+                          height: 56,
+                          color: '#fff',
+                          fontWeight: 700
                         }}
                       >
                         開始匯入資料庫
