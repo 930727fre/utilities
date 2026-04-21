@@ -39,6 +39,18 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
 
+  beat:
+    build: .
+    command: celery -A tasks beat --loglevel=info
+    volumes:
+      - ./data:/app/data
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - JOBS_FILE=/app/data/jobs.json
+    depends_on:
+      - redis
+    restart: unless-stopped
+
 networks:
   my_network:
     external: true

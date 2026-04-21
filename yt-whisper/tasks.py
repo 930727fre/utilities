@@ -2,6 +2,7 @@ import json
 import multiprocessing
 import os
 import tempfile
+import uuid
 from datetime import datetime, timezone
 
 from celery import Celery
@@ -11,6 +12,7 @@ from storage import get_job, upsert_job, read_jobs, write_jobs, ensure_jobs_file
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 DOWNLOADS_DIR = "/app/data/downloads"
+SCAN_DIR = os.getenv("SCAN_DIR", "/app/data/inbox")
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
@@ -18,6 +20,12 @@ TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
 app = Celery("tasks", broker=REDIS_URL, backend=REDIS_URL)
 app.conf.task_track_started = True
 app.conf.broker_connection_retry_on_startup = True
+app.conf.beat_schedule = {
+    "scan-inbox": {
+        "task": "tasks.scan_inbox_task",
+        "schedule": 5.0,  # every 5 seconds
+    },
+}
 
 
 def _now() -> str:
@@ -45,7 +53,11 @@ def _recover_jobs(sender, **kwargs):
 
     for job in read_jobs():
         if job["status"] == "PENDING":
-            process_video.apply_async(args=[job["job_id"], job["url"]], task_id=job["job_id"])
+            if job.get("source_file"):
+                src_path = os.path.join(SCAN_DIR, job["source_file"])
+                transcribe_file.apply_async(args=[job["job_id"], src_path], task_id=job["job_id"])
+            else:
+                process_video.apply_async(args=[job["job_id"], job["url"]], task_id=job["job_id"])
 
 
 @app.task(bind=True)
@@ -96,10 +108,60 @@ def process_video(self, job_id: str, url: str):
     job["updated_at"] = _now()
     upsert_job(job)
 
-    # --- Transcribe ---
+    _run_transcription(job_id, base_path + ".mp4")
+
+
+@app.task(bind=True)
+def transcribe_file(self, job_id: str, src_path: str):
+    job = get_job(job_id)
+    if not job or job["status"] in ("DELETED", "SUCCESS", "TRANSCRIBING"):
+        return
+
+    job["files"]["mp3"] = src_path
+    job["status"] = "TRANSCRIBING"
+    job["updated_at"] = _now()
+    upsert_job(job)
+
+    _run_transcription(job_id, src_path)
+
+
+@app.task(name="tasks.scan_inbox_task")
+def scan_inbox_task():
+    scan_inbox()
+
+
+def scan_inbox() -> int:
+    os.makedirs(SCAN_DIR, exist_ok=True)
+    tracked = {j.get("source_file") for j in read_jobs() if j["status"] != "DELETED"}
+    count = 0
+    for fname in sorted(os.listdir(SCAN_DIR)):
+        if not fname.lower().endswith(".mp3"):
+            continue
+        if fname in tracked:
+            continue
+        job_id = str(uuid.uuid4())
+        job = {
+            "job_id": job_id,
+            "url": "",
+            "title": os.path.splitext(fname)[0],
+            "source_file": fname,
+            "status": "PENDING",
+            "progress": {},
+            "files": {"mp3": None, "srt": None},
+            "error": None,
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        upsert_job(job)
+        transcribe_file.apply_async(args=[job_id, os.path.join(SCAN_DIR, fname)], task_id=job_id)
+        count += 1
+    return count
+
+
+def _run_transcription(job_id: str, audio_path: str):
     result_file = tempfile.mktemp(suffix=".json")
     ctx = multiprocessing.get_context("spawn")
-    proc = ctx.Process(target=_transcribe_worker, args=(base_path + ".mp4", result_file))
+    proc = ctx.Process(target=_transcribe_worker, args=(audio_path, result_file))
     proc.start()
     transcribe_started = _now()
 
@@ -140,7 +202,8 @@ def process_video(self, job_id: str, url: str):
     if not job or job["status"] == "DELETED":
         return
 
-    srt_path = base_path + ".srt"
+    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    srt_path = os.path.join(DOWNLOADS_DIR, job_id + ".srt")
     with open(srt_path, "w", encoding="utf-8") as f:
         for i, seg in enumerate(payload["segments"], 1):
             f.write(f"{i}\n")

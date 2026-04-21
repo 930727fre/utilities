@@ -45,6 +45,7 @@ def upsert_job(job: dict) -> None:
 
 
 def ensure_jobs_file() -> None:
+    os.makedirs(os.path.dirname(JOBS_FILE), exist_ok=True)
     if not os.path.exists(JOBS_FILE):
         with open(JOBS_FILE, "w", encoding="utf-8") as f:
             json.dump([], f)

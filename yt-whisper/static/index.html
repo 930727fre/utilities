@@ -107,6 +107,7 @@ function renderJob(job) {
     actionsHtml = `
       <div class="flex flex-wrap gap-2 mt-3">
         ${job.files.mp4 ? `<a href="/api/download/${job.job_id}/mp4" download class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition-colors">⬇ MP4</a>` : ''}
+        ${job.files.mp3 ? `<a href="/api/download/${job.job_id}/mp3" download class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition-colors">⬇ MP3</a>` : ''}
         ${job.files.srt ? `<a href="/api/download/${job.job_id}/srt" download class="text-xs bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded transition-colors">⬇ SRT</a>` : ''}
         <button onclick="window.open('/player/${job.job_id}','_blank')"
           class="text-xs bg-blue-700 hover:bg-blue-600 px-3 py-1.5 rounded transition-colors">▶ 播放</button>
