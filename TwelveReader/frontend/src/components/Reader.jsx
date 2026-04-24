@@ -39,6 +39,7 @@ export default function Reader({ book, onClose, backendDown }) {
   const [loadError, setLoadError] = useState(null)
   const contentRef = useRef(null)
   const bookmarkRestoredRef = useRef(false)
+  const chapterCacheRef = useRef(new Map())  // href → processed html
 
   const player = usePlayer(book.id, paragraphs)
   const playerRef = useRef(player)
@@ -58,12 +59,18 @@ export default function Reader({ book, onClose, backendDown }) {
     if (spine.length === 0) return
     const item = spine[spineIndex]
     if (!item) return
+    const cached = chapterCacheRef.current.get(item.href)
+    if (cached) { setChapterHtml(cached); return }
     fetch(`/api/books/${book.id}/item/${item.href}`)
       .then(r => {
         if (!r.ok) throw new Error(`Failed to load chapter: ${item.href}`)
         return r.text()
       })
-      .then(html => setChapterHtml(rewriteHtml(html, book.id, item.href)))
+      .then(html => {
+        const processed = rewriteHtml(html, book.id, item.href)
+        chapterCacheRef.current.set(item.href, processed)
+        setChapterHtml(processed)
+      })
       .catch(e => setLoadError(e.message))
   }, [spineIndex, spine, book.id])
 
