@@ -99,7 +99,7 @@ export default function DashboardPage() {
       alignItems: 'center',
       backgroundColor: '#0a0c14'
     }}>
-      <Container size="sm" maw={480} px="md" w="100%">
+      <Container size="sm" maw={480} px="md" w="100%" style={{ paddingBottom: 'max(24px, env(safe-area-inset-bottom))' }}>
         <Stack gap="md">
 
           {/* 連勝卡片 */}
@@ -135,7 +135,7 @@ export default function DashboardPage() {
                 <ThemeIcon size={44} radius={10} color={cfg.iconColor} variant="light" style={{ flexShrink: 0 }}>
                   {cfg.icon}
                 </ThemeIcon>
-                <Box style={{ minWidth: 0 }}>
+                <Box style={{ minWidth: 0, overflow: 'hidden' }}>
                   <Text size="xs" fw={600} tt="uppercase" style={{ letterSpacing: '1.2px', color: cfg.tagColor, marginBottom: 3 }}>
                     {cfg.tag}
                   </Text>

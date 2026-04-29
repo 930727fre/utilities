@@ -113,7 +113,7 @@ export default function EditPage() {
                   <Box
                     key={card.id}
                     px="md"
-                    py="sm"
+                    py="md"
                     onClick={() => handleSelect(card)}
                     style={{ cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.05)' }}
                     onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
@@ -184,7 +184,7 @@ export default function EditPage() {
               </Box>
 
               <Button
-                size="md"
+                size="lg"
                 radius="md"
                 fullWidth
                 disabled={!isDirty}

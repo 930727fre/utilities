@@ -123,7 +123,7 @@ export default function ReviewPage() {
   const themeBg = currentCard?.state === 0 ? 'rgba(77, 187, 122, 0.05)' : 'rgba(74, 143, 255, 0.05)';
 
   return (
-    <Container size="sm" py="xl" px="md">
+    <Container size="sm" py="xl" px="md" style={{ paddingBottom: 'max(24px, env(safe-area-inset-bottom))' }}>
       <Stack gap="lg">
         <Group justify="space-between">
           <ActionIcon variant="subtle" onClick={() => navigate('/')} size="xl" c="dimmed">
@@ -163,7 +163,7 @@ export default function ReviewPage() {
                 position: 'relative'
               }}
             >
-              <Stack align="center" gap={0} p={40} style={{ flex: 1, justifyContent: 'center' }}>
+              <Stack align="center" gap={0} p={{ base: 'lg', sm: 40 }} style={{ flex: 1, justifyContent: 'center' }}>
                 <Badge variant="filled" size="sm" mb={30} style={{ backgroundColor: themeColor, color: '#000' }}>
                   {currentCard?.state === 0 ? 'NEW CARD' : 'REVIEW'}
                 </Badge>
@@ -193,7 +193,7 @@ export default function ReviewPage() {
                       <IconLamp size={14} />
                       <Text size="xs" fw={800} tt="uppercase">Definition / Note</Text>
                     </Group>
-                    <Text ta="center" size="xl" fw={600} c="#e8eaf0">
+                    <Text ta="center" size="xl" fw={600} c="#e8eaf0" style={{ wordBreak: 'break-word' }}>
                       {currentCard?.note || "No notes provided."}
                     </Text>
                   </Box>
