@@ -4,7 +4,7 @@ import {
   Container, Paper, Title, Text, Button, Group, Stack,
   Progress, ActionIcon, ThemeIcon, SimpleGrid, Center, Box, Badge, Transition
 } from '@mantine/core';
-import { IconArrowLeft, IconCheck, IconLamp, IconBulb } from '@tabler/icons-react';
+import { IconArrowLeft, IconCheck, IconLamp, IconBulb, IconCopy } from '@tabler/icons-react';
 import { useNavigate } from 'react-router-dom';
 import { notifications } from '@mantine/notifications';
 import { api } from '../api';
@@ -36,6 +36,7 @@ export default function ReviewPage() {
   const [reviewQueue, setReviewQueue] = useState<Card[]>([]);
   const [totalCount, setTotalCount] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
+  const [copied, setCopied] = useState(false);
   const initialized = useRef(false);
 
   const { data: queueData, isLoading } = useQuery({
@@ -202,6 +203,25 @@ export default function ReviewPage() {
             </Paper>
           )}
         </Transition>
+
+        {isFlipped && (
+          <Group justify="center">
+            <Button
+              variant="subtle"
+              size="sm"
+              radius="xl"
+              leftSection={copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+              onClick={() => {
+                navigator.clipboard.writeText(`幫我造 ${currentCard?.word} 的例句`);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              }}
+              style={{ color: copied ? '#51cf66' : '#888', border: '1px solid rgba(255,255,255,0.1)' }}
+            >
+              {copied ? 'Prompt copied!' : 'Copy prompt'}
+            </Button>
+          </Group>
+        )}
 
         {isFlipped ? (
           <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="sm">
