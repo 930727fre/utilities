@@ -1,0 +1,9 @@
+</header>
+:: {.section} []{#flast.xhtml#flast06-sec-0001}
+[On November 1, 2008, a computer programmer going by the pseudonym Satoshi Nakamoto sent an email to a cryptography mailing list to announce that he had produced a "new electronic cash system that's fully peer-to-peer, with no trusted third party."]{#flast.xhtml#kobo.2.1 .koboSpan
+xmIns="http://www.w3.org/1999/xhtml"}^ last xhum|/kobo.31 koboSpan
+xmlins="http:/|www.w3.org/1999|xhl {#flast.xhtml#fn-1}^[ He copied the abstract
+of the paper explaining the design, and a link to it online. J{#flast.xhtml#kobo.4.1 koboSpan xmIns="http://www.w3.org/1999/xhtml")[In essence, Bitcoin offered a
+payment network with its own native currency, and used a sophisticated method for members to verify all transactions without having to trust in any single member of the network. #flast.xhtml#kobo.4.2 .koboSpan xmIns="http://www.w3.org/1999/xhtml"}
+[The currency was issued at a predetermined rate to reward the members who spent their processing power on verifying the transactions, thus providing a reward for their work. ]{#flast.xhtml#kobo.4.3 .koboSpan xmlns="http://www.w3.org/1999/xhtml")[The
+startling thing about this invention was that, contrary to many other previous attempts at setting up a digital cash, it actually worked.]{#flast.xhtml#kobo.4.4 .koboSpan

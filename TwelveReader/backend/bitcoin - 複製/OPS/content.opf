@@ -1,0 +1,368 @@
+<package xmlns="http://www.idpf.org/2007/opf" xmlns:epub="http://www.idpf.org/2007/ops" version="3.0" unique-identifier="isbn-id" xml:lang="en" prefix="calibre: https://calibre-ebook.com">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title id="t1">The Bitcoin Standard: The Decentralized Alternative to Central Banking</dc:title>
+    <dc:creator id="id">Ammous, Saifedean</dc:creator>
+    <dc:source id="src-id">urn:isbn:9781119473862</dc:source>
+    <dc:identifier>amazon:1119473861</dc:identifier>
+    <dc:identifier>google:Sw5TDwAAQBAJ</dc:identifier>
+    <dc:identifier>url:https://saifedean.com/thebitcoinstandard/</dc:identifier>
+    <dc:identifier>uri:https://mises.org/library/bitcoin-standard</dc:identifier>
+    <dc:identifier>oclc:1029605302</dc:identifier>
+    <dc:identifier>isbn:9781119473916</dc:identifier>
+    <dc:identifier>calibre:9299</dc:identifier>
+    <dc:identifier>uuid:168dac66-200e-4968-964f-0d95a8db4ef4</dc:identifier>
+    <dc:identifier id="isbn-id">urn:uuid:54b70eb0-7313-4ea6-adc1-d3b19eb3d6fc</dc:identifier>
+    <dc:language>en-US</dc:language>
+    <dc:date>2018-04-24T00:00:00+00:00</dc:date>
+    <dc:description>&lt;div&gt;
+&lt;p&gt;This book convinced ["&lt;a href="https://www.urbandictionary.com/define.php?term=orangepilled"&gt;orangepilled&lt;/a&gt;"] the chaplain of the &lt;a href="https://benedictinesofmary.org/support-us/"&gt;&lt;span style="color: #2980b9"&gt;Benedicines of Mary&lt;/span&gt;&lt;/a&gt;, Fr. Matthew Bartulica, &lt;a href="https://www.fssp.org"&gt;&lt;span style="color: #2980b9"&gt;FSSP&lt;/span&gt;&lt;/a&gt;, to accept ₿ donations:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt; Flattery, Andrew. “&lt;a href="https://bitcoinmagazine.com/culture/catholic-nuns-building-church-with-bitcoin"&gt;&lt;span style="color: #2980b9"&gt;Meet The Catholic Nuns Who Are Building A New Church With Bitcoin&lt;/span&gt;&lt;/a&gt;.” &lt;em&gt;Bitcoin Magazine&lt;/em&gt;, October 15, 2022.&lt;/li&gt;&lt;/ul&gt;
+&lt;p&gt;Promotes "low time preference".&lt;/p&gt;
+&lt;p&gt;&lt;span style="font-size: small"&gt;🎩 tip: &lt;/span&gt;&lt;a href="https://bitcointalk.org/index.php?topic=5417279.msg61358547#msg61358547"&gt;&lt;span style="font-size: small; color: #2980b9"&gt;BitcoinTalk forum&lt;/span&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;hr&gt;
+&lt;p style="font-weight: bold"&gt;A comprehensive and authoritative exploration of Bitcoin and its place in monetary history&lt;/p&gt;
+&lt;p&gt;When a pseudonymous programmer introduced “a new electronic cash system that’s fully peer-to-peer, with no trusted third party” to a small online mailing list in 2008, very few people paid attention. Ten years later, and against all odds, this upstart autonomous decentralized software offers an unstoppable and globally accessible hard money alternative to modern central banks. &lt;em&gt;The Bitcoin Standard&lt;/em&gt; analyzes the historical context to the rise of Bitcoin, the economic properties that have allowed it to grow quickly, and its likely economic, political, and social implications.&lt;/p&gt;
+&lt;p&gt;While Bitcoin is an invention of the digital age, the problem it purports to solve is as old as human society itself: transferring value across time and space. Author Saifedean Ammous takes the reader on an engaging journey through the history of technologies performing the functions of money, from primitive systems of trading limestones and seashells, to metals, coins, the gold standard, and modern government debt. Exploring what gave these technologies their monetary role, and how most lost it, provides the reader with a good idea of what makes for sound money, and sets the stage for an economic discussion of its consequences for individual and societal future-orientation, capital accumulation, trade, peace, culture, and art. Compellingly, Ammous shows that it is no coincidence that the loftiest achievements of humanity have come in societies enjoying the benefits of sound monetary regimes, nor is it coincidental that monetary collapse has usually accompanied civilizational collapse.&lt;/p&gt;
+&lt;p&gt;With this background in place, the book moves on to explain the operation of Bitcoin in a functional and intuitive way. Bitcoin is a decentralized, distributed piece of software that converts electricity and processing power into indisputably accurate records, thus allowing its users to utilize the Internet to perform the traditional functions of money without having to rely on, or trust, any authorities or infrastructure in the physical world. Bitcoin is thus best understood as the first successfully implemented form of digital cash and digital hard money. With an automated and perfectly predictable monetary policy, and the ability to perform final settlement of large sums across the world in a matter of minutes, Bitcoin’s real competitive edge might just be as a store of value and network for the final settlement of large payments―a digital form of gold with a built-in settlement infrastructure.&lt;/p&gt;
+&lt;p&gt;Ammous’ firm grasp of the technological possibilities as well as the historical realities of monetary evolution provides for a fascinating exploration of the ramifications of voluntary free market money. As it challenges the most sacred of government monopolies, Bitcoin shifts the pendulum of sovereignty away from governments in favor of individuals, offering us the tantalizing possibility of a world where money is fully extricated from politics and unrestrained by borders.&lt;/p&gt;
+&lt;p&gt;The final chapter of the book explores some of the most common questions surrounding Bitcoin: Is Bitcoin mining a waste of energy? Is Bitcoin for criminals? Who controls Bitcoin, and can they change it if they please? How can Bitcoin be killed? And what to make of all the thousands of Bitcoin knockoffs, and the many supposed applications of Bitcoin’s ‘block chain technology’? &lt;em&gt;The Bitcoin Standard&lt;/em&gt; is the essential resource for a clear understanding of the rise of the Internet’s decentralized, apolitical, free-market alternative to national central banks.&lt;/p&gt;
+&lt;h3&gt;Review&lt;/h3&gt;
+&lt;p&gt;“Bitcoin has no owner, no authority that can decide on its fate. It is owned by the crowd, its users. And it now has a track record of several years, enough for it to be an animal in its own right. Its mere existence is an insurance policy that will remind governments that the last object the establishment could control, namely, the currency, is no longer their monopoly. This gives us, the crowd, an insurance policy against an Orwellian future.”&lt;br&gt;&lt;strong&gt;—From the foreword by Nassim Nicholas Taleb&lt;/strong&gt; &lt;/p&gt;
+&lt;p&gt;"I have spent my entire career studying works about monetary theory, the gold standard, comparative monetary systems, central banks, and proposals for monetary and financial reform. I would rate a tiny fraction of the books I have read about any one of these topics as excellent. Dr. Ammous' book, &lt;em&gt;The Bitcoin Standard&lt;/em&gt; , contains an excellent treatment of all these topics in addition to one of the few enlightened and enlightening accounts of Bitcoin that I have come across. It is essential reading for anyone interested in learning the role Bitcoin could play in a future regime of free and sound money."&lt;br&gt;&lt;strong&gt;—Joseph Salerno, Academic Vice President, Mises Institute&lt;/strong&gt; &lt;/p&gt;
+&lt;p&gt;"This book blew my mind; it is a work of genius. It put together the technical, economic, motivational and related issues around Bitcoin better than anything I've seen. The best compliment I can give this book is that I read it and I decided to buy $425m of bitcoin. It was the most impactful on our way of thinking in Microstrategy and it made us want to invert our balance sheet to base it on a bitcoin standard."&lt;br&gt;&lt;strong&gt;—Michael Saylor, cofounder, chairman, and CEO of Microstrategy&lt;/strong&gt; &lt;/p&gt;
+&lt;p&gt;" &lt;em&gt;The Bitcoin Standard&lt;/em&gt; is an incredible book."&lt;br&gt;&lt;strong&gt;—Russel Okung, NFL Super Bowl winner&lt;/strong&gt; &lt;/p&gt;
+&lt;p&gt;"Dr. Saifedean Ammous gave us the definitive book on digital money with &lt;em&gt;The Bitcoin Standard&lt;/em&gt; , a must-read for anyone interested in monetary tech and worried about ruinous fiat regimes. Now his online academy gives students access to the man himself, an opportunity to learn economics as it should be taught: at market prices, online, with no wasted time or material. Ammous is a brilliant and concise teacher of Austrian school economics, and I cannot recommend his courses highly enough."&lt;br&gt;&lt;strong&gt;—Jeff Deist, President, Mises Institute&lt;/strong&gt; &lt;/p&gt;
+&lt;p&gt;"Hoy les recomiendo &lt;em&gt;EL Patròn Bitcoin&lt;/em&gt; , este libro es el mejor y más importante para entender Bitcoin."&lt;br&gt;&lt;strong&gt;—Ricardo Salinas Pliego, Founder and Chairman of Grupo Salinas&lt;/strong&gt; &lt;/p&gt;
+&lt;p&gt;" &lt;em&gt;The Bitcoin Standard&lt;/em&gt; is a great book. A really good book. It helps you understand why bitcoin is so special and so real."&lt;br&gt;&lt;strong&gt;—Kiril Sokoloff, Chairman and founder, 13D Global Strategy &amp;amp; Research&lt;/strong&gt;&lt;/p&gt;
+&lt;h3&gt;From the Inside Flap&lt;/h3&gt;
+&lt;p&gt;When a pseudonymous programmer introduced "a new electronic cash system that's fully peer-to-peer, with no trusted third party" to a small online mailing list in 2008, very few paid attention. Ten years later, and against all odds, this upstart autonomous decentralized software offers an unstoppable and globally- accessible hard money alternative to modern central banks. &lt;em&gt;The Bitcoin Standard&lt;/em&gt; analyzes the historical context to the rise of Bitcoin, the economic properties that have allowed it to grow quickly, and its likely economic, political, and social implications.&lt;/p&gt;
+&lt;p&gt;While Bitcoin is a new invention of the digital age, the problem it purports to solve is as old as human society itself: transferring value across time and space. Ammous takes the reader on an engaging journey through the history of technologies performing the functions of money, from primitive systems of trading limestones and seashells, to metals, coins, the gold standard, and modern government debt. Exploring what gave these technologies their monetary role, and how most lost it, provides the reader with a good idea of what makes for sound money, and sets the stage for an economic discussion of its consequences for individual and societal future-orientation, capital accumulation, trade, peace, culture, and art. Compellingly, Ammous shows that it is no coincidence that the loftiest achievements of humanity have come in societies enjoying the benefits of sound monetary regimes, nor is it coincidental that monetary collapse has usually accompanied civilizational collapse.&lt;/p&gt;
+&lt;p&gt;With this background in place, the book moves on to explain the operation of Bitcoin in a functional and intuitive way. Bitcoin is a decentralized, distributed piece of software that converts electricity and processing power into indisputably accurate records, thus allowing its users to utilize the Internet to perform the traditional functions of money without having to rely on, or trust, any authorities or infrastructure in the physical world. Bitcoin is thus best understood as the first successfully implemented form of digital cash and digital hard money. With an automated and perfectly predictable monetary policy, and the ability to perform final settlement of large sums across the world in a matter of minutes, Bitcoin's real competitive edge might just be as a store of value and network for final settlement of large payments—a digital form of gold with a built-in settlement infrastructure.&lt;/p&gt;
+&lt;p&gt;Ammous' firm grasp of the technological possibilities as well as the historical realities of monetary evolution provides for a fascinating exploration of the ramifications of voluntary free market money. As it challenges the most sacred of government monopolies, Bitcoin shifts the pendulum of sovereignty away from governments in favor of individuals, offering us the tantalizing possibility of a world where money is fully extricated from politics and unrestrained by borders.&lt;/p&gt;
+&lt;p&gt;The final chapter of the book explores some of the most common questions surrounding Bitcoin: Is Bitcoin mining a waste of energy? Is Bitcoin for criminals? Who controls Bitcoin, and can they change it if they please? How can Bitcoin be killed? And what to make of all the thousands of Bitcoin knock-offs, and the many supposed applications of Bitcoin's 'blockchain technology'? &lt;em&gt;The Bitcoin Standard&lt;/em&gt; is the essential resource for a clear understanding of the rise of the Internet's decentralized, apolitical, free-market alternative to national central banks.&lt;/p&gt;
+&lt;h3&gt;From the Back Cover&lt;/h3&gt;
+&lt;p&gt;**THE ESSENTIAL GUIDE TO BITCOIN'S HISTORY, PROPERTIES, USES, AND FUTURE &lt;/p&gt;
+&lt;p&gt;&lt;em&gt;In The Bitcoin Standard&lt;/em&gt; , economist Saifedean Ammous walks readers through the fascinating history of the technologies of money and explores what gave these technologies their monetary role, how they lost it, what that teaches us about the desirable features of money, and how Bitcoin is designed to improve on these technologies. Ammous elucidates the economic, social, cultural, and political benefits of sound money over unsound money to allow for an informed discussion of the potential role Bitcoin could play in the digital economy of the future. Rather than as a currency for criminals or a cheap mass consumer payment network, this book argues Bitcoin is emerging as a decentralized, politically neutral, free-market alternative to national central banks, with potentially enormous implications for individual freedom and prosperity. For anyone looking for a clear understanding of this new digital money, &lt;em&gt;The Bitcoin Standard&lt;/em&gt; is the essential resource.&lt;/p&gt;
+&lt;p&gt;" &lt;em&gt;The Bitcoin Standard&lt;/em&gt; should be required reading for everyone in modern society. It offers a concise and coherent narrative of monetary theory, the history of money, practical economics, and the impact of political policy on business, culture, and the economy. The book contains perhaps one of the best articulations of the virtues of strong money and the dangers of weak currency yet presented in modern literature. &lt;em&gt;The Bitcoing Standard&lt;/em&gt; also masterfully debunks the myths of modern monetary theory and the broken ideas that have dominated the fiat economic school of thought since the early 20th century."&lt;br&gt;&lt;strong&gt;—From the Foreword by Michael Saylor, CEO of Microstrategy&lt;br&gt;&lt;/strong&gt;&lt;br&gt;"I have spent my entire career studying works about monetary theory, the gold standard, comparative monetary systems, central banks, and proposals for monetary and financial reform. I would rate a tiny fraction of the books I have read about any of these topics as excellent. Dr. Ammous' book, &lt;em&gt;The Bitcoin Standard&lt;/em&gt; , contains an excellent treatment of these topics in addtion to one of the few enlightened and enlightening accounts of bitcoin that I have come across. It is essential reading for anyone interested in learning the role bitcoin could play in a future regime of free and sound money."&lt;br&gt;&lt;strong&gt;—Dr. Joseph T. Salerno, Academic Vice President of the Mises Institute &amp;amp; Editor of the &lt;/strong&gt;Quarterly Journal of Austrian Economics&lt;/p&gt;
+&lt;h3&gt;About the Author&lt;/h3&gt;
+&lt;p&gt;&lt;strong&gt;SAIFEDEAN AMMOUS, PHD,&lt;/strong&gt; is an independent economist, author, and educator focused on bitcoin. He teaches courses on bitcoin and economics in the Austrian school tradition on his website saifedean.com.&lt;/p&gt;&lt;/div&gt;</dc:description>
+    <dc:publisher>Wiley</dc:publisher>
+    <dc:subject>General</dc:subject>
+    <dc:subject>Business &amp; Economics</dc:subject>
+    <dc:subject>Banks &amp; Banking</dc:subject>
+    <dc:subject>Bitcoin</dc:subject>
+    <dc:subject>Commerce électronique</dc:subject>
+    <dc:subject>Electronic commerce</dc:subject>
+    <dc:subject>E-Commerce</dc:subject>
+    <dc:subject>Entrepreneurship</dc:subject>
+    <dc:subject>Electronic commerce.</dc:subject>
+    <dc:subject>BUSINESS &amp; ECONOMICS -- Finance</dc:subject>
+    <dc:subject>Bitcoin -- Politique gouvernementale</dc:subject>
+    <dc:subject>Bitcoin -- Government policy</dc:subject>
+    <meta refines="#t1" property="title-type">main</meta>
+    <meta refines="#t1" property="file-as">Bitcoin Standard: The Decentralized Alternative to Central Banking, The</meta>
+    <meta property="dcterms:publisher">John Wiley &amp; Sons, Inc.</meta>
+    <meta refines="#isbn-id" property="identifier-type" scheme="onix:codelist5">15</meta>
+    <meta refines="#src-id" property="identifier-type" scheme="onix:codelist5">15</meta>
+    <meta name="cover" content="cover-image"/>
+    <meta property="dcterms:modified">2018-03-16T07:30:10Z</meta>
+    <meta refines="#id" property="role" scheme="marc:relators">aut</meta>
+    <meta refines="#id" property="file-as">Ammous, Saifedean</meta>
+    <meta property="calibre:user_metadata">{
+  "#amazon": {
+    "#value#": "1119473861",
+    "category_sort": "value",
+    "colnum": 1,
+    "column": "value",
+    "datatype": "composite",
+    "display": {
+      "composite_show_in_comments": false,
+      "composite_sort": "text",
+      "composite_template": "{identifiers:select(amazon)}",
+      "contains_html": false,
+      "description": "",
+      "make_category": false,
+      "use_decorations": false
+    },
+    "is_category": false,
+    "is_csp": false,
+    "is_custom": true,
+    "is_editable": true,
+    "is_multiple": null,
+    "is_multiple2": {},
+    "kind": "field",
+    "label": "amazon",
+    "link_column": "value",
+    "name": "Amazon",
+    "rec_index": 22,
+    "search_terms": [
+      "#amazon"
+    ],
+    "table": "custom_column_1"
+  },
+  "#formats": {
+    "#value#": "EPUB,PDF",
+    "category_sort": "value",
+    "colnum": 3,
+    "column": "value",
+    "datatype": "composite",
+    "display": {
+      "composite_sort": "text",
+      "composite_template": "{:'approximate_formats()'}",
+      "contains_html": false,
+      "description": "",
+      "make_category": false,
+      "use_decorations": 0
+    },
+    "is_category": false,
+    "is_csp": false,
+    "is_custom": true,
+    "is_editable": true,
+    "is_multiple": null,
+    "is_multiple2": {},
+    "kind": "field",
+    "label": "formats",
+    "link_column": "value",
+    "name": "Formats",
+    "rec_index": 24,
+    "search_terms": [
+      "#formats"
+    ],
+    "table": "custom_column_3"
+  },
+  "#google": {
+    "#value#": "Sw5TDwAAQBAJ",
+    "category_sort": "value",
+    "colnum": 4,
+    "column": "value",
+    "datatype": "composite",
+    "display": {
+      "composite_sort": "text",
+      "composite_template": "{identifiers:select(google)}",
+      "contains_html": false,
+      "description": "",
+      "make_category": false,
+      "use_decorations": 0
+    },
+    "is_category": false,
+    "is_csp": false,
+    "is_custom": true,
+    "is_editable": true,
+    "is_multiple": null,
+    "is_multiple2": {},
+    "kind": "field",
+    "label": "google",
+    "link_column": "value",
+    "name": "Google",
+    "rec_index": 25,
+    "search_terms": [
+      "#google"
+    ],
+    "table": "custom_column_4"
+  },
+  "#isbn": {
+    "#value#": "9781119473916",
+    "category_sort": "value",
+    "colnum": 5,
+    "column": "value",
+    "datatype": "composite",
+    "display": {
+      "composite_show_in_comments": false,
+      "composite_sort": "text",
+      "composite_template": "{identifiers:select(isbn)}",
+      "contains_html": false,
+      "description": "",
+      "make_category": false,
+      "use_decorations": false
+    },
+    "is_category": false,
+    "is_csp": false,
+    "is_custom": true,
+    "is_editable": true,
+    "is_multiple": null,
+    "is_multiple2": {},
+    "kind": "field",
+    "label": "isbn",
+    "link_column": "value",
+    "name": "ISBN",
+    "rec_index": 26,
+    "search_terms": [
+      "#isbn"
+    ],
+    "table": "custom_column_5"
+  },
+  "#oclc": {
+    "#value#": "1029605302",
+    "category_sort": "value",
+    "colnum": 8,
+    "column": "value",
+    "datatype": "composite",
+    "display": {
+      "composite_sort": "text",
+      "composite_template": "{identifiers:select(oclc)}",
+      "contains_html": false,
+      "description": "",
+      "make_category": true,
+      "use_decorations": 0
+    },
+    "is_category": false,
+    "is_csp": false,
+    "is_custom": true,
+    "is_editable": true,
+    "is_multiple": null,
+    "is_multiple2": {},
+    "kind": "field",
+    "label": "oclc",
+    "link_column": "value",
+    "name": "OCLC",
+    "rec_index": 29,
+    "search_terms": [
+      "#oclc"
+    ],
+    "table": "custom_column_8"
+  },
+  "#pubyear": {
+    "#value#": "2018",
+    "category_sort": "value",
+    "colnum": 9,
+    "column": "value",
+    "datatype": "composite",
+    "display": {
+      "composite_sort": "date",
+      "composite_template": "{pubdate:format_date(yyyy)}",
+      "contains_html": false,
+      "description": "year published",
+      "make_category": false,
+      "use_decorations": 0
+    },
+    "is_category": false,
+    "is_csp": false,
+    "is_custom": true,
+    "is_editable": true,
+    "is_multiple": null,
+    "is_multiple2": {},
+    "kind": "field",
+    "label": "pubyear",
+    "link_column": "value",
+    "name": "Year",
+    "rec_index": 30,
+    "search_terms": [
+      "#pubyear"
+    ],
+    "table": "custom_column_9"
+  },
+  "#words": {
+    "#extra#": null,
+    "#value#": 105938,
+    "category_sort": "value",
+    "colnum": 10,
+    "column": "value",
+    "datatype": "int",
+    "display": {
+      "description": "",
+      "number_format": "{:,}"
+    },
+    "is_category": false,
+    "is_csp": false,
+    "is_custom": true,
+    "is_editable": true,
+    "is_multiple": null,
+    "is_multiple2": {},
+    "kind": "field",
+    "label": "words",
+    "link_column": "value",
+    "name": "Words",
+    "rec_index": 31,
+    "search_terms": [
+      "#words"
+    ],
+    "table": "custom_column_10"
+  }
+}</meta>
+  </metadata>
+  <manifest>
+    <item id="Acover" href="cover.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Anavigation" href="navigation.xhtml" properties="nav" media-type="application/xhtml+xml"/>
+    <item id="Atitle" href="title.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Affirs" href="ffirs.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Affirs1" href="ffirs1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Afbetw01" href="fbetw01.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Afbetw02" href="fbetw02.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Aflast" href="flast.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac01" href="c01.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac02" href="c02.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac03" href="c03.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac04" href="c04.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac05" href="c05.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac06" href="c06.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac07" href="c07.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac08" href="c08.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac09" href="c09.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Ac10" href="c10.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Aback" href="back.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Abref" href="bref.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Aboth01" href="both01.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Aboth02" href="both02.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Abindex" href="bindex.xhtml" media-type="application/xhtml+xml"/>
+    <item id="Aeula" href="eula.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="Aindex.css" href="index.css" media-type="text/css"/>
+    <item id="Awileytemplate_v5.3.css" href="WileyTemplate_v5.3.css" media-type="text/css"/>
+    <item id="Ac03f001" href="images/c03f001.jpg" media-type="image/jpeg"/>
+    <item id="Ac03f002" href="images/c03f002.jpg" media-type="image/jpeg"/>
+    <item id="Ac03f003" href="images/c03f003.jpg" media-type="image/jpeg"/>
+    <item id="Ac03f004" href="images/c03f004.jpg" media-type="image/jpeg"/>
+    <item id="Ac04f001" href="images/c04f001.jpg" media-type="image/jpeg"/>
+    <item id="Ac04f002" href="images/c04f002.jpg" media-type="image/jpeg"/>
+    <item id="Ac04f003" href="images/c04f003.jpg" media-type="image/jpeg"/>
+    <item id="Ac05f001" href="images/c05f001.jpg" media-type="image/jpeg"/>
+    <item id="Ac05f002" href="images/c05f002.jpg" media-type="image/jpeg"/>
+    <item id="Ac05f003" href="images/c05f003.jpg" media-type="image/jpeg"/>
+    <item id="Ac05f004" href="images/c05f004.jpg" media-type="image/jpeg"/>
+    <item id="Ac05f005" href="images/c05f005.jpg" media-type="image/jpeg"/>
+    <item id="Ac06f001" href="images/c06f001.jpg" media-type="image/jpeg"/>
+    <item id="Ac08f001" href="images/c08f001.jpg" media-type="image/jpeg"/>
+    <item id="Ac08f002" href="images/c08f002.jpg" media-type="image/jpeg"/>
+    <item id="Ac08f003" href="images/c08f003.jpg" media-type="image/jpeg"/>
+    <item id="Ac08f004" href="images/c08f004.jpg" media-type="image/jpeg"/>
+    <item id="Ac08f005" href="images/c08f005.jpg" media-type="image/jpeg"/>
+    <item id="Ac08f006" href="images/c08f006.jpg" media-type="image/jpeg"/>
+    <item id="Ac09f001" href="images/c09f001.jpg" media-type="image/jpeg"/>
+    <item id="Ac09f002" href="images/c09f002.jpg" media-type="image/jpeg"/>
+    <item id="Ac10f001" href="images/c10f001.jpg" media-type="image/jpeg"/>
+    <item id="cover-image" href="images/Cover.jpg" media-type="image/jpeg" properties="cover-image"/>
+    <item id="Alogo" href="images/logo.jpg" media-type="image/jpeg"/>
+    <item id="js-kobo.js" href="../js/kobo.js" media-type="application/javascript"/>
+  </manifest>
+  <spine toc="ncx">
+    <itemref idref="Acover" linear="no"/>
+    <itemref idref="Anavigation" linear="no"/>
+    <itemref idref="Atitle" linear="no"/>
+    <itemref idref="Affirs" linear="no"/>
+    <itemref idref="Affirs1" linear="no"/>
+    <itemref idref="Afbetw01" linear="no"/>
+    <itemref idref="Afbetw02" linear="yes"/>
+    <itemref idref="Aflast" linear="yes"/>
+    <itemref idref="Ac01" linear="yes"/>
+    <itemref idref="Ac02" linear="yes"/>
+    <itemref idref="Ac03" linear="yes"/>
+    <itemref idref="Ac04" linear="yes"/>
+    <itemref idref="Ac05" linear="yes"/>
+    <itemref idref="Ac06" linear="yes"/>
+    <itemref idref="Ac07" linear="yes"/>
+    <itemref idref="Ac08" linear="yes"/>
+    <itemref idref="Ac09" linear="yes"/>
+    <itemref idref="Ac10" linear="yes"/>
+    <itemref idref="Aback" linear="yes"/>
+    <itemref idref="Abref" linear="yes"/>
+    <itemref idref="Aboth01" linear="yes"/>
+    <itemref idref="Aboth02" linear="yes"/>
+    <itemref idref="Abindex" linear="yes"/>
+    <itemref idref="Aeula" linear="yes"/>
+  </spine>
+  <guide>
+    <reference type="cover" title="Cover" href="cover.xhtml"/>
+    <reference type="toc" title="Table of Contents" href="navigation.xhtml"/>
+  </guide>
+</package>

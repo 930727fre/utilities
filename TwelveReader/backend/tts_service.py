@@ -15,7 +15,7 @@ import numpy as np
 import soundfile as sf
 import torch
 
-from database import DATA_DIR
+from storage import DATA_DIR
 
 MAX_RETRIES = 3
 

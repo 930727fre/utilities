@@ -1,6 +1,6 @@
 # TwelveReader
 
-> Web-based EPUB audiobook reader. Upload EPUB → backend parses paragraphs → on-demand TTS via Kokoro-82M → frontend renders EPUB with synchronized highlight, auto-scroll, and click-to-seek playback.
+> Web-based EPUB audiobook reader. Upload EPUB → converted to markdown → on-demand TTS via Kokoro-82M → frontend renders with synchronized highlight, auto-scroll, and click-to-seek playback.
 
 ---
 
@@ -8,80 +8,91 @@
 
 | Item | Detail |
 |------|--------|
-| Repo | `TwelveReader` |
-| Deployment | Docker Compose, home PC with NVIDIA GPU |
+| Deployment | Docker Compose, home PC with NVIDIA GPU (RTX 3060 12GB) |
 | Users | Single user, no auth |
-| Language | English (MVP) |
+| Language | English |
 
 ---
 
 ## Stack
 
 ### Frontend
-- **React** (Vite dev server)
-- **Manual EPUB renderer** — fetches spine items via `/api/books/{id}/item/{path}`, rewrites asset paths, injects `data-paragraph-id` by positional matching
+- **React** (Vite, served via `vite preview`)
+- **@tanstack/react-virtual** — windowed rendering (~20–30 DOM nodes regardless of book length)
+- **react-markdown** + **remark-gfm** — per-paragraph MD rendering with tables, bold/italic/headings
+- **BACKEND_URL** env var consumed by vite.config.js at server runtime to configure the `/api`, `/cache`, `/audio`, `/health` proxy
 
 ### Backend
 - **Python + FastAPI**
-- **SQLite** — book metadata, paragraphs, bookmarks
-- **Kokoro-82M** (`hexgrad/Kokoro-82M`) — TTS model, NVIDIA RTX 3060 GPU
-- **ebooklib + BeautifulSoup** — EPUB parsing
+- **bookshelf.json** — book metadata + bookmarks
+- **html2text** — EPUB HTML → rough markdown (fast, deterministic)
+- **Ollama (qwen2.5:14b, temperature=0)** — markdown linter pass: fixes syntax errors, malformed tables, HTML artifacts. Runs per 3-paragraph chunk. Falls back to raw html2text output on error.
+- **Kokoro-82M** (`hexgrad/Kokoro-82M`) — TTS, NVIDIA GPU
 
-### Deployment
-- **Docker Compose** — frontend + backend containers, backend with GPU passthrough
-- **nvidia-container-toolkit** — required on host
+### Services
+- **twelvereader-backend** — FastAPI, GPU, on `default` + `my_network`
+- **twelvereader-frontend** — React/Vite, on `default` + `my_network`
+- **ollama** — separate compose in `ollama/`, on `my_network`, GPU
+
+---
+
+## EPUB Conversion Pipeline
+
+```
+EPUB HTML
+  └─ html2text ──► rough markdown
+                      └─ Ollama (qwen2.5:14b, T=0, 3 paragraphs/chunk)
+                            ├─ success ──► clean markdown
+                            └─ error   ──► rough markdown (html2text output)
+```
+
+- EPUB assets (images) extracted to `book_dir` and served via `/api/books/{id}/assets/`
+- Image paths in markdown rewritten to `/api/books/{id}/assets/{path}`
+- Conversion progress streamed to `/data/conversion.log` (host: `TwelveReader/data/conversion.log`)
+
+### Open concerns
+- **Ollama table fix quality** — `qwen2.5:14b` at `temperature=0` with "markdown linter" prompt. Works on short chapters (foreword, prologue). Larger chapters still under test — may still go off-script despite small chunk size. If so, **Gemini fallback** (html2text → Gemini) is the next step.
+- **Malformed colspan tables** — `html2text` can't represent HTML `colspan` in GFM. Results in mismatched column counts. Ollama pass may or may not fix these. Gemini handles them correctly.
+- **Table splitting** — `split_paragraphs` splits on `\n\n`. Tables without blank lines between rows stay intact. Tables with blank lines between rows will be split into non-renderable fragments.
 
 ---
 
 ## Core Features
 
 ### 1. EPUB Reader
-- Manual rendering: spine items fetched from backend, rendered with `dangerouslySetInnerHTML`
-- Asset paths (`href`, `src`) rewritten to `/api/books/{id}/item/{path}`
-- Prev / next navigation via `spineIndex` state
-- Auto-navigates to the spine item containing the current playing paragraph
+- Upload EPUB → backend extracts chapters from OPF manifest → html2text + Ollama linter → saved as `{book_id}.md`
+- Frontend fetches full MD, splits on `\n\n`, renders with TanStack Virtual + ReactMarkdown
 
 ### 2. Paragraph-level Synchronized Playback
-- Current paragraph highlighted with yellow background
-- Auto-scrolls to current paragraph (`scrollIntoView`)
-- Player auto-advances through all paragraphs continuously
+- Current paragraph highlighted in yellow
+- Auto-scrolls to current paragraph
+- Player auto-advances continuously through entire book
 
 ### 3. Click-to-seek
-- Click any paragraph → immediately jumps and plays from that paragraph
+- Click any paragraph → immediately jumps and plays from that position
 - Clears TTS cache and rebuilds sliding window from new position
 
 ### 4. Bookmark (Resume)
-- Saves last played `paragraph_id` per book
+- Saves last played paragraph index per book
 - On reopen: scrolls to bookmark position, does not auto-play
 
 ### 5. Continuous Playback
 - Paragraph ends → automatically loads and plays next
-- Auto-navigates spine items as needed
-- Reaches last paragraph → stops, state returns to IDLE
+- Reaches last paragraph → stops, returns to IDLE
 
 ---
 
-## Paragraph Parsing
+## Paragraph Identity
 
-Parsed tags: `<p>`, `<h1>`, `<h2>`, `<h3>`, `<li>`
-
-### Paragraph ID
+Paragraphs are derived at runtime by splitting the book's markdown on `\n\n`. Identity is index-based:
 
 ```python
-def make_paragraph_id(book_id, spine_href, tag, text, para_index):
-    raw = f"{book_id}|{spine_href}|{tag}|{text[:100]}|{para_index}"
+def paragraph_id(book_id, index, text):
+    raw = f"{book_id}|{index}|{text[:100]}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 ```
 
-| Field | Description |
-|-------|-------------|
-| `book_id` | Book UUID |
-| `spine_href` | EPUB spine item href |
-| `tag` | Element tag name |
-| `text[:100]` | First 100 chars of paragraph text |
-| `para_index` | Position within spine item |
-
-Frontend and backend use identical traversal order (`querySelectorAll` / BeautifulSoup `find_all`) for positional matching — no hash recomputation needed in the browser.
+Used only as a server-side cache key for WAV files. Frontend tracks paragraphs by array index.
 
 ---
 
@@ -90,7 +101,7 @@ Frontend and backend use identical traversal order (`querySelectorAll` / Beautif
 | Item | Detail |
 |------|--------|
 | Model | `hexgrad/Kokoro-82M` |
-| Hardware | NVIDIA RTX 3060 |
+| Hardware | NVIDIA RTX 3060 12GB |
 | Unit | 1 paragraph = 1 WAV file |
 | Format | WAV (via soundfile) |
 | Voice | `af_heart` (fixed) |
@@ -104,23 +115,23 @@ Frontend and backend use identical traversal order (`querySelectorAll` / Beautif
 ```
 
 - When paragraph N starts, N+1 and N+2 are prefetched in the background
-- When paragraph N starts, N-2 is evicted from disk (keeps at most 4 files per book)
-- Entire cache cleared on seek (click-to-seek rebuilds from new position)
-- Entire cache cleared on book deletion
+- When paragraph N starts, N-2 is evicted from disk (max ~4 files per book at a time)
+- Entire cache cleared on seek
 
 ---
 
 ## Book Upload Flow
 
 ```
-UPLOADING → PARSING → READY
-                    ↘ FAILED
+POST /api/books → PARSING → READY
+                           ↘ FAILED
 ```
 
-1. Upload EPUB → saved to `/data/books/{book_id}/book.epub`
-2. Background task parses paragraphs → writes to SQLite
-3. Status set to `READY` — no TTS pre-generation needed
-4. Frontend polls every 2s until `READY`
+1. EPUB saved to `/data/{book_id}/{book_id}.epub`
+2. EPUB contents extracted to `/data/{book_id}/` (images served as assets)
+3. Background task: html2text → Ollama linter per 3-paragraph chunk → write `{book_id}.md`
+4. Status set to `READY`
+5. Frontend polls every 2s until `READY`
 
 ---
 
@@ -128,41 +139,14 @@ UPLOADING → PARSING → READY
 
 ```
 /data/
-  books/{book_id}/book.epub
-  cache/{book_id}/{paragraph_id}.wav
-  static/tts_failed.wav               ← fallback audio, generated on first startup
-```
-
----
-
-## SQLite Schema
-
-```sql
-CREATE TABLE books (
-    id          TEXT PRIMARY KEY,
-    title       TEXT,
-    author      TEXT,
-    epub_path   TEXT NOT NULL,
-    status      TEXT NOT NULL,   -- PARSING | READY | FAILED
-    created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE paragraphs (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    book_id         TEXT NOT NULL REFERENCES books(id),
-    paragraph_id    TEXT NOT NULL,
-    spine_href      TEXT NOT NULL,
-    para_index      INTEGER NOT NULL,
-    tag             TEXT NOT NULL,
-    text            TEXT NOT NULL,
-    UNIQUE(book_id, paragraph_id)
-);
-
-CREATE TABLE bookmarks (
-    book_id         TEXT PRIMARY KEY REFERENCES books(id),
-    paragraph_id    TEXT NOT NULL,
-    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
-);
+  bookshelf.json                        ← all book metadata + bookmarks
+  conversion.log                        ← live conversion progress (overwritten per upload)
+  {book_id}/
+    {book_id}.epub                      ← original EPUB
+    {book_id}.md                        ← converted markdown
+    OEBPS/ (or similar)                 ← extracted EPUB assets (images etc.)
+  cache/{book_id}/{paragraph_id}.wav   ← TTS cache
+  static/tts_failed.wav                ← fallback audio, generated on startup
 ```
 
 ---
@@ -171,27 +155,26 @@ CREATE TABLE bookmarks (
 
 ### Books
 ```
-POST   /api/books                        Upload EPUB, parse paragraphs
-GET    /api/books                        List all books
-GET    /api/books/{id}                   Book detail + status
-DELETE /api/books/{id}                   Delete book, paragraphs, cache
-GET    /api/books/{id}/spine             Ordered spine items [{index, href}]
-GET    /api/books/{id}/paragraphs        All paragraphs in order
-GET    /api/books/{id}/item/{path}       Raw EPUB asset (HTML, CSS, images)
-GET    /api/books/{id}/epub              Raw EPUB file
+POST   /api/books                      Upload EPUB
+GET    /api/books                      List all books
+GET    /api/books/{id}                 Book detail + status
+GET    /api/books/{id}/md              Full book markdown
+GET    /api/books/{id}/assets/{path}   Serve extracted EPUB asset (images etc.)
+GET    /api/books/{id}/epub            Raw EPUB file
+DELETE /api/books/{id}                 Delete book + cache
 ```
 
 ### TTS
 ```
-POST   /api/tts/{book_id}/{paragraph_id}   Generate or return cached WAV
-DELETE /api/tts/{book_id}/{paragraph_id}   Evict single cached WAV
-DELETE /api/tts/{book_id}/cache            Clear entire book TTS cache
+POST   /api/tts/{book_id}/{index}  Generate or return cached WAV for paragraph index
+DELETE /api/tts/{book_id}/{index}  Evict single cached WAV
+DELETE /api/tts/{book_id}/cache    Clear entire book TTS cache
 ```
 
 ### Bookmarks
 ```
-GET  /api/books/{id}/bookmark   Get last position
-PUT  /api/books/{id}/bookmark   Save position { paragraph_id }
+GET  /api/books/{id}/bookmark   Get last position { paragraph_index }
+PUT  /api/books/{id}/bookmark   Save position { paragraph_index }
 ```
 
 ---
@@ -200,7 +183,7 @@ PUT  /api/books/{id}/bookmark   Save position { paragraph_id }
 
 ```
 IDLE
-  │ click play / click paragraph
+  │ play / click paragraph
   ▼
 GENERATING  (POST /api/tts/...)
   │ success              │ failure (after 3 retries)
@@ -208,8 +191,8 @@ GENERATING  (POST /api/tts/...)
 PLAYING            PLAYING_FALLBACK
   │ audio ended          │ fallback ends
   ▼                      ▼
-next paragraph →  GENERATING     IDLE
-  │ no next paragraph
+next → GENERATING        IDLE
+  │ no next
   ▼
 IDLE
 ```
@@ -218,63 +201,39 @@ IDLE
 
 ## Docker Compose
 
-```yaml
-services:
-  backend:
-    build: ./backend
-    volumes:
-      - ./data:/data
-      - ./data/static:/app/static
-    ports:
-      - "8000:8000"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+### Ollama (start first, pull model once)
+```bash
+cd ollama
+docker compose up -d
+docker exec -it ollama ollama pull qwen2.5:14b
+```
 
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:3000"
-    environment:
-      - BACKEND_URL=http://backend:8000
+### TwelveReader
+```powershell
+cd TwelveReader
+docker compose up -d --build
 ```
 
 ### Host requirements
 ```bash
-# Install nvidia-container-toolkit and configure Docker runtime
 sudo apt install nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```
 
 ### Reset data
-```bash
-# Wipe DB, books, and TTS cache (bind mounts — not affected by down -v)
+```powershell
 docker compose down
 rm -rf ./data
-mkdir ./data/books    # first run only — data/ is git-ignored
-mkdir ./data/cache
-mkdir ./data/static
-docker compose up --build
+docker compose up -d --build
 ```
-
-### Cross-device access (Tailscale etc.)
-All API calls use relative URLs and are proxied through the Vite dev server on port 3000. Only port 3000 needs to be reachable from other devices — port 8000 is internal.
-
-**Do not set `VITE_API_URL`** — if set, the browser resolves it as an absolute URL (e.g. `http://localhost:8000`) which points to the client device's own localhost, breaking all API calls from non-host devices.
 
 ---
 
-## Non-Goals (MVP)
+## Non-Goals
 
 - Offline / PWA
 - User login / auth
-- Sentence or word-level alignment
-- PDF support
 - Multi-language TTS
 - Speed / voice controls
-- Pre-transcoding entire book
+- PDF support

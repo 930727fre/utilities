@@ -1,6 +1,7 @@
 FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
 
-RUN conda install -c conda-forge libsndfile -y
+RUN conda install -c conda-forge libsndfile -y && \
+    apt-get update && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

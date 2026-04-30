@@ -13,6 +13,9 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    networks:
+      - default
+      - my_network
 
   twelvereader-frontend:
     build: ./frontend

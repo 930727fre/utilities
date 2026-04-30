@@ -29,8 +29,7 @@ export default function Player({ state, currentIndex, paragraphs, onPlay, onPaus
         <div style={styles.stateLabel}>{STATE_LABEL[state] || state}</div>
         {current && (
           <div style={styles.preview}>
-            <span style={styles.chap}>{current.spine_href?.split('/').pop()?.replace('.xhtml', '').replace('.html', '') ?? 'Chapter'} · </span>
-            {current.text.slice(0, 80)}{current.text.length > 80 ? '…' : ''}
+            {current.slice(0, 80)}{current.length > 80 ? '…' : ''}
           </div>
         )}
       </div>
@@ -48,8 +47,8 @@ const styles = {
     position: 'fixed', bottom: 0, left: 0, right: 0,
     background: '#2c2c2e', borderTop: '1px solid #3a3a3c',
     display: 'flex', alignItems: 'center', gap: 14,
-    padding: '12px 20px', zIndex: 100,
-    boxShadow: '0 -2px 12px rgba(0,0,0,0.4)',
+    padding: '12px 20px', paddingBottom: 'max(12px, env(safe-area-inset-bottom))',
+    zIndex: 100, boxShadow: '0 -2px 12px rgba(0,0,0,0.4)',
   },
   btn: {
     fontSize: 22, background: 'none', border: 'none',
@@ -60,6 +59,5 @@ const styles = {
   info: { flex: 1, minWidth: 0 },
   stateLabel: { fontSize: 11, color: '#636366', fontWeight: 600, textTransform: 'uppercase', marginBottom: 2 },
   preview: { fontSize: 13, color: '#aeaeb2', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  chap: { color: '#636366' },
   progress: { fontSize: 12, color: '#636366', flexShrink: 0 },
 }

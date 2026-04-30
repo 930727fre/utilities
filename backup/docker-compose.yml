@@ -6,10 +6,10 @@ services:
       - ../flashcard/data:/flashcard
       - ../TwelveReader/data:/twelvereader
     environment:
-      - RCLONE_CONFIG_R2_TYPE
-      - RCLONE_CONFIG_R2_PROVIDER
-      - RCLONE_CONFIG_R2_ACCESS_KEY_ID
-      - RCLONE_CONFIG_R2_SECRET_ACCESS_KEY
-      - RCLONE_CONFIG_R2_ENDPOINT
-      - R2_BUCKET
+      - RCLONE_CONFIG_R2_TYPE=${RCLONE_CONFIG_R2_TYPE:?RCLONE_CONFIG_R2_TYPE env var is required}
+      - RCLONE_CONFIG_R2_PROVIDER=${RCLONE_CONFIG_R2_PROVIDER:?RCLONE_CONFIG_R2_PROVIDER env var is required}
+      - RCLONE_CONFIG_R2_ACCESS_KEY_ID=${RCLONE_CONFIG_R2_ACCESS_KEY_ID:?RCLONE_CONFIG_R2_ACCESS_KEY_ID env var is required}
+      - RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=${RCLONE_CONFIG_R2_SECRET_ACCESS_KEY:?RCLONE_CONFIG_R2_SECRET_ACCESS_KEY env var is required}
+      - RCLONE_CONFIG_R2_ENDPOINT=${RCLONE_CONFIG_R2_ENDPOINT:?RCLONE_CONFIG_R2_ENDPOINT env var is required}
+      - R2_BUCKET=${R2_BUCKET:?R2_BUCKET env var is required}
     restart: unless-stopped

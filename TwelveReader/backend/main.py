@@ -4,13 +4,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from database import init_db, DATA_DIR, STATIC_DIR
-from routers import books, paragraphs, bookmarks, tts
+import storage
+from routers import books, bookmarks, tts
+
+DATA_DIR = storage.DATA_DIR
+STATIC_DIR = os.environ.get("STATIC_DIR", "/data/static")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(STATIC_DIR, exist_ok=True)
+    os.makedirs(os.path.join(DATA_DIR, "cache"), exist_ok=True)
     _ensure_fallback_audio()
     yield
 
@@ -25,29 +30,20 @@ app.add_middleware(
 )
 
 app.include_router(books.router)
-app.include_router(paragraphs.router)
 app.include_router(bookmarks.router)
 app.include_router(tts.router)
 
-# Serve generated audio files
-cache_dir = os.path.join(DATA_DIR, "cache")
-os.makedirs(cache_dir, exist_ok=True)
-app.mount("/cache", StaticFiles(directory=cache_dir), name="cache")
-
-# Serve fallback audio
-os.makedirs(STATIC_DIR, exist_ok=True)
+app.mount("/cache", StaticFiles(directory=os.path.join(DATA_DIR, "cache")), name="cache")
 app.mount("/audio", StaticFiles(directory=STATIC_DIR), name="audio")
 
 
 def _ensure_fallback_audio():
-    """Generate tts_failed.wav using Kokoro on first startup if missing."""
     out_path = os.path.join(STATIC_DIR, "tts_failed.wav")
     if os.path.exists(out_path):
         return
     try:
         import numpy as np
         import soundfile as sf
-        import torch
         from kokoro import KPipeline
 
         pipeline = KPipeline(lang_code="a")

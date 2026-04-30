@@ -1,9 +1,8 @@
 fastapi==0.111.0
+html2text==2024.2.26
+httpx==0.27.2
 uvicorn[standard]==0.29.0
 python-multipart==0.0.9
-ebooklib==0.18
-beautifulsoup4==4.12.3
-lxml==5.2.2
 aiofiles==23.2.1
 kokoro==0.9.4
 soundfile==0.12.1

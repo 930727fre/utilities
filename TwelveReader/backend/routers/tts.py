@@ -1,23 +1,11 @@
 import os
 from fastapi import APIRouter, HTTPException
-from database import get_conn
+
+import storage
+from epub_parser import load_md, split_paragraphs, paragraph_id as make_paragraph_id
 from tts_service import tts_service, _cache_path
 
 router = APIRouter(prefix="/api/tts", tags=["tts"])
-
-
-@router.post("/{book_id}/{paragraph_id}")
-async def generate_tts(book_id: str, paragraph_id: str):
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT text FROM paragraphs WHERE book_id=? AND paragraph_id=?",
-            (book_id, paragraph_id),
-        ).fetchone()
-    if not row:
-        raise HTTPException(404, "Paragraph not found")
-
-    url, cached = await tts_service.get_or_generate(book_id, paragraph_id, row["text"])
-    return {"url": url, "cached": cached}
 
 
 @router.delete("/{book_id}/cache")
@@ -26,9 +14,44 @@ async def clear_cache(book_id: str):
     return {"cleared": book_id}
 
 
-@router.delete("/{book_id}/{paragraph_id}")
-async def evict_cached(book_id: str, paragraph_id: str):
-    path = _cache_path(book_id, paragraph_id)
-    if os.path.exists(path):
-        os.remove(path)
-    return {"evicted": paragraph_id}
+@router.post("/{book_id}/{index}")
+async def generate_tts(book_id: str, index: int):
+    book = storage.get_book(book_id)
+    if not book:
+        raise HTTPException(404, "Book not found")
+
+    book_dir = os.path.join(storage.DATA_DIR, book_id)
+    try:
+        md = load_md(book_dir, book_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "Book content not found")
+
+    paragraphs = split_paragraphs(md)
+    if index < 0 or index >= len(paragraphs):
+        raise HTTPException(404, "Paragraph index out of range")
+
+    text = paragraphs[index]
+    pid = make_paragraph_id(book_id, index, text)
+    url, cached = await tts_service.get_or_generate(book_id, pid, text)
+    return {"url": url, "cached": cached}
+
+
+@router.delete("/{book_id}/{index}")
+async def evict_cached(book_id: str, index: int):
+    book = storage.get_book(book_id)
+    if not book:
+        raise HTTPException(404, "Book not found")
+
+    book_dir = os.path.join(storage.DATA_DIR, book_id)
+    try:
+        md = load_md(book_dir, book_id)
+    except FileNotFoundError:
+        return {"evicted": index}
+
+    paragraphs = split_paragraphs(md)
+    if 0 <= index < len(paragraphs):
+        pid = make_paragraph_id(book_id, index, paragraphs[index])
+        path = _cache_path(book_id, pid)
+        if os.path.exists(path):
+            os.remove(path)
+    return {"evicted": index}

@@ -1,34 +1,29 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from database import get_conn
+
+import storage
 
 router = APIRouter(prefix="/api/books", tags=["bookmarks"])
 
 
 class BookmarkBody(BaseModel):
-    paragraph_id: str
+    paragraph_index: int
 
 
 @router.get("/{book_id}/bookmark")
 def get_bookmark(book_id: str):
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT paragraph_id, updated_at FROM bookmarks WHERE book_id=?", (book_id,)
-        ).fetchone()
-    if not row:
-        raise HTTPException(404, "No bookmark")
-    return dict(row)
+    book = storage.get_book(book_id)
+    if not book:
+        raise HTTPException(404, "Book not found")
+    idx = book.get("bookmark_paragraph_index")
+    if idx is None:
+        return None
+    return {"paragraph_index": idx}
 
 
 @router.put("/{book_id}/bookmark")
 def put_bookmark(book_id: str, body: BookmarkBody):
-    with get_conn() as conn:
-        conn.execute(
-            """INSERT INTO bookmarks (book_id, paragraph_id, updated_at)
-               VALUES (?, ?, CURRENT_TIMESTAMP)
-               ON CONFLICT(book_id) DO UPDATE SET
-                 paragraph_id=excluded.paragraph_id,
-                 updated_at=CURRENT_TIMESTAMP""",
-            (book_id, body.paragraph_id),
-        )
-    return {"book_id": book_id, "paragraph_id": body.paragraph_id}
+    if not storage.get_book(book_id):
+        raise HTTPException(404, "Book not found")
+    storage.update_book(book_id, bookmark_paragraph_index=body.paragraph_index)
+    return {"ok": True}
