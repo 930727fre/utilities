@@ -1,27 +1,30 @@
 import hashlib
-import html2text as _html2text
 import json
 import os
 import posixpath
 import re
-import time
 import zipfile
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup, NavigableString
 
 OLLAMA_URL = os.environ.get('TWELVEREADER_OLLAMA_URL', 'http://ollama:11434')
 DATA_DIR = os.environ.get('DATA_DIR', '/data')
 OLLAMA_MODEL = 'qwen2.5:14b'
-PARAGRAPHS_PER_CHUNK = 3
 
-_h2t = _html2text.HTML2Text()
-_h2t.ignore_links = False
-_h2t.body_width = 0
-_h2t.ignore_images = False
+_CONTENT_BLOCKS = {
+    'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'table', 'ul', 'ol', 'blockquote', 'pre', 'figure', 'img',
+}
+_CONTAINERS = {
+    'div', 'section', 'article', 'main', 'aside',
+    'header', 'footer', 'body', 'html',
+}
 
 _SYSTEM_PROMPT = (
-    "You are a markdown linter. Fix syntax errors and output the corrected markdown. "
-    "If there are no errors, output the markdown as-is. "
-    "Do not add, remove, or rewrite any content."
+    "Convert this HTML element to markdown. "
+    "Preserve all images using markdown syntax: ![alt attribute](images/filename) where filename is only the filename from the src attribute. "
+    "Remove superscript footnote markers (e.g. ¹, ², [1], [2]) but preserve all other text content. "
+    "Output only the markdown, nothing else."
 )
 
 
@@ -64,98 +67,139 @@ def _parse_epub(epub_path: str) -> tuple[str, str, list[tuple[str, str]]]:
         return title, author, chapters
 
 
-def _fix_image_paths(md: str, chapter_zip_path: str, book_id: str) -> str:
-    chapter_dir = posixpath.dirname(chapter_zip_path)
-
-    def replace(match):
-        alt, src = match.group(1), match.group(2)
-        if src.startswith(('http://', 'https://', 'data:', '/')):
-            return match.group(0)
-        resolved = posixpath.normpath(posixpath.join(chapter_dir, src)).lstrip('/')
-        return f'![{alt}](/api/books/{book_id}/assets/{resolved})'
-
-    return re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', replace, md)
+_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp'}
 
 
-def _chunk_md(md: str) -> list[str]:
-    blocks = [b for b in md.split('\n\n') if b.strip()]
-    chunks = []
-    for i in range(0, len(blocks), PARAGRAPHS_PER_CHUNK):
-        chunks.append('\n\n'.join(blocks[i:i + PARAGRAPHS_PER_CHUNK]))
-    return chunks
+def _extract_images(epub_path: str, book_dir: str) -> None:
+    images_dir = os.path.join(book_dir, 'images')
+    os.makedirs(images_dir, exist_ok=True)
+    with zipfile.ZipFile(epub_path) as z:
+        for name in z.namelist():
+            if os.path.splitext(name)[1].lower() in _IMAGE_EXTENSIONS:
+                filename = os.path.basename(name)
+                with z.open(name) as src:
+                    with open(os.path.join(images_dir, filename), 'wb') as dst:
+                        dst.write(src.read())
 
 
-def _ollama_clean_chunk(md: str, label: str, log) -> str:
+def _extract_blocks(html: str) -> list[str]:
+    """Extract block-level elements from XHTML in document order."""
+    soup = BeautifulSoup(html, 'html.parser')
+    body = soup.find('body') or soup
+    blocks = []
+
+    def traverse(el):
+        if isinstance(el, NavigableString):
+            return
+        if el.name in _CONTENT_BLOCKS:
+            blocks.append(str(el))
+        elif el.name in _CONTAINERS:
+            for child in el.children:
+                traverse(child)
+
+    traverse(body)
+    return blocks
+
+
+
+def _ollama_call(messages: list, stream: bool, log=None, temperature: float = 0.2) -> str:
     import httpx
     payload = {
         'model': OLLAMA_MODEL,
-        'messages': [
-            {'role': 'system', 'content': _SYSTEM_PROMPT},
-            {'role': 'user', 'content': md},
-        ],
-        'stream': True,
-        'options': {'num_ctx': 16384, 'temperature': 0},
+        'messages': messages,
+        'stream': stream,
+        'options': {'num_ctx': 16384, 'temperature': temperature},
     }
-    parts = []
-    # msg = f'[epub] {label} → Ollama...\n'
-    # log.write(msg); log.flush()
-    with httpx.stream('POST', f'{OLLAMA_URL}/v1/chat/completions',
-                      json=payload, timeout=300.0) as r:
+    if stream:
+        parts = []
+        with httpx.stream('POST', f'{OLLAMA_URL}/v1/chat/completions',
+                          json=payload, timeout=300.0) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line.startswith('data: ') or line == 'data: [DONE]':
+                    continue
+                token = json.loads(line[6:])['choices'][0]['delta'].get('content', '')
+                if token:
+                    parts.append(token)
+                    if log:
+                        log.write(token); log.flush()
+        return ''.join(parts).strip()
+    else:
+        r = httpx.post(f'{OLLAMA_URL}/v1/chat/completions',
+                       json=payload, timeout=60.0)
         r.raise_for_status()
-        for line in r.iter_lines():
-            if not line.startswith('data: ') or line == 'data: [DONE]':
-                continue
-            token = json.loads(line[6:])['choices'][0]['delta'].get('content', '')
-            if token:
-                parts.append(token)
-                log.write(token); log.flush()
-    result = ''.join(parts)
-    # msg = f'[epub] {label} done ({len(result):,} chars)\n'
-    # log.write(msg); log.flush()
+        return r.json()['choices'][0]['message']['content'].strip()
+
+
+def _is_pure_markdown(md: str) -> bool:
+    examples = (
+        "Is the following text vanilla markdown? Answer only True or False.\n\n"
+        "<<<\n# Foreword\n>>>\nTrue\n\n"
+        "<<<\n**by Nassim Nicholas Taleb**\n>>>\nTrue\n\n"
+        "<<<\nLet us follow the logic of things from the beginning.\n>>>\nTrue\n\n"
+        "<<<\n<p>Hello world</p>\n>>>\nFalse\n\n"
+        "<<<\nSee Figure 3.right\n>>>\nFalse\n\n"
+        f"<<<\n{md}\n>>>\n"
+    )
+    answer = _ollama_call([
+        {'role': 'system', 'content': 'You are a markdown validator. Answer only True or False.'},
+        {'role': 'user', 'content': examples},
+    ], stream=False, temperature=0)
+    return answer.lower().startswith('true')
+
+
+def _ollama_convert_block(html_block: str, log) -> str:
+    messages = [
+        {'role': 'system', 'content': _SYSTEM_PROMPT},
+        {'role': 'user', 'content': html_block},
+    ]
+    result = _ollama_call(messages, stream=True, log=log)
+    log.write('\n\n'); log.flush()
     return result
 
 
-def _clean_md(md: str, label: str, log) -> str:
-    chunks = _chunk_md(md)
-    if len(chunks) > 1:
-        pass
-        # msg = f'[epub] {label}: {len(md):,} chars → {len(chunks)} chunks\n'
-        # log.write(msg); log.flush()
-    results = []
-    for i, chunk in enumerate(chunks):
-        chunk_label = f'{label} chunk {i+1}/{len(chunks)}' if len(chunks) > 1 else label
-        try:
-            results.append(_ollama_clean_chunk(chunk, chunk_label, log))
-        except Exception as exc:
-            # msg = f'[epub] {chunk_label} Ollama failed, using html2text output: {exc}\n'
-            # log.write(msg); log.flush()
-            results.append(chunk)
-    return '\n\n'.join(results)
+def _fallback_convert(html_block: str) -> str:
+    soup = BeautifulSoup(html_block, 'html.parser')
+    tag = soup.find()
+    if not tag:
+        return ''
+    if tag.name in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+        level = int(tag.name[1])
+        return '#' * level + ' ' + tag.get_text().strip()
+    if tag.name in ('img', 'figure'):
+        img = tag.find('img') if tag.name == 'figure' else tag
+        if img:
+            src = posixpath.basename(img.get('src', ''))
+            alt = img.get('alt', '') or (tag.find('figcaption') and tag.find('figcaption').get_text().strip()) or ''
+            return f'![{alt}](images/{src})'
+        return ''
+    return tag.get_text(separator=' ').strip()
 
 
 def convert_epub(book_id: str, epub_path: str, book_dir: str) -> dict:
-    with zipfile.ZipFile(epub_path) as z:
-        z.extractall(book_dir)
-
+    _extract_images(epub_path, book_dir)
     title, author, chapters = _parse_epub(epub_path)
     total = len(chapters)
     log_path = os.path.join(DATA_DIR, 'conversion.log')
-
-    parts = []
-    with open(log_path, 'w', encoding='utf-8') as log:
-        for i, (html, chapter_path) in enumerate(chapters):
-            label = f'ch {i+1}/{total}'
-            rough = _h2t.handle(html).strip()
-            # msg = f'[epub] {label}: {len(html):,} bytes → {len(rough):,} chars (html2text)\n'
-            # log.write(msg); log.flush()
-            md = _clean_md(rough, label, log)
-            md = _fix_image_paths(md, chapter_path, book_id)
-            parts.append(md)
-
-    full_md = '\n\n'.join(parts)
     md_path = os.path.join(book_dir, f'{book_id}.md')
-    with open(md_path, 'w', encoding='utf-8') as f:
-        f.write(full_md)
+
+    with open(log_path, 'w', encoding='utf-8') as log, \
+         open(md_path, 'w', encoding='utf-8') as md_file:
+        for i, (html, _) in enumerate(chapters):
+            blocks = _extract_blocks(html)
+            chapter_parts = []
+            for block in blocks:
+                try:
+                    md_block = _ollama_convert_block(block, log)
+                except Exception:
+                    md_block = _fallback_convert(block)
+                if md_block:
+                    chapter_parts.append(md_block)
+            chapter_md = '\n\n'.join(chapter_parts)
+            if i > 0:
+                md_file.write('\n\n')
+            md_file.write(chapter_md)
+            md_file.flush()
 
     return {'meta': {'title': title, 'author': author}}
 

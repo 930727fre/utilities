@@ -94,7 +94,18 @@ export default function Reader({ book, onClose, backendDown }) {
                   }}
                   onClick={() => handleClick(vItem.index)}
                 >
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{paragraphs[vItem.index]}</ReactMarkdown>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      img: ({src, alt}) => (
+                        <img
+                          src={src?.startsWith('images/') ? `/api/books/${book.id}/assets/${src}` : src}
+                          alt={alt}
+                          style={{maxWidth:'100%', height:'auto', borderRadius:4}}
+                        />
+                      )
+                    }}
+                  >{paragraphs[vItem.index]}</ReactMarkdown>
                 </div>
               </div>
             ))}

@@ -25,8 +25,8 @@
 ### Backend
 - **Python + FastAPI**
 - **bookshelf.json** — book metadata + bookmarks
-- **html2text** — EPUB HTML → rough markdown (fast, deterministic)
-- **Ollama (qwen2.5:14b, temperature=0)** — markdown linter pass: fixes syntax errors, malformed tables, HTML artifacts. Runs per 3-paragraph chunk. Falls back to raw html2text output on error.
+- **BeautifulSoup4** — parses XHTML, extracts block-level elements (`<p>`, `<h1>`–`<h6>`, `<table>`, `<ul>`, `<ol>`, `<blockquote>`, `<pre>`, `<figure>`, `<img>`) in document order
+- **Ollama (qwen2.5:14b, temperature=0.2)** — converts each HTML block to markdown. Output validated with a few-shot pure-markdown check (temperature=0). Up to 10 retries per block. Falls back to BeautifulSoup `get_text()` on exception.
 - **Kokoro-82M** (`hexgrad/Kokoro-82M`) — TTS, NVIDIA GPU
 
 ### Services
@@ -39,28 +39,40 @@
 ## EPUB Conversion Pipeline
 
 ```
-EPUB HTML
-  └─ html2text ──► rough markdown
-                      └─ Ollama (qwen2.5:14b, T=0, 3 paragraphs/chunk)
-                            ├─ success ──► clean markdown
-                            └─ error   ──► rough markdown (html2text output)
+EPUB
+ ├─ extract images ──► book_dir/images/*.jpg  (Python, no LLM)
+ └─ per chapter XHTML:
+      BeautifulSoup → [<p>, <h2>, <table>, <ul>, ...]
+            │
+            └─ per block:
+                  Ollama (T=0.2): HTML block → markdown
+                        │
+                        └─ validate: pure markdown? (few-shot, T=0)
+                              ├─ True  ──► accept
+                              └─ False ──► retry up to 10x
+                                          └─ fallback: BeautifulSoup get_text()
+            │
+      '\n\n'.join → chapter markdown
+            │
+      flush to {book_id}.md  (live, per chapter)
 ```
 
-- EPUB assets (images) extracted to `book_dir` and served via `/api/books/{id}/assets/`
-- Image paths in markdown rewritten to `/api/books/{id}/assets/{path}`
-- Conversion progress streamed to `/data/conversion.log` (host: `TwelveReader/data/conversion.log`)
+- Images extracted to flat `book_dir/images/` — markdown stores `images/filename.jpg`
+- Frontend img renderer prepends `/api/books/{id}/assets/` at render time
+- Footnote superscript markers stripped by Ollama prompt
+- Conversion progress written to `/data/conversion.log`
 
 ### Open concerns
-- **Ollama table fix quality** — `qwen2.5:14b` at `temperature=0` with "markdown linter" prompt. Works on short chapters (foreword, prologue). Larger chapters still under test — may still go off-script despite small chunk size. If so, **Gemini fallback** (html2text → Gemini) is the next step.
-- **Malformed colspan tables** — `html2text` can't represent HTML `colspan` in GFM. Results in mismatched column counts. Ollama pass may or may not fix these. Gemini handles them correctly.
-- **Table splitting** — `split_paragraphs` splits on `\n\n`. Tables without blank lines between rows stay intact. Tables with blank lines between rows will be split into non-renderable fragments.
+- **Validator disabled** — `_is_pure_markdown` is implemented (few-shot LLM check) but temporarily bypassed. The validator kept rejecting valid markdown (e.g. `# Foreword`, plain prose). Needs better prompt or a Python-based approach before re-enabling.
+- **Colspan tables** — HTML `colspan` has no GFM equivalent. Ollama handles it better than html2text did but output quality varies.
+- **No retry on bad output** — without the validator, Ollama's occasional artifacts (CSS class names, commentary) pass through uncorrected.
 
 ---
 
 ## Core Features
 
 ### 1. EPUB Reader
-- Upload EPUB → backend extracts chapters from OPF manifest → html2text + Ollama linter → saved as `{book_id}.md`
+- Upload EPUB → backend extracts block elements via BeautifulSoup → Ollama converts each block → saved as `{book_id}.md`
 - Frontend fetches full MD, splits on `\n\n`, renders with TanStack Virtual + ReactMarkdown
 
 ### 2. Paragraph-level Synchronized Playback
@@ -128,8 +140,8 @@ POST /api/books → PARSING → READY
 ```
 
 1. EPUB saved to `/data/{book_id}/{book_id}.epub`
-2. EPUB contents extracted to `/data/{book_id}/` (images served as assets)
-3. Background task: html2text → Ollama linter per 3-paragraph chunk → write `{book_id}.md`
+2. Images extracted to `/data/{book_id}/images/`
+3. Background task: BeautifulSoup → Ollama per block → write `{book_id}.md` (flushed per chapter)
 4. Status set to `READY`
 5. Frontend polls every 2s until `READY`
 
@@ -144,7 +156,7 @@ POST /api/books → PARSING → READY
   {book_id}/
     {book_id}.epub                      ← original EPUB
     {book_id}.md                        ← converted markdown
-    OEBPS/ (or similar)                 ← extracted EPUB assets (images etc.)
+    images/                             ← extracted images (flat, served via assets endpoint)
   cache/{book_id}/{paragraph_id}.wav   ← TTS cache
   static/tts_failed.wav                ← fallback audio, generated on startup
 ```

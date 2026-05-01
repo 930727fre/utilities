@@ -347,19 +347,7 @@
     <itemref idref="Ac01" linear="yes"/>
     <itemref idref="Ac02" linear="yes"/>
     <itemref idref="Ac03" linear="yes"/>
-    <itemref idref="Ac04" linear="yes"/>
-    <itemref idref="Ac05" linear="yes"/>
-    <itemref idref="Ac06" linear="yes"/>
-    <itemref idref="Ac07" linear="yes"/>
-    <itemref idref="Ac08" linear="yes"/>
-    <itemref idref="Ac09" linear="yes"/>
-    <itemref idref="Ac10" linear="yes"/>
-    <itemref idref="Aback" linear="yes"/>
-    <itemref idref="Abref" linear="yes"/>
-    <itemref idref="Aboth01" linear="yes"/>
-    <itemref idref="Aboth02" linear="yes"/>
-    <itemref idref="Abindex" linear="yes"/>
-    <itemref idref="Aeula" linear="yes"/>
+
   </spine>
   <guide>
     <reference type="cover" title="Cover" href="cover.xhtml"/>
