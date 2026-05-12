@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
 import BookList from './components/BookList'
-import Reader from './components/Reader'
 
 function useBackendHealth() {
   const [down, setDown] = useState(false)
@@ -24,15 +23,11 @@ function useBackendHealth() {
 }
 
 export default function App() {
-  const [openBook, setOpenBook] = useState(null)
   const backendDown = useBackendHealth()
 
   return (
     <>
-      {openBook
-        ? <Reader book={openBook} onClose={() => setOpenBook(null)} backendDown={backendDown} />
-        : <BookList onOpen={setOpenBook} />
-      }
+      <BookList />
       {backendDown && (
         <div style={styles.snackbar}>
           ⚠ Backend is not accessible — retrying…

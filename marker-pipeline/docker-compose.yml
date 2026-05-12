@@ -1,13 +1,12 @@
 services:
-  twelvereader-backend:
+  marker-pipeline-backend:
     build: ./backend
-    container_name: twelvereader-backend
+    container_name: marker-pipeline-backend
     volumes:
       - ./data:/data
       - model-cache:/root/.cache
     environment:
       - DATA_DIR=/data
-      - AUDIO_DIR=/app/audio
     deploy:
       resources:
         reservations:
@@ -19,13 +18,13 @@ services:
       - default
       - my_network
 
-  twelvereader-frontend:
+  marker-pipeline-frontend:
     build: ./frontend
-    container_name: twelvereader-frontend
+    container_name: marker-pipeline-frontend
     environment:
-      - BACKEND_URL=http://twelvereader-backend:8000
+      - BACKEND_URL=http://marker-pipeline-backend:8000
     depends_on:
-      - twelvereader-backend
+      - marker-pipeline-backend
     networks:
       - default
       - my_network

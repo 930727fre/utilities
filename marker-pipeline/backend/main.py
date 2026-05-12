@@ -2,23 +2,20 @@ import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 import storage
-from routers import books, bookmarks, tts
+from routers import books
 
 DATA_DIR = storage.DATA_DIR
-AUDIO_DIR = os.environ.get("AUDIO_DIR", "/app/audio")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(os.path.join(DATA_DIR, "cache"), exist_ok=True)
     yield
 
 
-app = FastAPI(title="TwelveReader API", lifespan=lifespan)
+app = FastAPI(title="marker-pipeline", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,11 +25,6 @@ app.add_middleware(
 )
 
 app.include_router(books.router)
-app.include_router(bookmarks.router)
-app.include_router(tts.router)
-
-app.mount("/cache", StaticFiles(directory=os.path.join(DATA_DIR, "cache")), name="cache")
-app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
 
 @app.get("/health")

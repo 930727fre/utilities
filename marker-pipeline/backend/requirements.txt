@@ -1,11 +1,6 @@
 fastapi==0.111.0
-beautifulsoup4==4.12.3
-markdown==3.6
 uvicorn[standard]==0.29.0
 python-multipart==0.0.9
 aiofiles==23.2.1
 pypdf==4.3.1
-kokoro==0.9.4
-soundfile==0.12.1
-numpy==1.26.4
 marker-pdf[full]

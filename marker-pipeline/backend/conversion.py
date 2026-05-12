@@ -3,33 +3,31 @@ Document conversion pipeline — marker subprocess + per-book folder normalizati
 
 `marker_single` writes `<basename>/<basename>.md`, `<basename>_meta.json`, and
 extracted image files inside `--output_dir`. This module shells out to it once
-per upload, then flattens marker's subdirectory into the book folder so the
-layout matches marker-test's output (everything flat, no `images/` subdir):
+per upload, then flattens marker's subdirectory into the book folder:
 
     /data/{book_id}/
         {book_id}.{epub|pdf}    ← original source
-        {book_id}.md            ← converted markdown
+        {book_id}.md            ← converted markdown (anchor scaffolding stripped)
         meta.json               ← marker's metadata (TOC, page stats)
         _page_*.png / .jpg ...  ← extracted figures, flat alongside the md
 
-Markdown image references stay exactly as marker emitted them
-(`![alt](_page_3_Figure_1.png)`); the frontend resolves any relative reference
-through `/api/books/{id}/assets/<filename>`.
+The whole folder is later zipped on demand and returned to the user.
 """
 
-import hashlib
-import os
 import re
 import shutil
 import subprocess
+import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-from bs4 import BeautifulSoup
-from markdown import markdown as md_to_html
-
 ACCEPTED_EXTENSIONS = {".epub", ".pdf"}
+
+# Process-wide lock so concurrent uploads serialize the GPU-bound marker call
+# instead of fighting for VRAM. The flattening logic after marker exits is fast
+# and runs unlocked.
+_marker_lock = threading.Lock()
 
 
 def _extract_pdf_meta(path: Path) -> dict:
@@ -65,11 +63,7 @@ def _extract_epub_meta(path: Path) -> dict:
 
 
 def extract_meta(src_path: str) -> dict:
-    """Read title/author from a PDF or EPUB. Returns {'title': str, 'author': str}.
-
-    Empty strings on missing metadata or extraction failure — caller should fall
-    back to the upload filename's stem.
-    """
+    """Read title/author from a PDF or EPUB. Empty strings on missing metadata."""
     p = Path(src_path)
     suffix = p.suffix.lower()
     if suffix == ".pdf":
@@ -79,20 +73,35 @@ def extract_meta(src_path: str) -> dict:
     return {"title": "", "author": ""}
 
 
+_EMPTY_ANCHOR_SPAN_RE = re.compile(r'<span id="[^"]*"></span>')
+
+
+def _scrub_anchors(md: str) -> str:
+    """Drop marker's empty page-anchor spans.
+
+    `<span id="page-N"></span>` is a navigation target for HTML-aware viewers;
+    in plain-text or HTML-naive viewers it renders as literal escaped tags,
+    which is just noise. Footnote-reference links like `[1](#page-N)` are kept
+    so readers can still see where footnote markers sit in the body.
+    """
+    return _EMPTY_ANCHOR_SPAN_RE.sub("", md)
+
+
 def convert_file(book_id: str, src_path: str, book_dir: str) -> None:
     """Run marker on `src_path`, flatten output under `book_dir`."""
     src = Path(src_path)
     book_dir_p = Path(book_dir)
     book_dir_p.mkdir(parents=True, exist_ok=True)
 
-    subprocess.run(
-        [
-            "marker_single", str(src),
-            "--output_dir", str(book_dir_p),
-            "--output_format", "markdown",
-        ],
-        check=True,
-    )
+    with _marker_lock:
+        subprocess.run(
+            [
+                "marker_single", str(src),
+                "--output_dir", str(book_dir_p),
+                "--output_format", "markdown",
+            ],
+            check=True,
+        )
 
     marker_subdir = book_dir_p / src.stem
     if not marker_subdir.is_dir():
@@ -116,60 +125,3 @@ def convert_file(book_id: str, src_path: str, book_dir: str) -> None:
             shutil.move(str(item), str(book_dir_p / item.name))
 
     shutil.rmtree(marker_subdir)
-
-
-_EMPTY_ANCHOR_SPAN_RE = re.compile(r'<span id="[^"]*"></span>')
-_FRAGMENT_LINK_RE = re.compile(r'\[[^\]]{1,2}\]\(#[^)]+\)')
-
-
-def _scrub_anchors(md: str) -> str:
-    """Drop marker's cross-reference scaffolding.
-
-    Empty `<span id="...">` anchors and `[text](#fragment)` links exist so that
-    HTML-aware renderers can jump between footnote refs and their targets.
-    Our paragraph-virtualized reader does neither, and react-markdown without
-    rehype-raw renders the spans as literal escaped text. Stripping at
-    conversion time keeps both the visible and spoken text clean.
-    """
-    md = _EMPTY_ANCHOR_SPAN_RE.sub("", md)
-    md = _FRAGMENT_LINK_RE.sub("", md)
-    return md
-
-
-def load_md(book_dir: str, book_id: str) -> str:
-    md_path = os.path.join(book_dir, f"{book_id}.md")
-    with open(md_path, encoding="utf-8") as f:
-        return f.read()
-
-
-_IMAGE_ONLY_RE = re.compile(r"^\s*!\[[^\]]*\]\([^)]+\)\s*$", re.DOTALL)
-_TABLE_SEP_RE = re.compile(r"^\s*\|[\s:|-]+\|\s*$", re.M)
-
-
-def _classify(text: str) -> str:
-    if _IMAGE_ONLY_RE.match(text):
-        return "image"
-    if text.lstrip().startswith("|") and _TABLE_SEP_RE.search(text):
-        return "table"
-    return "text"
-
-
-def split_paragraphs(md: str) -> list[dict]:
-    """Split markdown into typed paragraphs.
-
-    Each entry: {"kind": "text"|"image"|"table", "text": str}.
-    Indices match a naive `md.split(/\\n{2,}/).filter(Boolean)` on the frontend.
-    """
-    blocks = [b.strip() for b in re.split(r"\n{2,}", md) if b.strip()]
-    return [{"kind": _classify(b), "text": b} for b in blocks]
-
-
-def paragraph_id(book_id: str, index: int, text: str) -> str:
-    raw = f"{book_id}|{index}|{text[:100]}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
-
-
-def to_speech_text(md: str) -> str:
-    """Strip markdown formatting so Kokoro doesn't pronounce syntax characters."""
-    html = md_to_html(md, extensions=["tables"])
-    return BeautifulSoup(html, "html.parser").get_text(separator=" ", strip=True)

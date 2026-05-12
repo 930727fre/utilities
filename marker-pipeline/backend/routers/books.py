@@ -1,15 +1,18 @@
+import io
 import os
+import re
 import secrets
 import shutil
 import asyncio
+import zipfile
 from pathlib import Path
 from datetime import datetime, timezone
 import aiofiles
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse, Response as RawResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 import storage
-from conversion import ACCEPTED_EXTENSIONS, convert_file, extract_meta, load_md
+from conversion import ACCEPTED_EXTENSIONS, convert_file, extract_meta
 
 router = APIRouter(prefix="/api/books", tags=["books"])
 
@@ -27,6 +30,11 @@ def _book_dir(book_id: str) -> str:
 
 def _source_path(book_id: str, ext: str) -> str:
     return os.path.join(_book_dir(book_id), f"{book_id}{ext}")
+
+
+def _safe_filename(name: str) -> str:
+    name = re.sub(r'[\\/<>:"|?*\x00-\x1f]', "_", name).strip().strip(".")
+    return name or "book"
 
 
 @router.post("")
@@ -57,7 +65,6 @@ async def upload_book(background_tasks: BackgroundTasks, file: UploadFile = File
         "author": author,
         "status": "PARSING",
         "source_format": ext,
-        "bookmark_paragraph_index": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
     })
 
@@ -88,27 +95,33 @@ def get_book(book_id: str):
     return book
 
 
-@router.get("/{book_id}/md")
-def get_md(book_id: str):
+@router.get("/{book_id}/zip")
+def download_zip(book_id: str):
     book = storage.get_book(book_id)
     if not book:
         raise HTTPException(404, "Book not found")
-    try:
-        md = load_md(_book_dir(book_id), book_id)
-    except FileNotFoundError:
-        raise HTTPException(404, "MD file not found")
-    return RawResponse(content=md, media_type="text/markdown; charset=utf-8")
+    if book.get("status") != "READY":
+        raise HTTPException(409, f"Book is {book.get('status')}; not ready to download")
 
-
-@router.get("/{book_id}/assets/{path:path}")
-def get_asset(book_id: str, path: str):
     book_dir = _book_dir(book_id)
-    file_path = os.path.realpath(os.path.join(book_dir, path))
-    if not file_path.startswith(os.path.realpath(book_dir)):
-        raise HTTPException(403, "Access denied")
-    if not os.path.exists(file_path):
-        raise HTTPException(404, "Asset not found")
-    return FileResponse(file_path)
+    if not os.path.isdir(book_dir):
+        raise HTTPException(404, "Book content not found")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for root, _, files in os.walk(book_dir):
+            for name in files:
+                full = os.path.join(root, name)
+                arc = os.path.relpath(full, book_dir)
+                zf.write(full, arcname=arc)
+    buf.seek(0)
+
+    download_name = _safe_filename(book.get("title", "") or book_id) + ".zip"
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{download_name}"'},
+    )
 
 
 @router.get("/{book_id}/source")
@@ -128,7 +141,7 @@ def delete_book(book_id: str):
     if not storage.get_book(book_id):
         raise HTTPException(404, "Book not found")
     storage.remove_book(book_id)
-    for d in (_book_dir(book_id), os.path.join(DATA_DIR, "cache", book_id)):
-        if os.path.exists(d):
-            shutil.rmtree(d)
+    book_dir = _book_dir(book_id)
+    if os.path.exists(book_dir):
+        shutil.rmtree(book_dir)
     return {"deleted": book_id}
