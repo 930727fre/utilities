@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="/manifest.json" crossorigin="use-credentials">
+  <link rel="apple-touch-icon" href="https://emojicdn.elk.sh/%E2%8C%A8%EF%B8%8F?style=apple">
+  <link rel="icon" href="https://emojicdn.elk.sh/%E2%8C%A8%EF%B8%8F">
+  <link rel="stylesheet" href="/style.css">
+  <title>keyboard</title>
+</head>
+<body>
+  <header class="topbar">
+    <span class="title">keyboard</span>
+    <button id="settings-btn" class="icon-btn" aria-label="設定" type="button">⚙</button>
+  </header>
+
+  <main class="stage">
+    <section class="result-card">
+      <div class="result-cols">
+        <div class="result-col">
+          <span class="col-label">修正</span>
+          <div id="result-final" class="result-text"></div>
+          <button id="copy-final-btn" class="col-copy-btn hidden" type="button">複製</button>
+        </div>
+        <div class="result-col">
+          <span class="col-label">原始</span>
+          <div id="result-raw" class="result-text"></div>
+          <button id="copy-raw-btn" class="col-copy-btn hidden" type="button">複製</button>
+        </div>
+      </div>
+      <div class="meta" id="meta"></div>
+    </section>
+
+    <section class="visualizer">
+      <canvas id="waveform" class="waveform"></canvas>
+      <div class="timer" id="timer">0:00.0</div>
+    </section>
+  </main>
+
+  <footer class="recorder">
+    <div class="record-ring">
+      <button id="record-btn" class="record-inner" aria-label="按住說話" type="button"></button>
+    </div>
+    <div class="hint" id="hint">按住說話</div>
+  </footer>
+
+  <aside id="settings-panel" class="settings-panel hidden">
+    <header class="settings-header">
+      <h2>詞彙表</h2>
+      <button id="settings-close" type="button">完成</button>
+    </header>
+    <div id="corrections-list" class="corrections-list"></div>
+    <button id="add-correction" class="add-btn" type="button">+ 新增詞</button>
+    <button id="save-corrections" class="save-btn" type="button">儲存</button>
+  </aside>
+
+  <script src="/app.js"></script>
+</body>
+</html>

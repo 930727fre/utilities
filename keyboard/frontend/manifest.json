@@ -1,0 +1,13 @@
+{
+  "name": "keyboard",
+  "short_name": "keyboard",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "https://emojicdn.elk.sh/%E2%8C%A8%EF%B8%8F", "sizes": "192x192", "type": "image/png" },
+    { "src": "https://emojicdn.elk.sh/%E2%8C%A8%EF%B8%8F", "sizes": "512x512", "type": "image/png" }
+  ]
+}
