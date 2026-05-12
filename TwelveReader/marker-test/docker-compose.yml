@@ -1,0 +1,22 @@
+services:
+  marker-test:
+    build: .
+    container_name: marker-test
+    volumes:
+      - ./input:/input:ro
+      - ./output:/output
+      - marker-models:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: >
+      marker_single /input/test.epub
+      --output_dir /output
+      --output_format markdown
+
+volumes:
+  marker-models:
