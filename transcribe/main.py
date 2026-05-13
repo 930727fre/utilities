@@ -5,19 +5,21 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from storage import read_jobs, get_job, upsert_job, ensure_jobs_file
 from tasks import process_video, scan_inbox
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
-STATIC_DIR = Path("/app/static")
 
 app = FastAPI()
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 ensure_jobs_file()
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True}
 
 
 def _now() -> str:
@@ -39,11 +41,6 @@ def _new_job(job_id: str, url: str) -> dict:
 
 
 # ── Pages ──────────────────────────────────────────────────────────────────
-
-@app.get("/", response_class=HTMLResponse)
-async def dashboard():
-    return (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-
 
 @app.get("/player/{job_id}", response_class=HTMLResponse)
 async def player(job_id: str):

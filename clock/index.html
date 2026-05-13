@@ -6,43 +6,42 @@
   <title>clock</title>
   <link rel="icon" href="https://emojicdn.elk.sh/⏱️">
   <link rel="apple-touch-icon" href="https://emojicdn.elk.sh/⏱️">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    :root {
+      --bg: #1c1c1e;
+      --card: #2c2c2e;
+      --raised: #3a3a3c;
+      --text-1: #e8e3d9;
+      --text-2: #aeaeb2;
+      --text-3: #636366;
+      --honey: #c79968;
+      --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
     body {
       min-height: 100vh;
-      background: #0f0f13;
+      background: var(--bg);
       display: flex;
       align-items: center;
       justify-content: center;
-      font-family: 'Inter', sans-serif;
+      font-family: var(--sans);
       padding: 2rem;
-      transition: background 0.5s ease;
     }
-    body.phase-workout { background: #0a1f14; }
-    body.phase-rest    { background: #0a1428; }
 
     .card {
-      background: #1a1a24;
-      border: 2px solid #2a2a38;
-      border-radius: 28px;
+      background: var(--card);
+      border: 1px solid var(--raised);
+      border-radius: 12px;
       padding: 2.5rem 2rem;
       width: 320px;
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 1.5rem;
-      box-shadow: 0 24px 64px rgba(0,0,0,0.5);
-      transition: border-color 0.5s ease, box-shadow 0.5s ease;
-    }
-    .card.phase-workout {
-      border-color: #4ade80;
-      box-shadow: 0 0 40px rgba(74,222,128,0.15), 0 24px 64px rgba(0,0,0,0.5);
-    }
-    .card.phase-rest {
-      border-color: #60a5fa;
-      box-shadow: 0 0 40px rgba(96,165,250,0.15), 0 24px 64px rgba(0,0,0,0.5);
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
     }
 
     /* ring */
@@ -56,7 +55,7 @@
       position: absolute;
       top: 0; left: 0;
     }
-    .ring-bg { fill: none; stroke: #2a2a38; stroke-width: 10; }
+    .ring-bg { fill: none; stroke: var(--raised); stroke-width: 10; }
     .ring-fg {
       fill: none;
       stroke-width: 10;
@@ -73,39 +72,40 @@
       gap: 6px;
     }
     .time-display {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--mono);
       font-size: 3rem;
       font-weight: 700;
-      color: #e8e8f0;
+      color: var(--text-1);
       letter-spacing: -0.02em;
       transition: color 0.5s;
     }
-    .time-display.phase-workout { color: #4ade80; }
-    .time-display.phase-rest    { color: #60a5fa; }
+    .time-display.phase-workout { color: var(--honey); }
+    .time-display.phase-rest    { color: var(--text-1); }
 
     .sub-label {
+      font-family: var(--mono);
       font-size: 0.7rem;
       font-weight: 600;
       letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: #555;
+      color: var(--text-2);
     }
 
     /* round counter */
     .round-info {
+      font-family: var(--mono);
       font-size: 0.75rem;
       font-weight: 600;
-      color: #444;
+      color: var(--text-3);
       letter-spacing: 0.12em;
       text-transform: uppercase;
+      text-align: center;
     }
     .round-info span {
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--mono);
       font-size: 3rem;
       font-weight: 700;
-      color: #ccc;
+      color: var(--text-1);
       display: block;
-      text-align: center;
       line-height: 1;
       margin-top: 4px;
     }
@@ -118,21 +118,32 @@
     }
     .btn {
       flex: 1;
-      padding: 0.75rem;
+      height: 44px;
       border: none;
-      border-radius: 12px;
-      font-family: 'Inter', sans-serif;
-      font-size: 0.85rem;
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-variant-emoji: text;
+      font-size: 1.4rem;
       font-weight: 600;
       cursor: pointer;
-      letter-spacing: 0.05em;
-      transition: opacity 0.15s, transform 0.1s;
+      transition: opacity 0.15s, transform 0.1s, background 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
     }
     .btn:active { transform: scale(0.96); }
-    .btn-primary { background: #6c63ff; color: #fff; }
+    .btn-primary {
+      background: var(--honey);
+      color: #1c1c1e;
+    }
     .btn-primary:hover { opacity: 0.85; }
-    .btn-secondary { background: #2a2a38; color: #aaa; }
-    .btn-secondary:hover { background: #333345; }
+    .btn-secondary {
+      background: transparent;
+      border: 1px solid var(--raised);
+      color: var(--text-1);
+    }
+    .btn-secondary:hover { background: var(--raised); }
 
     /* iOS-style picker */
     .picker-section {
@@ -149,24 +160,25 @@
       gap: 0.5rem;
     }
     .picker-label {
+      font-family: var(--mono);
       font-size: 0.7rem;
       font-weight: 600;
       letter-spacing: 0.12em;
       text-transform: uppercase;
-      color: #555;
+      color: var(--text-2);
     }
     .picker-wrap {
       position: relative;
       width: 100%;
       flex: 1;
       overflow: hidden;
-      border-radius: 12px;
+      border-radius: 8px;
     }
     .picker-mask-top {
       position: absolute;
       top: 0; left: 0; right: 0;
       height: 40%;
-      background: linear-gradient(to bottom, #1a1a24 20%, transparent);
+      background: linear-gradient(to bottom, var(--card) 20%, transparent);
       z-index: 2;
       pointer-events: none;
     }
@@ -174,7 +186,7 @@
       position: absolute;
       bottom: 0; left: 0; right: 0;
       height: 40%;
-      background: linear-gradient(to top, #1a1a24 20%, transparent);
+      background: linear-gradient(to top, var(--card) 20%, transparent);
       z-index: 2;
       pointer-events: none;
     }
@@ -184,8 +196,8 @@
       transform: translateY(-50%);
       width: 100%;
       height: 44px;
-      border-top: 1px solid #3a3a50;
-      border-bottom: 1px solid #3a3a50;
+      border-top: 1px solid var(--raised);
+      border-bottom: 1px solid var(--raised);
       pointer-events: none;
       z-index: 1;
     }
@@ -203,10 +215,10 @@
       align-items: center;
       justify-content: center;
       scroll-snap-align: center;
-      font-family: 'JetBrains Mono', monospace;
+      font-family: var(--mono);
       font-size: 1.1rem;
       font-weight: 700;
-      color: #e8e8f0;
+      color: var(--text-1);
     }
   </style>
 </head>
@@ -221,7 +233,7 @@
     </svg>
     <div class="ring-center">
       <div class="time-display" id="interval-display">01:00</div>
-      <div class="sub-label" id="interval-sub">ready</div>
+      <div class="sub-label" id="interval-sub">READY</div>
     </div>
   </div>
 
@@ -249,14 +261,16 @@
   <div class="round-info">Round <span id="round-count">1</span></div>
 
   <div class="btn-row">
-    <button class="btn btn-primary" id="interval-start">Start</button>
-    <button class="btn btn-secondary" id="interval-reset">Reset</button>
+    <button class="btn btn-primary" id="interval-start" title="Start" aria-label="Start">▸</button>
+    <button class="btn btn-secondary" id="interval-reset" title="Reset" aria-label="Reset">↻</button>
   </div>
 </div>
 
 <script>
   const CIRC = 2 * Math.PI * 96;
   const ITEM_H = 44;
+  const ICON_PLAY = '▸';
+  const ICON_PAUSE = '‖';
 
   // Values: 5s to 600s in 5s steps
   const VALUES = Array.from({length: 120}, (_, i) => (i + 1) * 5);
@@ -293,7 +307,6 @@
     const display      = document.getElementById('interval-display');
     const sub          = document.getElementById('interval-sub');
     const ring         = document.getElementById('interval-ring');
-    const card         = document.getElementById('card');
     const rndCount     = document.getElementById('round-count');
     const btnStart     = document.getElementById('interval-start');
     const btnReset     = document.getElementById('interval-reset');
@@ -307,6 +320,19 @@
 
     function pad(n) { return String(n).padStart(2,'0'); }
     function fmtSec(s) { return `${pad(Math.floor(s/60))}:${pad(s%60)}`; }
+
+    function setBtnIcon(state) {
+      if (state === 'pause') {
+        btnStart.textContent = ICON_PAUSE;
+        btnStart.title = 'Pause';
+        btnStart.setAttribute('aria-label', 'Pause');
+      } else {
+        btnStart.textContent = ICON_PLAY;
+        const label = phase === 'idle' ? 'Start' : 'Resume';
+        btnStart.title = label;
+        btnStart.setAttribute('aria-label', label);
+      }
+    }
 
     function showPicker() {
       ringSection.style.display = 'none';
@@ -324,19 +350,17 @@
     function applyPhase(p) {
       phase = p;
       const cls = p === 'workout' ? 'phase-workout' : p === 'rest' ? 'phase-rest' : 'phase-idle';
-      card.className   = `card ${cls}`;
-      document.body.className = cls;
       display.className = `time-display ${cls}`;
 
       if (p === 'workout') {
-        ring.style.stroke = '#4ade80';
+        ring.style.stroke = '#c79968';
         sub.textContent = fmtVal(WORKOUT);
       } else if (p === 'rest') {
-        ring.style.stroke = '#60a5fa';
+        ring.style.stroke = '#e8e3d9';
         sub.textContent = fmtVal(REST);
       } else {
-        ring.style.stroke = '#6c63ff';
-        sub.textContent = 'ready';
+        ring.style.stroke = '#3a3a3c';
+        sub.textContent = 'READY';
       }
     }
 
@@ -387,12 +411,12 @@
         running = true;
         startTs = performance.now();
         startRemaining = remaining;
-        btnStart.textContent = 'Pause';
+        setBtnIcon('pause');
         tick();
       } else {
         cancelAnimationFrame(raf);
         running = false;
-        btnStart.textContent = 'Resume';
+        setBtnIcon('start');
       }
     });
 
@@ -400,7 +424,7 @@
       cancelAnimationFrame(raf);
       running = false;
       round = 1;
-      btnStart.textContent = 'Start';
+      setBtnIcon('start');
       rndCount.textContent = 1;
       applyPhase('idle');
       showPicker();
