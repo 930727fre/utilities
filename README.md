@@ -19,6 +19,16 @@ A collection of self-hosted tools, each containerized with Docker.
 2. Remember to register a subdomain in the Cloudflare tunnel dashboard for each new service
 3. Always prefix service names and container names with the service name (e.g. `flashcard-backend`, `flashcard-frontend`). Service names act as DNS hostnames on shared networks — generic names like `frontend` or `backend` will collide across services on `my_network`. Container names should match for clarity in `docker ps`.
 4. (Optional) To prevent iOS Safari from auto-zooming on input/textarea focus, add `maximum-scale=1` to the viewport meta tag: `<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">`
+5. **iOS viewport lock — fix it once at html/body, not per-component.** Safari's address bar collapses/expands as you scroll, which makes `100vh` taller than the actually-visible area. Stacking `100svh`, `calc()` heights, or per-page wrappers to compensate amplifies the bug. The pattern that just works:
+   ```css
+   html, body, #root { height: 100%; }
+   body {
+     margin: 0;
+     overflow: hidden;
+     overscroll-behavior: none;
+   }
+   ```
+   Then page roots fill with `height: 100%` and internal scrolling lives on whichever specific container should scroll (`overflow-y: auto`). **Do not put any viewport unit (`vh`, `svh`, `dvh`) anywhere in the height chain** — the parent already represents "the visible viewport" thanks to the html/body lock. Used in `keyboard/frontend/style.css` and `flashcard/src/index.css`.
 
 ## Design language
 
