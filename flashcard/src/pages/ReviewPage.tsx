@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import {
   Paper, Title, Text, Button, Group, Stack,
-  Progress, ActionIcon, ThemeIcon, SimpleGrid, Box, Badge, Transition
+  Progress, ActionIcon, ThemeIcon, SimpleGrid, Box, Transition
 } from '@mantine/core';
 import PageShell from '../components/PageShell';
-import { IconArrowLeft, IconCheck, IconLamp, IconCopy } from '@tabler/icons-react';
+import { IconCheck, IconLamp, IconCopy } from '@tabler/icons-react';
 import { useNavigate } from 'react-router-dom';
 import { notifications } from '@mantine/notifications';
 import { api } from '../api';
@@ -37,29 +37,30 @@ export default function ReviewPage() {
   });
 
   const [reviewQueue, setReviewQueue] = useState<Card[]>([]);
-  const [totalCount, setTotalCount] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
   const [copied, setCopied] = useState(false);
-  const initialized = useRef(false);
 
   const { data: queueData, isLoading } = useQuery({
     queryKey: ['queue'],
     queryFn: api.getQueue,
-    staleTime: 60_000,
+    staleTime: 0,
     refetchOnWindowFocus: false,
     gcTime: 0,
   });
 
+  // Sync from backend: append any cards not already in the local queue.
+  // Rated cards are removed locally and rescheduled by the backend; they
+  // reappear here once their due time passes (e.g. "Again" → +1m relearning).
   useEffect(() => {
-    if (queueData && !initialized.current) {
-      initialized.current = true;
-      setReviewQueue(queueData.cards);
-      setTotalCount(queueData.cards.length);
-    }
+    if (!queueData) return;
+    setReviewQueue(prev => {
+      const prevIds = new Set(prev.map(c => c.id));
+      const newCards = queueData.cards.filter(c => !prevIds.has(c.id));
+      return newCards.length === 0 ? prev : [...prev, ...newCards];
+    });
   }, [queueData]);
 
   const currentCard = reviewQueue[0];
-  const reviewed = totalCount - reviewQueue.length;
 
   const handleRate = useCallback((rating: number) => {
     if (!currentCard) return;
@@ -125,24 +126,16 @@ export default function ReviewPage() {
   return (
     <PageShell scroll="locked">
       <Stack gap="lg" style={{ flex: 1, minHeight: 0 }}>
-        <Group justify="space-between">
-          <ActionIcon variant="subtle" onClick={() => navigate('/')} size="xl" c="#aeaeb2">
-            <IconArrowLeft size={28} />
-          </ActionIcon>
-          <Box style={{ textAlign: 'right' }}>
-            <Text fw={700} c="#aeaeb2" style={{ fontFamily: MONO, fontSize: 18 }}>
-              <span style={{ color: '#e8e3d9' }}>{reviewed + 1}</span> / {totalCount}
-            </Text>
-          </Box>
-        </Group>
-
-        <Progress
-          value={(reviewed / totalCount) * 100}
-          size="xs"
-          radius="xl"
-          color="gray"
-          styles={{ root: { backgroundColor: '#2c2c2e' } }}
-        />
+        <Text
+          c="#e8e3d9"
+          style={{ cursor: 'pointer', fontFamily: MONO, fontSize: 26, lineHeight: 1, alignSelf: 'flex-start' }}
+          onClick={() => navigate('/')}
+          title="Back"
+          aria-label="Back"
+          role="button"
+        >
+          ←
+        </Text>
 
         <Box
           onClick={!isFlipped ? () => setIsFlipped(true) : undefined}
@@ -174,13 +167,6 @@ export default function ReviewPage() {
               }}
             >
               <Stack align="center" gap={0} p={{ base: 'lg', sm: 40 }} style={{ flex: 1, justifyContent: 'center' }}>
-                <Badge
-                  variant="filled" size="sm" mb={30}
-                  style={{ backgroundColor: '#3a3a3c', color: '#e8e3d9', fontFamily: MONO }}
-                >
-                  {currentCard?.state === 0 ? 'NEW CARD' : 'REVIEW'}
-                </Badge>
-
                 <Title order={1} ta="center" style={{ fontSize: 'clamp(2rem, 8vw, 3.5rem)', color: '#e8e3d9', letterSpacing: '-0.5px', lineHeight: 1.2 }}>
                   {currentCard?.word}
                 </Title>
