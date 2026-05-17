@@ -77,19 +77,7 @@ export default function BatchAddPage() {
   return (
     <PageShell maw={520}>
       <Stack gap="lg">
-        <Group gap="md" align="center">
-          <Text
-            c="#e8e3d9"
-            style={{ cursor: 'pointer', fontFamily: MONO, fontSize: 26, lineHeight: 1 }}
-            onClick={() => navigate('/')}
-            title="Back"
-            aria-label="Back"
-            role="button"
-          >
-            ←
-          </Text>
-          <Title order={2} c="#e8e3d9" style={{ letterSpacing: '-0.5px' }}>Batch Import</Title>
-        </Group>
+        <Title order={2} c="#e8e3d9" style={{ letterSpacing: '-0.5px' }}>Batch Import</Title>
 
         <Textarea
           placeholder={"Apple::蘋果::An apple a day.\nBanana::香蕉::I like bananas."}

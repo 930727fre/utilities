@@ -1,5 +1,4 @@
-import { useEffect } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import {
   Title, Text, Paper, Group, Stack,
   Button, Skeleton, Box, Progress
@@ -16,17 +15,12 @@ const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 
 export default function DashboardPage() {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
-
   const { data: stats } = useQuery({
     queryKey: ['stats'],
     queryFn: api.getStats,
     staleTime: 30_000,
   });
 
-  useEffect(() => {
-    queryClient.prefetchQuery({ queryKey: ['queue'], queryFn: api.getQueue, staleTime: 60_000 });
-  }, [queryClient]);
 
   if (!stats) {
     return (

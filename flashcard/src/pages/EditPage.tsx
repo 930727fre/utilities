@@ -1,18 +1,16 @@
 import { useState } from 'react';
 import {
   TextInput, Stack, Paper, Text, Textarea,
-  Button, Group, Title, Box, ScrollArea
+  Button, Title, Box, ScrollArea
 } from '@mantine/core';
 import PageShell from '../components/PageShell';
 import { notifications } from '@mantine/notifications';
-import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
 import type { Card } from '../types';
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 
 export default function EditPage() {
-  const navigate = useNavigate();
 
   const [query, setQuery] = useState('');
   const [candidates, setCandidates] = useState<Card[]>([]);
@@ -64,19 +62,7 @@ export default function EditPage() {
         .candidate-row:hover { background: #3a3a3c; }
       `}</style>
       <Stack gap="lg">
-        <Group gap="md" align="center">
-          <Text
-            c="#e8e3d9"
-            style={{ cursor: 'pointer', fontFamily: MONO, fontSize: 26, lineHeight: 1 }}
-            onClick={() => navigate('/')}
-            title="Back"
-            aria-label="Back"
-            role="button"
-          >
-            ←
-          </Text>
-          <Title order={2} c="#e8e3d9" style={{ letterSpacing: '-0.5px' }}>Edit</Title>
-        </Group>
+        <Title order={2} c="#e8e3d9" style={{ letterSpacing: '-0.5px' }}>Edit</Title>
 
         {/* Search */}
         <Box style={{ position: 'relative' }}>

@@ -24,6 +24,7 @@ export interface Stats {
 }
 
 export interface Queue {
-  cards: Card[];
+  due: Card[];
+  new: Card[];
   daily_new_count: number;
 }

@@ -1,5 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+import asyncio
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -92,6 +94,19 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/heartbeat")
+async def heartbeat():
+    async def stream():
+        while True:
+            yield "data: ping\n\n"
+            await asyncio.sleep(1)
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/stats")
 def get_stats():
     conn = get_db()
@@ -123,25 +138,22 @@ def get_queue():
 
     now = datetime.now(timezone.utc).isoformat()
     due_cards = conn.execute(
-        "SELECT * FROM cards WHERE state != 0 AND due != '' AND due <= ? ORDER BY due ASC",
+        "SELECT * FROM cards WHERE state != 0 AND due != '' AND due <= ? ORDER BY RANDOM()",
         (now,)
     ).fetchall()
 
-    if due_cards:
-        cards = [dict(r) for r in due_cards]
-    else:
-        daily_new_count = int(s.get('daily_new_count', 0) or 0)
-        remaining = max(0, 20 - daily_new_count)
-        new_cards = conn.execute(
-            "SELECT * FROM cards WHERE state = 0 ORDER BY created_at ASC LIMIT ?",
-            (remaining,)
-        ).fetchall()
-        cards = [dict(r) for r in new_cards]
+    daily_new_count = int(s.get('daily_new_count', 0) or 0)
+    remaining = max(0, 20 - daily_new_count)
+    new_cards = conn.execute(
+        "SELECT * FROM cards WHERE state = 0 ORDER BY created_at ASC LIMIT ?",
+        (remaining,)
+    ).fetchall()
 
     conn.close()
     return {
-        "cards": cards,
-        "daily_new_count": int(s.get('daily_new_count', '0') or '0'),
+        "due": [dict(r) for r in due_cards],
+        "new": [dict(r) for r in new_cards],
+        "daily_new_count": daily_new_count,
     }
 
 

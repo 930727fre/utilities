@@ -15,26 +15,26 @@ There is no test suite.
 
 ## Architecture
 
-**Stack:** React 19 + TypeScript + Vite, Zustand for state, Mantine 9 for UI, HashRouter for routing.
+**Stack:** React 19 + TypeScript + Vite, TanStack Query for server state, Mantine 9 for UI, HashRouter for routing.
 
-**Backend:** The app talks to a Google Apps Script (GAS) deployment URL stored in `localStorage`. `Code.gs` is the backend that wraps a Google Sheet as a database. There is no traditional REST API — all reads go through `gasApi.getAll()` (a GET with query params), and all writes go through `gasPost()` which uses `mode: 'no-cors'` to work around CORS limitations (meaning write responses are opaque/unreadable).
+**Backend:** FastAPI (Python) with SQLite at `/data/flashcard.db`. Two tables: `cards` (16 columns, FSRS metrics) and `settings` (key-value). FSRS scheduling is handled server-side by `py-fsrs`. Streak logic runs in Asia/Taipei timezone.
 
 **Data flow:**
-1. On load, `useStore().fetchEverything()` fetches today's review queue + settings from GAS.
-2. If the review queue is empty and no new cards were picked up today, it auto-fetches new cards.
-3. Pages read from the Zustand store; mutations call both the store update method and an async GAS POST (fire-and-forget).
+1. Pages use TanStack Query to fetch from the REST API via `src/api.ts`.
+2. Review session: `GET /cards/queue` returns due cards first, then new cards up to the daily cap (20).
+3. Rating submission: `POST /cards/{id}/review` — backend applies py-fsrs and returns the rescheduled card.
+4. Streak is evaluated server-side on every `GET /stats` and `GET /settings` call.
 
 **Key files:**
-- `src/store.ts` — Zustand store; all app state lives here including `gasUrl`, `cards`, `settings`, `isLoading`
-- `src/api.ts` — All GAS communication (`gasApi.*` for reads, `gasPost()` for writes)
-- `src/types.ts` — `Card` and `Settings` interfaces
-- `src/lib/fsrs.ts` — Wraps `ts-fsrs`; `createFSRSCard()` converts internal Card to FSRS format, `computeNext()` calculates next review state from a Rating (1–4)
-- `src/App.tsx` — Route definitions; redirects `/` to `/settings` if no GAS URL is configured
+- `src/api.ts` — All HTTP calls (`getStats`, `getQueue`, `searchCards`, `batchAddCards`, `reviewCard`, `updateCard`)
+- `src/types.ts` — `Card`, `Stats`, `Queue` interfaces
+- `src/App.tsx` — Route definitions + MantineProvider + QueryClientProvider
+- `backend/main.py` — FastAPI app; all endpoints and streak/FSRS logic
+- `backend/models.py` — Pydantic v2 models (`Card`, `CardUpdate`, `Settings`, `ReviewRequest`, `SyncPayload`)
+- `nginx/nginx.conf` — Serves static build on :80; proxies `/api/` → `flashcard-backend:8000/`
 
-**Routing (HashRouter):** `/` → Dashboard, `/settings` → SettingsPage, `/review` → ReviewPage, `/batch-add` → BatchAddPage
+**Routing (HashRouter):** `/` → DashboardPage, `/review` → ReviewPage, `/batch-add` → BatchAddPage, `/edit` → EditPage
 
-**Card state machine:** Cards have `state: 0|1|2|3` (New/Learning/Review/Relearning) following the FSRS spec. The dashboard shows different UI phases depending on whether cards are new (state=0) or due for review (state≠0).
+**Card state machine:** `state: 0|1|2|3` = New / Learning / Review / Relearning (FSRS spec).
 
-**FSRS params** are stored as a JSON string in `settings.fsrs_params` and parsed at runtime.
-
-**Batch import format (BatchAddPage):** One card per line, comma/tab-separated: `word, sentence, note`
+**Batch import format (BatchAddPage):** One card per line, `::` separated: `word::note::sentence`
