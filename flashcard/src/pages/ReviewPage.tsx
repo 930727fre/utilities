@@ -101,7 +101,26 @@ export default function ReviewPage() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (phase === 'transition') {
-        setPhase(newQueue.length > 0 ? 'new' : 'done');
+        if (e.code === 'Space' || e.code === 'Enter') {
+          e.preventDefault();
+          setIsFlipped(true);
+        } else if (isFlipped) {
+          const idx = parseInt(e.key) - 1;
+          if (idx >= 0 && idx < RATINGS.length) {
+            setIsFlipped(false);
+            setPhase(newQueue.length > 0 ? 'new' : 'done');
+          }
+        }
+        return;
+      }
+      if (phase === 'done') {
+        if (e.code === 'Space' || e.code === 'Enter') {
+          e.preventDefault();
+          setIsFlipped(true);
+        } else if (isFlipped && canNavigate) {
+          const idx = parseInt(e.key) - 1;
+          if (idx >= 0 && idx < RATINGS.length) navigate('/');
+        }
         return;
       }
       if (!currentCard) return;
@@ -118,37 +137,69 @@ export default function ReviewPage() {
   }, [phase, isFlipped, currentCard, handleRate, newQueue, canRate]);
 
   if (phase === 'transition') {
+    const advanceTransition = () => { setIsFlipped(false); setPhase(newQueue.length > 0 ? 'new' : 'done'); };
     return (
       <PageShell scroll="locked">
         <Stack gap="lg" style={{ flex: 1, minHeight: 0 }}>
-          <Paper
-            p={0}
-            radius={24}
-            onClick={() => setPhase(newQueue.length > 0 ? 'new' : 'done')}
-            style={{
-              flex: 1,
-              minHeight: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              boxShadow: 'var(--shadow)',
-              cursor: 'pointer',
-              userSelect: 'none',
-            }}
+          <Box
+            onClick={!isFlipped ? () => setIsFlipped(true) : undefined}
+            style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 'var(--mantine-spacing-lg)', cursor: !isFlipped ? 'pointer' : 'default' }}
           >
-            <Stack align="center" gap={0} p={{ base: 'lg', sm: 40 }} style={{ flex: 1, justifyContent: 'center' }}>
-              <Text c="var(--text-dim)" style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase' }}>
-                due · done
-              </Text>
-              <Title order={1} ta="center" mt="xl" style={{ fontSize: 'clamp(2rem, 8vw, 3.5rem)', color: 'var(--text-h)', letterSpacing: '-0.5px', lineHeight: 1.2 }}>
-                new words
-              </Title>
-              <Text c="var(--text-dim)" size="xs" mt={48} style={{ fontFamily: 'var(--mono)' }}>
-                tap · [space]
-              </Text>
-            </Stack>
-          </Paper>
+            <Paper
+              p={0}
+              radius={24}
+              style={{
+                flex: 1,
+                minHeight: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                background: 'var(--card)',
+                border: '1px solid var(--border)',
+                boxShadow: 'var(--shadow)',
+                overflowY: 'auto',
+              }}
+            >
+              <Stack align="center" gap={0} p={{ base: 'lg', sm: 40 }} style={{ flex: 1, justifyContent: 'center' }}>
+                <Text c="var(--text-dim)" style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase' }}>
+                  due · done
+                </Text>
+                <Title order={1} ta="center" mt="xl" style={{ fontSize: 'clamp(2rem, 8vw, 3.5rem)', color: 'var(--text-h)', letterSpacing: '-0.5px', lineHeight: 1.2 }}>
+                  new words
+                </Title>
+                {isFlipped && (
+                  <Box mt={40} pt={30} style={{ borderTop: '1px solid var(--border)', width: '100%' }}>
+                    <Text ta="center" size="xl" fw={600} c="var(--text-h)">
+                      rate any to continue
+                    </Text>
+                  </Box>
+                )}
+              </Stack>
+            </Paper>
+            <SimpleGrid
+              cols={{ base: 2, sm: 4 }}
+              spacing="sm"
+              style={{ visibility: isFlipped ? 'visible' : 'hidden', pointerEvents: isFlipped ? 'auto' : 'none' }}
+              aria-hidden={!isFlipped}
+            >
+              {RATINGS.map(({ label }, i) => (
+                <Button
+                  key={label}
+                  variant="filled"
+                  size="xl"
+                  radius="md"
+                  onClick={advanceTransition}
+                  tabIndex={isFlipped ? 0 : -1}
+                  styles={{
+                    root: { backgroundColor: 'var(--card)', border: '1px solid var(--border)', height: 70 },
+                    inner: { flexDirection: 'column', gap: 2 },
+                  }}
+                >
+                  <Text fw={800} size="sm" c="var(--text-h)">{label}</Text>
+                  <Text size="xs" c="var(--text)" fw={500} style={{ fontFamily: 'var(--mono)' }}>[{i + 1}]</Text>
+                </Button>
+              ))}
+            </SimpleGrid>
+          </Box>
         </Stack>
       </PageShell>
     );
@@ -158,40 +209,66 @@ export default function ReviewPage() {
     return (
       <PageShell scroll="locked">
         <Stack gap="lg" style={{ flex: 1, minHeight: 0 }}>
-          <Paper
-            p={0}
-            radius={24}
-            style={{
-              flex: 1,
-              minHeight: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              background: 'var(--card)',
-              border: '1px solid var(--border)',
-              boxShadow: 'var(--shadow)',
-            }}
+          <Box
+            onClick={!isFlipped ? () => setIsFlipped(true) : undefined}
+            style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 'var(--mantine-spacing-lg)', cursor: !isFlipped ? 'pointer' : 'default' }}
           >
-            <Stack align="center" gap={0} p={{ base: 'lg', sm: 40 }} style={{ flex: 1, justifyContent: 'center' }}>
-              <Text c="var(--text-dim)" style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase' }}>
-                session complete
-              </Text>
-              <Title order={1} ta="center" mt="xl" style={{ fontSize: 'clamp(2rem, 8vw, 3.5rem)', color: 'var(--text-h)', letterSpacing: '-0.5px', lineHeight: 1.2 }}>
-                done
-              </Title>
-            </Stack>
-            <Box p={{ base: 'lg', sm: 40 }} pt={0}>
-              <Button
-                size="lg"
-                radius="md"
-                fullWidth
-                disabled={!canNavigate}
-                onClick={() => navigate('/')}
-                style={{ background: canNavigate ? 'var(--accent)' : 'var(--raised)', color: canNavigate ? 'var(--bg)' : 'var(--text-dim)', border: 'none', fontWeight: 600, transition: 'background 0.2s, color 0.2s' }}
-              >
-                {canNavigate ? 'Back to Dashboard' : <span className="glyph-pulse">○</span>}
-              </Button>
-            </Box>
-          </Paper>
+            <Paper
+              p={0}
+              radius={24}
+              style={{
+                flex: 1,
+                minHeight: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                background: 'var(--card)',
+                border: '1px solid var(--border)',
+                boxShadow: 'var(--shadow)',
+                overflowY: 'auto',
+              }}
+            >
+              <Stack align="center" gap={0} p={{ base: 'lg', sm: 40 }} style={{ flex: 1, justifyContent: 'center' }}>
+                <Text c="var(--text-dim)" style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase' }}>
+                  session complete
+                </Text>
+                <Title order={1} ta="center" mt="xl" style={{ fontSize: 'clamp(2rem, 8vw, 3.5rem)', color: 'var(--text-h)', letterSpacing: '-0.5px', lineHeight: 1.2 }}>
+                  done
+                </Title>
+                {isFlipped && (
+                  <Box mt={40} pt={30} style={{ borderTop: '1px solid var(--border)', width: '100%' }}>
+                    <Text ta="center" size="xl" fw={600} c="var(--text-h)">
+                      rate any to go back
+                    </Text>
+                  </Box>
+                )}
+              </Stack>
+            </Paper>
+            <SimpleGrid
+              cols={{ base: 2, sm: 4 }}
+              spacing="sm"
+              style={{ visibility: isFlipped ? 'visible' : 'hidden', pointerEvents: isFlipped ? 'auto' : 'none' }}
+              aria-hidden={!isFlipped}
+            >
+              {RATINGS.map(({ label }, i) => (
+                <Button
+                  key={label}
+                  variant="filled"
+                  size="xl"
+                  radius="md"
+                  disabled={!canNavigate}
+                  onClick={() => navigate('/')}
+                  tabIndex={isFlipped && canNavigate ? 0 : -1}
+                  styles={{
+                    root: { backgroundColor: 'var(--card)', border: '1px solid var(--border)', height: 70, opacity: canNavigate ? 1 : 0.3, transition: 'opacity 0.2s' },
+                    inner: { flexDirection: 'column', gap: 2 },
+                  }}
+                >
+                  <Text fw={800} size="sm" c="var(--text-h)">{label}</Text>
+                  <Text size="xs" c="var(--text)" fw={500} style={{ fontFamily: 'var(--mono)' }}>[{i + 1}]</Text>
+                </Button>
+              ))}
+            </SimpleGrid>
+          </Box>
         </Stack>
       </PageShell>
     );
