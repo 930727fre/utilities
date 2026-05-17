@@ -141,10 +141,9 @@ export default function ReviewPage() {
               <Text c="var(--text-dim)" style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase' }}>
                 due · done
               </Text>
-              <Box my="lg" style={{ width: 40, height: 1, background: 'var(--raised)' }} />
-              <Text c="var(--text)" style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase' }}>
+              <Title order={1} ta="center" mt="xl" style={{ fontSize: 'clamp(2rem, 8vw, 3.5rem)', color: 'var(--text-h)', letterSpacing: '-0.5px', lineHeight: 1.2 }}>
                 new words
-              </Text>
+              </Title>
               <Text c="var(--text-dim)" size="xs" mt={48} style={{ fontFamily: 'var(--mono)' }}>
                 tap · [space]
               </Text>
@@ -176,10 +175,9 @@ export default function ReviewPage() {
               <Text c="var(--text-dim)" style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase' }}>
                 session complete
               </Text>
-              <Box my="lg" style={{ width: 40, height: 1, background: 'var(--raised)' }} />
-              <Text c="var(--text)" style={{ fontFamily: 'var(--mono)', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase' }}>
-                all cards reviewed
-              </Text>
+              <Title order={1} ta="center" mt="xl" style={{ fontSize: 'clamp(2rem, 8vw, 3.5rem)', color: 'var(--text-h)', letterSpacing: '-0.5px', lineHeight: 1.2 }}>
+                done
+              </Title>
             </Stack>
             <Box p={{ base: 'lg', sm: 40 }} pt={0}>
               <Button
