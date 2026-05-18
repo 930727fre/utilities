@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>clipboard</title>
+  <style>
+    :root {
+      --page-bg: #1c1c1e;
+      --card:    #2c2c2e;
+      --raised:  #3a3a3c;
+      --text-primary:   #e8e3d9;
+      --text-secondary: #aeaeb2;
+      --text-tertiary:  #636366;
+      --accent: #c79968;
+    }
+
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--page-bg);
+      color: var(--text-primary);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      overflow-y: auto;
+      overscroll-behavior: none;
+    }
+
+    .container {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 24px 16px 40px;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1.2rem;
+      font-weight: 500;
+    }
+
+    #status {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.82rem;
+      color: var(--text-tertiary);
+    }
+    #status.connected    { color: var(--accent); }
+    #status.connecting   { color: var(--text-tertiary); animation: pulse 1.4s ease-in-out infinite; }
+    #status.disconnected { color: var(--text-tertiary); }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.35; }
+      50%       { opacity: 1; }
+    }
+
+    .slot {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+      outline: 2px solid transparent;
+      outline-offset: -2px;
+      transition: outline-color 0.15s;
+    }
+    .slot.drag-over { outline-color: var(--accent); }
+
+    .slot-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .slot-label {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+    }
+
+    .slot-actions { display: flex; gap: 8px; align-items: center; }
+
+    button {
+      background: var(--raised);
+      color: var(--text-primary);
+      border: none;
+      border-radius: 8px;
+      padding: 4px 10px;
+      font-family: inherit;
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: background 0.12s;
+      line-height: 1.4;
+    }
+    button:hover { background: #48484a; }
+
+    .copy-btn    { color: var(--accent); }
+    .download-btn { color: var(--accent); }
+    .clear-btn   { color: var(--text-tertiary); padding: 4px 8px; }
+    .clear-btn:hover { color: var(--text-primary); }
+
+    textarea {
+      width: 100%;
+      min-height: 120px;
+      background: transparent;
+      border: none;
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 0.95rem;
+      resize: vertical;
+      outline: none;
+      box-sizing: border-box;
+      padding: 0;
+      line-height: 1.6;
+    }
+    textarea::placeholder { color: var(--text-tertiary); }
+
+    .slot-img {
+      display: block;
+      max-width: 100%;
+      max-height: 360px;
+      border-radius: 8px;
+      object-fit: contain;
+    }
+
+    .file-card {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 6px 0;
+    }
+    .file-name {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.9rem;
+      word-break: break-all;
+    }
+    .file-size { color: var(--text-secondary); font-size: 0.82rem; }
+
+    /* Show/hide by slot data-type */
+    .slot[data-type="text"]  .copy-img-btn,
+    .slot[data-type="text"]  .download-btn,
+    .slot[data-type="text"]  .slot-img,
+    .slot[data-type="text"]  .file-card  { display: none; }
+
+    .slot[data-type="image"] .copy-text-btn,
+    .slot[data-type="image"] textarea,
+    .slot[data-type="image"] .file-card  { display: none; }
+
+    .slot[data-type="file"]  .copy-text-btn,
+    .slot[data-type="file"]  .copy-img-btn,
+    .slot[data-type="file"]  textarea,
+    .slot[data-type="file"]  .slot-img   { display: none; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>clipboard</h1>
+    <span id="status" class="connecting">○ connecting</span>
+  </header>
+  <div id="slots"></div>
+</div>
+
+<script>
+const SLOTS = [1, 2, 3];
+const MAX_BYTES = 5 * 1024 * 1024;
+
+const state = {
+  1: { type: 'text', content: '' },
+  2: { type: 'text', content: '' },
+  3: { type: 'text', content: '' },
+};
+
+// ── Build slot DOM ──────────────────────────────────────────────────────────
+
+const slotsEl = document.getElementById('slots');
+
+SLOTS.forEach(n => {
+  const div = document.createElement('div');
+  div.className = 'slot';
+  div.id = `slot-${n}`;
+  div.dataset.type = 'text';
+  div.innerHTML = `
+    <div class="slot-header">
+      <span class="slot-label">${n}</span>
+      <div class="slot-actions">
+        <button class="copy-btn copy-text-btn" id="copy-text-${n}" title="Copy text to clipboard">copy</button>
+        <button class="copy-btn copy-img-btn"  id="copy-img-${n}"  title="Copy image to clipboard">copy</button>
+        <button class="download-btn"           id="download-${n}"  title="Download">↓</button>
+        <button class="clear-btn"              id="clear-${n}"     title="Clear">✕</button>
+      </div>
+    </div>
+    <div class="slot-content">
+      <textarea id="ta-${n}" placeholder="Paste or type here — or drop a file"></textarea>
+      <img id="img-${n}" class="slot-img" src="" alt="">
+      <div class="file-card" id="file-${n}">
+        <span class="file-name" id="fname-${n}"></span>
+        <span class="file-size" id="fsize-${n}"></span>
+      </div>
+    </div>`;
+  slotsEl.appendChild(div);
+});
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function formatSize(bytes) {
+  if (bytes < 1024)        return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderSlot(n, data) {
+  state[n] = data;
+  const slotEl = document.getElementById(`slot-${n}`);
+  slotEl.dataset.type = data.type;
+  if (data.type === 'text') {
+    document.getElementById(`ta-${n}`).value = data.content || '';
+  } else if (data.type === 'image') {
+    document.getElementById(`img-${n}`).src = data.content;
+  } else if (data.type === 'file') {
+    document.getElementById(`fname-${n}`).textContent = data.name || 'file';
+    document.getElementById(`fsize-${n}`).textContent = formatSize(data.size || 0);
+  }
+}
+
+function handleFile(n, file) {
+  if (!file) return;
+  if (file.size > MAX_BYTES) {
+    alert(`File too large — maximum is ${formatSize(MAX_BYTES)}.`);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = e => {
+    const type = file.type.startsWith('image/') ? 'image' : 'file';
+    const data = { type, content: e.target.result, name: file.name, size: file.size };
+    renderSlot(n, data);
+    send({ type: 'update', slot: n, data });
+  };
+  reader.readAsDataURL(file);
+}
+
+// ── Wire up events ───────────────────────────────────────────────────────────
+
+SLOTS.forEach(n => {
+  const slotEl = document.getElementById(`slot-${n}`);
+  const ta     = document.getElementById(`ta-${n}`);
+
+  // Debounced text send
+  let timer;
+  ta.addEventListener('input', () => {
+    const data = { type: 'text', content: ta.value };
+    state[n] = data;
+    clearTimeout(timer);
+    timer = setTimeout(() => send({ type: 'update', slot: n, data }), 300);
+  });
+
+  // Paste on textarea — intercept images/files before text lands
+  ta.addEventListener('paste', e => {
+    const fileItem = Array.from(e.clipboardData?.items || []).find(i => i.kind === 'file');
+    if (fileItem) { e.preventDefault(); handleFile(n, fileItem.getAsFile()); }
+  });
+
+  // Drag & drop onto slot card
+  let dragCount = 0;
+  slotEl.addEventListener('dragenter', e => { e.preventDefault(); dragCount++; slotEl.classList.add('drag-over'); });
+  slotEl.addEventListener('dragleave', () => { if (--dragCount <= 0) { dragCount = 0; slotEl.classList.remove('drag-over'); } });
+  slotEl.addEventListener('dragover',  e => e.preventDefault());
+  slotEl.addEventListener('drop', e => {
+    e.preventDefault(); dragCount = 0; slotEl.classList.remove('drag-over');
+    handleFile(n, e.dataTransfer.files[0]);
+  });
+
+  // Copy text
+  document.getElementById(`copy-text-${n}`).addEventListener('click', () => {
+    navigator.clipboard.writeText(state[n].content || '').then(() => {
+      const btn = document.getElementById(`copy-text-${n}`);
+      btn.textContent = 'copied!';
+      setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+    }).catch(() => {});
+  });
+
+  // Copy image
+  document.getElementById(`copy-img-${n}`).addEventListener('click', async () => {
+    try {
+      const res  = await fetch(state[n].content);
+      const blob = await res.blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      const btn = document.getElementById(`copy-img-${n}`);
+      btn.textContent = 'copied!';
+      setTimeout(() => { btn.textContent = 'copy'; }, 1500);
+    } catch {}
+  });
+
+  // Download
+  document.getElementById(`download-${n}`).addEventListener('click', () => {
+    const d = state[n];
+    const a = document.createElement('a');
+    a.href = d.content;
+    a.download = d.name || (d.type === 'image' ? 'image' : 'file');
+    a.click();
+  });
+
+  // Clear
+  document.getElementById(`clear-${n}`).addEventListener('click', () => {
+    const data = { type: 'text', content: '' };
+    renderSlot(n, data);
+    send({ type: 'update', slot: n, data });
+  });
+});
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+
+const statusEl = document.getElementById('status');
+let ws = null;
+let reconnectDelay = 1000;
+
+function setStatus(s) {
+  statusEl.className = s;
+  statusEl.textContent = s === 'connected' ? '● connected' : s === 'connecting' ? '○ connecting' : '! disconnected';
+}
+
+function send(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+}
+
+function connect() {
+  setStatus('connecting');
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => { setStatus('connected'); reconnectDelay = 1000; };
+
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'init') {
+      Object.entries(msg.slots).forEach(([slot, data]) => renderSlot(Number(slot), data));
+    } else if (msg.type === 'update') {
+      renderSlot(msg.slot, msg.data);
+    }
+  };
+
+  ws.onclose = () => {
+    setStatus('disconnected');
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+connect();
+</script>
+</body>
+</html>

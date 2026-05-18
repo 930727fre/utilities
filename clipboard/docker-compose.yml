@@ -1,0 +1,12 @@
+services:
+  clipboard:
+    build: .
+    container_name: clipboard
+    restart: unless-stopped
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true
