@@ -4,6 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 <title>Recorder</title>
+<link rel="icon" href="https://emojicdn.elk.sh/🎤">
+<link rel="apple-touch-icon" href="https://emojicdn.elk.sh/🎤">
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 <style>
   :root {
@@ -42,12 +44,6 @@
     font-size: 20px;
     font-weight: 600;
     margin-bottom: 4px;
-  }
-
-  .subtitle {
-    color: var(--text-2);
-    font-size: 13px;
-    margin-bottom: 24px;
   }
 
   .recorder {
@@ -213,7 +209,6 @@
 <body>
   <div class="page">
     <h1>Recorder</h1>
-    <p class="subtitle">Record audio and save as MP3</p>
 
     <div class="recorder">
       <div class="timer" id="timer">00:00</div>
@@ -221,7 +216,7 @@
       <button class="record-btn" id="recordBtn" aria-label="Record" title="Start / stop recording">
         <span class="inner"></span>
       </button>
-      <div class="status" id="status">Tap to start recording</div>
+      <div class="status" id="status"></div>
     </div>
 
     <div class="recordings">
@@ -283,7 +278,7 @@
   const WAVE_BARS = 64;
   let waveHistory = new Array(WAVE_BARS).fill(0);
   let lastWaveSample = 0;
-  const WAVE_INTERVAL_MS = 50;
+  const WAVE_INTERVAL_MS = 30;
 
   function drawVisualizer() {
     if (!analyser) return;
@@ -297,7 +292,7 @@
       sum += v * v;
     }
     const rms = Math.sqrt(sum / bufLen);
-    const amp = Math.min(1, Math.pow(rms, 0.6) * 1.8);
+    const amp = Math.min(1, Math.pow(rms, 0.4) * 2.5);
 
     const now = performance.now();
     if (now - lastWaveSample >= WAVE_INTERVAL_MS) {
