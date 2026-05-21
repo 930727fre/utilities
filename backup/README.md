@@ -28,6 +28,8 @@ RCLONE_CONFIG_R2_ACCESS_KEY_ID=xxx \
 RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=xxx \
 RCLONE_CONFIG_R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com \
 R2_BUCKET=your_bucket \
+TELEGRAM_BOT_TOKEN=xxx \
+TELEGRAM_CHAT_ID=xxx \
 docker compose up -d --build
 ```
 
@@ -39,6 +41,8 @@ $env:RCLONE_CONFIG_R2_ACCESS_KEY_ID="xxx"
 $env:RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="xxx"
 $env:RCLONE_CONFIG_R2_ENDPOINT="https://<account_id>.r2.cloudflarestorage.com"
 $env:R2_BUCKET="your_bucket"
+$env:TELEGRAM_BOT_TOKEN="xxx"
+$env:TELEGRAM_CHAT_ID="xxx"
 docker compose up -d --build
 ```
 
