@@ -1,6 +1,6 @@
 # backup
 
-Daily backup of flashcard data to Cloudflare R2 at 04:00.
+Daily backup of flashcard data to Cloudflare R2 at 04:00 Asia/Taipei.
 
 Uses `sqlite3 .backup` for a safe hot copy, then `rclone copy` to R2. Snapshots older than 30 days are pruned automatically.
 
