@@ -1,0 +1,11 @@
+services:
+  recorder:
+    build: .
+    container_name: recorder
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true

@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>Recorder</title>
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+<style>
+  :root {
+    --bg: #1c1c1e;
+    --card: #2c2c2e;
+    --raised: #3a3a3c;
+    --text-1: #e8e3d9;
+    --text-2: #aeaeb2;
+    --text-3: #636366;
+    --honey: #c79968;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    min-height: 100vh;
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text-1);
+  }
+
+  .page {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 16px;
+  }
+
+  @media (min-width: 480px) {
+    .page { padding: 24px; }
+  }
+
+  h1 {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .subtitle {
+    color: var(--text-2);
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+
+  .recorder {
+    background: var(--card);
+    border: 1px solid var(--raised);
+    border-radius: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    padding: 32px 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
+    margin-bottom: 12px;
+  }
+
+  .timer {
+    font-family: var(--mono);
+    font-size: 48px;
+    font-weight: 200;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+
+  .timer.recording { color: var(--honey); }
+
+  .visualizer {
+    width: 100%;
+    height: 60px;
+    background: var(--bg);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  #vis-canvas { width: 100%; height: 100%; display: block; }
+
+  .record-btn {
+    width: 88px;
+    height: 88px;
+    border-radius: 50%;
+    border: 3px solid var(--raised);
+    background: transparent;
+    cursor: pointer;
+    transition: border-color 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .record-btn:hover { border-color: var(--honey); }
+  .record-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .record-btn .inner {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: var(--honey);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .record-btn.recording .inner {
+    border-radius: 8px;
+    width: 32px;
+    height: 32px;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+
+  .status {
+    color: var(--text-2);
+    font-size: 13px;
+    min-height: 18px;
+  }
+
+  .status.encoding { color: var(--honey); }
+  .status.error::before { content: '! '; }
+
+  .recordings {
+    background: var(--card);
+    border: 1px solid var(--raised);
+    border-radius: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    padding: 20px 24px;
+  }
+
+  .recordings h2 {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-2);
+    margin-bottom: 12px;
+  }
+
+  .recording-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--raised);
+    border-radius: 12px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    gap: 10px;
+  }
+
+  .recording-item:last-child { margin-bottom: 0; }
+
+  .recording-item .meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .recording-item .name {
+    color: var(--text-1);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recording-item .size {
+    color: var(--text-2);
+    font-size: 11px;
+  }
+
+  .recording-item audio { height: 32px; max-width: 180px; }
+
+  .icon-btn {
+    background: transparent;
+    border: 1px solid var(--raised);
+    color: var(--honey);
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    transition: background 0.15s;
+    flex-shrink: 0;
+  }
+
+  .icon-btn:hover { background: var(--raised); }
+
+  .empty {
+    text-align: center;
+    color: var(--text-3);
+    font-size: 13px;
+    padding: 16px 0;
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>Recorder</h1>
+    <p class="subtitle">Record audio and save as MP3</p>
+
+    <div class="recorder">
+      <div class="timer" id="timer">00:00</div>
+      <div class="visualizer"><canvas id="vis-canvas"></canvas></div>
+      <button class="record-btn" id="recordBtn" aria-label="Record" title="Start / stop recording">
+        <span class="inner"></span>
+      </button>
+      <div class="status" id="status">Tap to start recording</div>
+    </div>
+
+    <div class="recordings">
+      <h2>Recordings</h2>
+      <div id="recordingList">
+        <div class="empty">No recordings yet</div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const recordBtn = document.getElementById('recordBtn');
+  const timerEl = document.getElementById('timer');
+  const statusEl = document.getElementById('status');
+  const listEl = document.getElementById('recordingList');
+  const canvas = document.getElementById('vis-canvas');
+  const ctx2d = canvas.getContext('2d');
+
+  let audioContext = null;
+  let mediaStream = null;
+  let sourceNode = null;
+  let processorNode = null;
+  let analyser = null;
+  let pcmBuffers = [];
+  let totalSamples = 0;
+  let sampleRate = 44100;
+  let isRecording = false;
+  let startTime = 0;
+  let timerInterval = null;
+  let visRAF = null;
+
+  function setStatus(text, cls = '') {
+    statusEl.textContent = text;
+    statusEl.className = 'status' + (cls ? ' ' + cls : '');
+  }
+
+  function formatTime(ms) {
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    const sec = s % 60;
+    return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+  }
+
+  function timestamp() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+  }
+
+  function resizeCanvas() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = canvas.clientWidth * dpr;
+    canvas.height = canvas.clientHeight * dpr;
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  const WAVE_BARS = 64;
+  let waveHistory = new Array(WAVE_BARS).fill(0);
+  let lastWaveSample = 0;
+  const WAVE_INTERVAL_MS = 50;
+
+  function drawVisualizer() {
+    if (!analyser) return;
+    const bufLen = analyser.fftSize;
+    const data = new Uint8Array(bufLen);
+    analyser.getByteTimeDomainData(data);
+
+    let sum = 0;
+    for (let i = 0; i < bufLen; i++) {
+      const v = (data[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / bufLen);
+    const amp = Math.min(1, Math.pow(rms, 0.6) * 1.8);
+
+    const now = performance.now();
+    if (now - lastWaveSample >= WAVE_INTERVAL_MS) {
+      waveHistory.shift();
+      waveHistory.push(amp);
+      lastWaveSample = now;
+    }
+
+    ctx2d.fillStyle = '#1c1c1e';
+    ctx2d.fillRect(0, 0, canvas.width, canvas.height);
+
+    const barW = canvas.width / WAVE_BARS;
+    const cy = canvas.height / 2;
+    const minH = Math.max(2, canvas.height * 0.04);
+
+    for (let i = 0; i < WAVE_BARS; i++) {
+      const v = waveHistory[i];
+      const h = Math.max(minH, v * canvas.height * 0.92);
+      const fade = 0.35 + 0.65 * (i / (WAVE_BARS - 1));
+      ctx2d.fillStyle = isRecording
+        ? `rgba(199, 153, 104, ${fade})`
+        : `rgba(99, 99, 102, ${fade * 0.6})`;
+      const x = i * barW + barW * 0.2;
+      const w = barW * 0.6;
+      ctx2d.beginPath();
+      const r = Math.min(w / 2, 3);
+      const top = cy - h / 2;
+      ctx2d.roundRect(x, top, w, h, r);
+      ctx2d.fill();
+    }
+    visRAF = requestAnimationFrame(drawVisualizer);
+  }
+
+  function resetWaveHistory() {
+    waveHistory = new Array(WAVE_BARS).fill(0);
+  }
+
+  function floatTo16BitPCM(float32) {
+    const out = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32[i]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return out;
+  }
+
+  function downsampleTo(buffer, fromRate, toRate) {
+    if (fromRate === toRate) return buffer;
+    const ratio = fromRate / toRate;
+    const newLen = Math.floor(buffer.length / ratio);
+    const out = new Float32Array(newLen);
+    let pos = 0;
+    for (let i = 0; i < newLen; i++) {
+      const next = Math.floor((i + 1) * ratio);
+      let sum = 0, count = 0;
+      for (let j = pos; j < next && j < buffer.length; j++) { sum += buffer[j]; count++; }
+      out[i] = count > 0 ? sum / count : 0;
+      pos = next;
+    }
+    return out;
+  }
+
+  async function startRecording() {
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      sampleRate = audioContext.sampleRate;
+
+      sourceNode = audioContext.createMediaStreamSource(mediaStream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+
+      processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+      processorNode.onaudioprocess = (e) => {
+        if (!isRecording) return;
+        const ch = e.inputBuffer.getChannelData(0);
+        pcmBuffers.push(new Float32Array(ch));
+        totalSamples += ch.length;
+      };
+
+      sourceNode.connect(analyser);
+      sourceNode.connect(processorNode);
+      processorNode.connect(audioContext.destination);
+
+      pcmBuffers = [];
+      totalSamples = 0;
+      resetWaveHistory();
+      isRecording = true;
+      startTime = Date.now();
+
+      recordBtn.classList.add('recording');
+      timerEl.classList.add('recording');
+      setStatus('Recording...');
+
+      timerInterval = setInterval(() => {
+        timerEl.textContent = formatTime(Date.now() - startTime);
+      }, 100);
+      drawVisualizer();
+    } catch (err) {
+      console.error(err);
+      setStatus('Microphone access denied', 'error');
+    }
+  }
+
+  async function stopRecording() {
+    if (!isRecording) return;
+    isRecording = false;
+    clearInterval(timerInterval);
+    cancelAnimationFrame(visRAF);
+
+    recordBtn.classList.remove('recording');
+    timerEl.classList.remove('recording');
+    recordBtn.disabled = true;
+
+    if (processorNode) processorNode.disconnect();
+    if (sourceNode) sourceNode.disconnect();
+    if (analyser) analyser.disconnect();
+    if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+    if (audioContext) await audioContext.close();
+
+    setStatus('Encoding MP3...', 'encoding');
+
+    setTimeout(() => {
+      try {
+        const merged = new Float32Array(totalSamples);
+        let offset = 0;
+        for (const b of pcmBuffers) {
+          merged.set(b, offset);
+          offset += b.length;
+        }
+        const TARGET_RATE = 16000;
+        const TARGET_BITRATE = 64;
+        const resampled = downsampleTo(merged, sampleRate, TARGET_RATE);
+        const pcm16 = floatTo16BitPCM(resampled);
+
+        const mp3encoder = new lamejs.Mp3Encoder(1, TARGET_RATE, TARGET_BITRATE);
+        const blockSize = 1152;
+        const mp3Data = [];
+        for (let i = 0; i < pcm16.length; i += blockSize) {
+          const chunk = pcm16.subarray(i, i + blockSize);
+          const buf = mp3encoder.encodeBuffer(chunk);
+          if (buf.length > 0) mp3Data.push(buf);
+        }
+        const end = mp3encoder.flush();
+        if (end.length > 0) mp3Data.push(end);
+
+        const blob = new Blob(mp3Data, { type: 'audio/mp3' });
+        const filename = `recording_${timestamp()}.mp3`;
+        addRecording(blob, filename);
+        downloadBlob(blob, filename);
+        setStatus('Saved ' + filename);
+      } catch (err) {
+        console.error(err);
+        setStatus('Encoding failed', 'error');
+      } finally {
+        recordBtn.disabled = false;
+        timerEl.textContent = '00:00';
+        pcmBuffers = [];
+        totalSamples = 0;
+      }
+    }, 50);
+  }
+
+  function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function addRecording(blob, filename) {
+    const empty = listEl.querySelector('.empty');
+    if (empty) empty.remove();
+
+    const url = URL.createObjectURL(blob);
+    const sizeKB = (blob.size / 1024).toFixed(1);
+
+    const item = document.createElement('div');
+    item.className = 'recording-item';
+    item.innerHTML = `
+      <div class="meta">
+        <div class="name">${filename}</div>
+        <div class="size">${sizeKB} KB</div>
+      </div>
+      <audio controls src="${url}"></audio>
+      <button class="icon-btn" title="Download">↓</button>
+    `;
+    item.querySelector('.icon-btn').onclick = () => downloadBlob(blob, filename);
+    listEl.prepend(item);
+  }
+
+  recordBtn.addEventListener('click', () => {
+    if (isRecording) stopRecording();
+    else startRecording();
+  });
+})();
+</script>
+</body>
+</html>

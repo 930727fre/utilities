@@ -5,6 +5,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | Tool | Description |
 |------|-------------|
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
+| [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
 | [marker-pipeline](./marker-pipeline) | Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
 | [transcribe](./transcribe) | YouTube downloader and MP3 inbox processor with GPU-accelerated Whisper transcription |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |

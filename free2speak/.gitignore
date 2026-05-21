@@ -1,0 +1,17 @@
+# Audio
+*.mp3
+*.m4a
+*.mp4
+*.wav
+
+# Python
+__pycache__/
+
+# macOS
+.DS_Store
+
+# Personal practice content (backup via rsync, not git)
+errors.md
+sessions/
+roleplays/
+drills/
