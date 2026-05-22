@@ -29,25 +29,6 @@ if [ -n "$(ls -A "$DATA" 2>/dev/null)" ]; then
     exit 1
 fi
 
-echo ""
-echo "To align ownership of restored files, this script needs your host UID and GID."
-echo "In another terminal on the host, run:"
-echo ""
-echo "  id -u && id -g"
-echo ""
-printf "Host UID: "
-read HOST_UID
-printf "Host GID: "
-read HOST_GID
-
-case "$HOST_UID" in
-    ''|*[!0-9]*) echo "Error: UID must be a non-empty integer (got: '$HOST_UID')" >&2; exit 1 ;;
-esac
-case "$HOST_GID" in
-    ''|*[!0-9]*) echo "Error: GID must be a non-empty integer (got: '$HOST_GID')" >&2; exit 1 ;;
-esac
-
-echo ""
 echo "[$(date)] Pulling r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz"
 rm -f "$TARBALL"
 rclone copyto "r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz" "$TARBALL"
@@ -72,7 +53,6 @@ if [ -n "$FAIL" ]; then
     exit 1
 fi
 
-chown -R "${HOST_UID}:${HOST_GID}" "$DATA"
 rm -f "$TARBALL"
 
-echo "[$(date)] Done. Restored ${TOOL} from ${DATE}, owner ${HOST_UID}:${HOST_GID}"
+echo "[$(date)] Done. Restored ${TOOL} from ${DATE}"

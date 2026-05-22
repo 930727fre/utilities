@@ -106,8 +106,7 @@ docker compose run --rm backup /pull.sh flashcard 2026-05-21
 The script will:
 
 1. Refuse if `/tools/<tool>/data/` is not empty.
-2. Prompt for your host UID and GID — get them by running `id -u && id -g` on the host in another terminal. Restored files are chowned to those values so the tool's service can read/write them.
-3. Download `r2:${R2_BUCKET}/<tool>/<DATE>/data.tar.gz` and extract into `/tools/<tool>/data/`.
-4. Run `PRAGMA integrity_check` on every `*.db` file in the extracted tree.
+2. Download `r2:${R2_BUCKET}/<tool>/<DATE>/data.tar.gz` and extract into `/tools/<tool>/data/`.
+3. Run `PRAGMA integrity_check` on every `*.db` file in the extracted tree.
 
-Restart your services after the pull completes.
+Restored files are owned by root (the backup container runs as root). If the consuming service runs as a non-root user, `chown -R <uid>:<gid> <tool>/data/` afterward. Restart your services after the pull completes.
