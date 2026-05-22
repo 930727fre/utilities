@@ -1,25 +1,36 @@
 #!/bin/sh
 set -e
 
-[ -z "$1" ] && { echo "Usage: $0 <YYYY-MM-DD>" >&2; exit 1; }
-DATE="$1"
+if [ -z "$1" ] || [ -z "$2" ]; then
+    echo "Usage: $0 <tool> <YYYY-MM-DD>" >&2
+    exit 1
+fi
+TOOL="$1"
+DATE="$2"
 
 case "$DATE" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
     *) echo "Error: DATE must be YYYY-MM-DD (got: $DATE)" >&2; exit 1 ;;
 esac
 
-DEST="/flashcard/flashcard.db"
+DATA="/tools/${TOOL}/data"
+TARBALL="/tmp/${TOOL}-restore.tar.gz"
 
-for f in /flashcard/flashcard.db /flashcard/flashcard.db-wal /flashcard/flashcard.db-shm; do
-    if [ -e "$f" ]; then
-        echo "Error: $f exists. Delete all of flashcard.db, flashcard.db-wal, flashcard.db-shm manually before pulling." >&2
-        exit 1
-    fi
-done
+if [ ! -d "$DATA" ]; then
+    echo "Error: ${DATA} not mounted (check docker-compose volumes for tool '${TOOL}')" >&2
+    exit 1
+fi
+
+if [ -n "$(ls -A "$DATA" 2>/dev/null)" ]; then
+    echo "Error: ${DATA} is not empty. Clear all contents manually before pulling." >&2
+    echo "" >&2
+    echo "Current contents:" >&2
+    ls -la "$DATA" >&2
+    exit 1
+fi
 
 echo ""
-echo "To align ownership of the pulled file, this script needs your host UID and GID."
+echo "To align ownership of restored files, this script needs your host UID and GID."
 echo "In another terminal on the host, run:"
 echo ""
 echo "  id -u && id -g"
@@ -37,21 +48,31 @@ case "$HOST_GID" in
 esac
 
 echo ""
-echo "[$(date)] Pulling r2:${R2_BUCKET}/flashcard/${DATE}/flashcard.db -> ${DEST} (live slot)"
-rclone copyto "r2:${R2_BUCKET}/flashcard/${DATE}/flashcard.db" "$DEST"
+echo "[$(date)] Pulling r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz"
+rm -f "$TARBALL"
+rclone copyto "r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz" "$TARBALL"
 
-if [ ! -f "$DEST" ]; then
-    echo "Error: snapshot ${DATE} not found in R2" >&2
+if [ ! -f "$TARBALL" ]; then
+    echo "Error: snapshot ${TOOL}/${DATE} not found in R2" >&2
     exit 1
 fi
 
-INTEGRITY=$(sqlite3 "$DEST" "PRAGMA integrity_check;")
-if [ "$INTEGRITY" != "ok" ]; then
-    echo "Error: integrity check failed: $INTEGRITY" >&2
+echo "[$(date)] Extracting to ${DATA}"
+tar -xzf "$TARBALL" -C "$DATA"
+
+echo "[$(date)] Verifying SQLite integrity..."
+FAIL=$(find "$DATA" -type f -name "*.db" -exec sh -c '
+    res=$(sqlite3 "$1" "PRAGMA integrity_check;")
+    [ "$res" = "ok" ] || printf "%s: %s\n" "$1" "$res"
+' _ {} \;)
+
+if [ -n "$FAIL" ]; then
+    echo "Error: integrity check failed:" >&2
+    echo "$FAIL" >&2
     exit 1
 fi
 
-chown "${HOST_UID}:${HOST_GID}" "$DEST"
+chown -R "${HOST_UID}:${HOST_GID}" "$DATA"
+rm -f "$TARBALL"
 
-SIZE=$(du -h "$DEST" | cut -f1)
-echo "[$(date)] Done. ${DEST} (${SIZE}), owner ${HOST_UID}:${HOST_GID}"
+echo "[$(date)] Done. Restored ${TOOL} from ${DATE}, owner ${HOST_UID}:${HOST_GID}"

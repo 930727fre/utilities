@@ -1,13 +1,32 @@
 # backup
 
-Daily backup of flashcard data to Cloudflare R2 at 04:00 Asia/Taipei.
+Daily backup of tool data directories to Cloudflare R2 at 04:00 Asia/Taipei.
 
-Uses `sqlite3 .backup` for a safe hot copy, then `rclone copy` to R2. Snapshots older than 30 days are pruned automatically.
+For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is), tarred, gzipped, and uploaded. Snapshots older than 30 days are pruned automatically.
 
 R2 layout:
 ```
-flashcard/YYYY-MM-DD/flashcard.db
+<tool>/YYYY-MM-DD/data.tar.gz
 ```
+
+## Adding a tool
+
+To back up a new tool's `data/` directory:
+
+1. Add a volume mount in `docker-compose.yml` — must use the exact path `/tools/<tool>/data` inside the container:
+   ```yaml
+   volumes:
+     - ../flashcard/data:/tools/flashcard/data
+     - ../free2speak/data:/tools/free2speak/data   # new
+   ```
+2. Add the tool name to the `TOOLS` env var (space-separated):
+   ```yaml
+   environment:
+     - TOOLS=flashcard free2speak
+   ```
+3. Rebuild: `docker compose up -d --build`.
+
+`*.db` files are snapshotted via `sqlite3 .backup` (safe while the source app is running). `*.db-wal` and `*.db-shm` are skipped — they're regenerable WAL artifacts. Everything else is plain copied.
 
 ## R2 API Token
 
@@ -15,7 +34,7 @@ Use a **User API token** with **Admin Read & Write** permission. "Object Read & 
 
 ## Notes
 
-- The flashcard data directory is mounted read-write because SQLite WAL mode requires creating a `.db-shm` file alongside the database even for read operations. `sqlite3 .backup` does not modify the source database.
+- Data directories are mounted read-write because SQLite WAL mode requires creating a `.db-shm` file alongside the database even for read operations. `sqlite3 .backup` does not modify the source database.
 - marker-pipeline outputs are downloaded zips, not persistent state — not backed up here. transcribe / keyboard outputs are similarly reproducible from source (YouTube URL re-pull, vocab list re-edit) and intentionally excluded.
 
 ## Deploy
@@ -62,34 +81,33 @@ docker compose run --rm backup rclone ls r2:${R2_BUCKET}
 
 ## Restore
 
-Pull a snapshot from R2 directly into the live `flashcard.db` slot. **Stop all dependent services first** (flashcard, etc.) — the script writes to the live path.
+Pull a snapshot from R2 directly into a tool's live `data/` directory. **Stop all dependent services for that tool first** — the script writes to the live path.
 
-List available snapshots:
+List available snapshots for a tool:
 
 ```bash
 docker compose run --rm backup rclone lsd r2:${R2_BUCKET}/flashcard/
 ```
 
-Before pulling, manually remove the existing `flashcard.db` on the host (or move it aside for rollback):
+Before pulling, the tool's `data/` directory **must be empty**. Move existing contents aside (rollback insurance) or delete:
 
 ```bash
 cd flashcard/data
-mv flashcard.db flashcard.db.bak
+mv flashcard.db ../flashcard.db.bak
+# or for multi-file data dirs: move/delete everything inside
 ```
 
-If a service ever crashed mid-write, you may also see `flashcard.db-wal` and `flashcard.db-shm` siblings — delete those too. Under clean shutdown they don't exist, so usually you won't see them.
-
-Pull a specific date:
+Pull a specific snapshot:
 
 ```bash
-docker compose run --rm backup /pull.sh 2026-05-21
+docker compose run --rm backup /pull.sh flashcard 2026-05-21
 ```
 
 The script will:
 
-1. Refuse if any of `flashcard.db`, `flashcard.db-wal`, `flashcard.db-shm` still exists.
-2. Prompt for your host UID and GID — get them by running `id -u && id -g` on the host in another terminal. The pulled file is chowned to those values so the flashcard service can read/write it.
-3. Download `r2:${R2_BUCKET}/flashcard/2026-05-21/flashcard.db` to `flashcard/data/flashcard.db`.
-4. Run `PRAGMA integrity_check` to confirm the file is a valid SQLite database.
+1. Refuse if `/tools/<tool>/data/` is not empty.
+2. Prompt for your host UID and GID — get them by running `id -u && id -g` on the host in another terminal. Restored files are chowned to those values so the tool's service can read/write them.
+3. Download `r2:${R2_BUCKET}/<tool>/<DATE>/data.tar.gz` and extract into `/tools/<tool>/data/`.
+4. Run `PRAGMA integrity_check` on every `*.db` file in the extracted tree.
 
 Restart your services after the pull completes.
