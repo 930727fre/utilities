@@ -3,6 +3,7 @@
 *.m4a
 *.mp4
 *.wav
+*.aac
 
 # Python
 __pycache__/
@@ -11,7 +12,4 @@ __pycache__/
 .DS_Store
 
 # Personal practice content (backup via rsync, not git)
-errors.md
-sessions/
-roleplays/
-drills/
+/data/

@@ -6,12 +6,12 @@
 
 ## 觸發
 
-使用者說「看 sessions/ 最新一筆，更新 errors.md」→ 讀那筆 session 的 JSON。
+使用者說「看 data/sessions/ 最新一筆，更新 data/errors.md」→ 讀那筆 session 的 JSON。
 先把該 session 的 `summary` 跟 `fluency_notes` 顯示給使用者看（一兩句練習總結
-+ 流暢度觀察），再做兩個對稱動作：**加** 跟 **刪**。
++ 流暢度觀察），再依序做兩個對稱動作：**加** → 等使用者回覆 → **刪**。
 
-兩個動作邏輯相同 —— Opus 從這場的 transcript 撈候選、條列給使用者，**使用者
-自己勾選**。Opus 不替使用者決定收不收、畢不畢業。
+**兩步拆開，不同時問**：先列加的候選、等使用者勾選並更新 errors.md，完成後
+再列刪的候選、等使用者勾選並刪除。不要在同一則訊息裡同時呈現加跟刪。
 
 ### 加 —— 新錯收進 errors.md
 
@@ -54,7 +54,6 @@ transcript）。這類統一在月度 audit 時處理 —— Opus 掃 errors.md 
 - **標題**：簡短描述 pattern（例：「第三人稱單數動詞 -s」、「allergy + to，
   不是 with」）
 - **範例**：使用者實際說的錯 → 正確版。可多筆累積。
-- **分組**：## 文法 / ## 用法 / 中式英文 / ## 詞彙
 - **上次出現**：YYYY-MM-DD（純資訊，供 drill 挑「最近犯」參考，不附著任何規則）
 
 沒有計數器、沒有狀態欄。
@@ -71,22 +70,16 @@ transcript）。這類統一在月度 audit 時處理 —— Opus 掃 errors.md 
 
 > Active only。畢業就刪，不留 archive。
 
-## 文法
-
 ### 第三人稱單數動詞 -s
 - 範例：She don't really like → She doesn't really like
 - 範例：She own a garden → She owns a garden
 - 範例：it just shut down at 40% → it just shuts down at 40%
 - 上次出現：2026-05-14
 
-## 用法 / 中式英文
-
 ### "allergy / allergic" 後面接 to，不是 with
 - 範例：I have a mild allergy with seafood → I have a mild allergy to seafood
 - 同理：allergic to / sensitive to / immune to
 - 上次出現：2026-05-15
-
-## 詞彙
 
 ### grape vs grapefruit 別搞混
 - 範例：a cup of grape juice → a cup of grapefruit juice

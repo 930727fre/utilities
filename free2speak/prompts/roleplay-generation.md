@@ -6,10 +6,6 @@
 
 **格式：完整雙語 dialogue script**。AI 的每一句用英文寫死、使用者的每一句用中文寫死。使用者看 Chinese instruction 即時翻成英文說出來 —— 翻譯這個過程就是練習。
 
-### 為什麼是 scripted 而不是 open conversation
-
-初版試過 open conversation（給場景跟 task 不規定內容），使用者會 retreat 到 baby vocab，scenario embed 的中階詞彙完全沒 surface（例：scenario 寫「手工 pasta、酒單」，使用者實際只說 "Italian bistro will work" 帶過）。Scripted 才能靠中文 cue 強迫翻譯。
-
 ### 0. 場景選擇優先順序
 
 1. **自然 fit 為主** —— 場景本身要可信、是真實會發生的對話
@@ -46,7 +42,7 @@ AI 的每一句寫完整英文、會在 Gemini Live 中 verbatim 播放。要點
 
 ### 5. 檔案結構
 
-檔名 `roleplays/YYYY-MM-DD-主題.md` —— 主題是短 slug（例 `bistro` / `interview` / `visa`），同日多個 role-play 靠主題區隔、不撞名。檔案內容：
+檔名 `data/roleplays/YYYY-MM-DD-主題.md` —— 主題是短 slug（例 `bistro` / `interview` / `visa`），同日多個 role-play 靠主題區隔、不撞名。檔案內容：
 
 ```
 # YYYY-MM-DD — Role-play: [scenario 名]（情境分類）

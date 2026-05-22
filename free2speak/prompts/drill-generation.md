@@ -6,7 +6,7 @@
 
 ## 觸發
 
-使用者說「生今天的 drill」→ 看 `errors.md` + 最近 10 筆 sessions/ + `drills/index.md`，寫成 `drills/YYYY-MM-DD.md` 並 append 一行索引。
+使用者說「生今天的 drill」→ 看 `data/errors.md` + 最近 5 筆 `data/sessions/`，寫成 `data/drills/YYYY-MM-DD.md` 並 append 一行索引。
 
 索引行格式 `YYYY-MM-DD — 一句話 rationale`，永遠 append、不刪舊行。只給月度 audit 看軌跡用，不需要記下選了哪些 error。
 
@@ -35,9 +35,11 @@
 | 中翻英 | 顯示中文 → 你唸英文 → 顯示參考答案 |
 | 填空 recall | 顯示英文（部分挖空）+ 中文 → 你補出來 → 顯示完整版 |
 
+**比例：填空 recall 為主，10 張裡約 6-7 張填空、3-4 張中翻英。**
+
 **選哪種：**
-- 短文法 / 慣用搭配 / 短詞彙 → 中翻英
-- 長句型 / 慣用語 / 固定片語 → 填空 recall
+- 填空 recall 優先 —— 大部分 pattern 都適合挖關鍵詞；脈絡保留讓 recall 更精準
+- 中翻英 用在「整句都要自己生成」才有練習價值的情況（無固定句型、需要即時組句）
 
 ## 動態生成原則
 

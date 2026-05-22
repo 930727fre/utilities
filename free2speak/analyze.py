@@ -15,7 +15,7 @@ today = date.today().isoformat()
 
 def pick_audio():
     patterns = ["*.m4a", "*.mp3", "*.wav", "*.aac"]
-    search_dirs = [Path.cwd(), Path.home() / "Desktop", Path.home() / "Downloads"]
+    search_dirs = [Path.cwd(), Path.home() / "Downloads"]
     files = []
     for d in search_dirs:
         if d.exists():
@@ -43,9 +43,14 @@ def pick_audio():
 
 
 def pick_roleplay():
-    matches = sorted((ROOT / "roleplays").glob(f"{today}-*.md"), key=lambda p: p.stat().st_mtime, reverse=True)
+    matches = sorted(
+        (ROOT / "data" / "roleplays").glob("[0-9]*-*.md"),
+        key=lambda p: p.stat().st_mtime, reverse=True,
+    )[:10]
 
-    print("\n選擇 role-play 腳本：")
+    print("\n選擇 role-play 腳本（近 10 筆，新到舊）：")
+    if not matches:
+        print("  （尚無腳本）")
     for i, f in enumerate(matches, 1):
         print(f"  {i}. {f.stem}")
     no_script_idx = len(matches) + 1
@@ -57,7 +62,7 @@ def pick_roleplay():
             n = int(raw)
             if 1 <= n <= len(matches):
                 f = matches[n - 1]
-                return f.stem[len(today) + 1:], f.read_text()
+                return f.stem.split("-", 3)[3], f.read_text()
             if n == no_script_idx:
                 t = input("主題（用於檔名，例如 chat）：").strip() or "chat"
                 return t, "(無腳本 — 閒聊或自由發揮)"
@@ -96,7 +101,8 @@ except json.JSONDecodeError as e:
     print(f"  音檔保留在 {audio_path}，修好後可重跑")
     sys.exit(1)
 
-out = ROOT / "sessions" / f"{today}-{topic}.json"
+out = ROOT / "data" / "sessions" / f"{today}-{topic}.json"
+out.parent.mkdir(parents=True, exist_ok=True)
 out.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 print(f"✓ wrote {out}")
 
