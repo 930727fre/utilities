@@ -1,31 +1,33 @@
 # transcribe
 
-Paste a YouTube URL, wait, download SRT — or stream the video/audio back with captions. GPU-accelerated Whisper transcription via Celery queue.
+Paste a YouTube URL, wait, download SRT — or stream the video/audio back with captions. GPU-accelerated Whisper transcription, single-process.
 
 ## Stack
 
 | Layer | Tech |
 |------|------|
 | Frontend | Vite + React in its own container, proxies `/api` and `/player` to the backend |
-| Backend API | FastAPI on port 8000 (no GPU) |
-| Worker | Celery on the same image, GPU-exclusive (`--concurrency=1 -P solo`) |
-| Queue broker | Redis |
+| Backend | FastAPI on port 8000 — API, `/player` route, and in-process worker on a single GPU |
+| Worker | `ThreadPoolExecutor(max_workers=1)` — serializes jobs onto the GPU |
+| Whisper isolation | each transcription runs in a `multiprocessing.spawn` subprocess so VRAM is released between jobs |
 | Downloader | `yt-dlp` (best mp4) |
 | Transcriber | `openai-whisper` model `medium`, `device=cuda` |
+| Inbox scanner | asyncio task in FastAPI lifespan, polls `/app/data/inbox/*.mp3` every 5 s |
 | Storage | `data/jobs.json` (file-locked) + `data/downloads/*.mp4` + `.srt` + inbox `.mp3` |
 
 ## Services
 
 ```
 docker compose
-├── transcribe-redis      # Redis broker (no GPU)
-├── transcribe-backend    # FastAPI — API + /player route (no GPU)
-├── transcribe-frontend   # Vite + React — dashboard, proxies /api & /player (no GPU)
-├── transcribe-worker     # Celery worker (GPU)
-└── transcribe-beat       # Celery scheduler (cleanup, periodic tasks)
+├── transcribe-app        # FastAPI + executor + inbox scan (GPU)
+└── transcribe-frontend   # Vite + React — dashboard, proxies /api & /player
 ```
 
-GPU reservation lives on `transcribe-worker` only. Models cache to `data/models/` (Whisper) which is bind-mounted so a container rebuild doesn't re-download the ~1.5 GB weights.
+Models cache to `data/models/` (Whisper) which is bind-mounted so a container rebuild doesn't re-download the ~1.5 GB weights.
+
+## Crash recovery
+
+The backend's FastAPI `lifespan` runs a one-pass startup sweep: any job in `PENDING` / `DOWNLOADING` / `TRANSCRIBING` is flipped to `FAILED` with `error = "Interrupted by restart"`. The dashboard surfaces those rows with `!` and the `↻` retry button — user clicks to re-queue. Same shape as marker-pipeline; nothing auto-resumes.
 
 ## Run
 
@@ -70,6 +72,6 @@ UI follows the [utility repo's design language](../README.md#design-language): m
 
 ## Known limitations
 
-- **Crash recovery is fragile.** If `transcribe-worker` dies mid-job, the job stays in `DOWNLOADING` or `TRANSCRIBING` forever — there's no startup sweep to mark orphaned jobs as `FAILED` like marker-pipeline does. Restart the stack and manually delete the stuck row.
 - **`jobs.json` is file-locked**, not a real DB. For two users hammering at once you'd want SQLite — fine for single-user.
 - **Whisper model is hardcoded** to `medium`. Larger models would mean better accuracy + much longer GPU time.
+- **No persistent queue.** Submitting jobs while the app is down is not possible (no broker absorbs them). For single-user this is fine; for anything async, drop files into `data/inbox/` and the scanner will pick them up on next tick.

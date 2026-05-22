@@ -1,31 +1,25 @@
+import functools
 import json
 import multiprocessing
 import os
 import tempfile
+import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from celery import Celery
 import yt_dlp
 
-from storage import get_job, upsert_job, read_jobs, write_jobs, ensure_jobs_file
+from storage import get_job, read_jobs, upsert_job
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
 DOWNLOADS_DIR = "/app/data/downloads"
 SCAN_DIR = os.getenv("SCAN_DIR", "/app/data/inbox")
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
 
-app = Celery("tasks", broker=REDIS_URL, backend=REDIS_URL)
-app.conf.task_track_started = True
-app.conf.broker_connection_retry_on_startup = True
-app.conf.beat_schedule = {
-    "scan-inbox": {
-        "task": "tasks.scan_inbox_task",
-        "schedule": 5.0,  # every 5 seconds
-    },
-}
+# Single GPU → serialize work to one job at a time.
+executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="transcribe-worker")
 
 
 def _now() -> str:
@@ -37,38 +31,25 @@ def _elapsed(since_iso: str) -> float:
     return (datetime.now(timezone.utc) - start).total_seconds()
 
 
-@app.on_after_configure.connect
-def _recover_jobs(sender, **kwargs):
-    ensure_jobs_file()
-    jobs = read_jobs()
-    changed = False
-    for job in jobs:
-        if job["status"] in ("DOWNLOADING", "TRANSCRIBING", "PENDING"):
-            job["status"] = "PENDING"
-            job["error"] = None
-            job["updated_at"] = _now()
-            changed = True
-    if changed:
-        write_jobs(jobs)
-
-    for job in read_jobs():
-        if job["status"] == "PENDING":
-            if job.get("source_file"):
-                src_path = os.path.join(SCAN_DIR, job["source_file"])
-                transcribe_file.apply_async(args=[job["job_id"], src_path], task_id=job["job_id"])
-            else:
-                process_video.apply_async(args=[job["job_id"], job["url"]], task_id=job["job_id"])
+def _catch_unhandled(fn):
+    @functools.wraps(fn)
+    def wrapped(job_id, *args, **kwargs):
+        try:
+            return fn(job_id, *args, **kwargs)
+        except Exception as exc:
+            traceback.print_exc()
+            _fail(job_id, f"Unhandled error: {exc}")
+    return wrapped
 
 
-@app.task(bind=True)
-def process_video(self, job_id: str, url: str):
+@_catch_unhandled
+def process_video(job_id: str, url: str):
     job = get_job(job_id)
     if not job or job["status"] in ("DELETED", "SUCCESS", "DOWNLOADING", "TRANSCRIBING"):
         return
 
     base_path = os.path.join(DOWNLOADS_DIR, job_id)
 
-    # --- Download ---
     job["status"] = "DOWNLOADING"
     job["updated_at"] = _now()
     upsert_job(job)
@@ -111,8 +92,8 @@ def process_video(self, job_id: str, url: str):
     _run_transcription(job_id, base_path + ".mp4")
 
 
-@app.task(bind=True)
-def transcribe_file(self, job_id: str, src_path: str):
+@_catch_unhandled
+def transcribe_file(job_id: str, src_path: str):
     job = get_job(job_id)
     if not job or job["status"] in ("DELETED", "SUCCESS", "TRANSCRIBING"):
         return
@@ -123,11 +104,6 @@ def transcribe_file(self, job_id: str, src_path: str):
     upsert_job(job)
 
     _run_transcription(job_id, src_path)
-
-
-@app.task(name="tasks.scan_inbox_task")
-def scan_inbox_task():
-    scan_inbox()
 
 
 def scan_inbox() -> int:
@@ -153,7 +129,7 @@ def scan_inbox() -> int:
             "updated_at": _now(),
         }
         upsert_job(job)
-        transcribe_file.apply_async(args=[job_id, os.path.join(SCAN_DIR, fname)], task_id=job_id)
+        executor.submit(transcribe_file, job_id, os.path.join(SCAN_DIR, fname))
         count += 1
     return count
 

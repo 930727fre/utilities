@@ -1,5 +1,7 @@
+import asyncio
 import os
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -7,23 +9,60 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 from pydantic import BaseModel
 
-from storage import read_jobs, get_job, upsert_job, ensure_jobs_file
-from tasks import process_video, scan_inbox
+from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
+from tasks import SCAN_DIR, executor, process_video, scan_inbox, transcribe_file
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
+INBOX_SCAN_INTERVAL = 5.0
 
-app = FastAPI()
 
-ensure_jobs_file()
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    ensure_jobs_file()
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    Path(SCAN_DIR).mkdir(parents=True, exist_ok=True)
+
+    # Any job mid-flight (or queued) at startup is orphaned from a prior crash.
+    # Mark FAILED so the UI surfaces ! / ↻ instead of an eternal ○.
+    jobs = read_jobs()
+    changed = False
+    for job in jobs:
+        if job["status"] in ("DOWNLOADING", "TRANSCRIBING", "PENDING"):
+            job["status"] = "FAILED"
+            job["error"] = "Interrupted by restart"
+            job["updated_at"] = _now()
+            changed = True
+            print(f"[startup] orphaned {job['job_id']} -> FAILED", flush=True)
+    if changed:
+        write_jobs(jobs)
+
+    scan_task = asyncio.create_task(_inbox_scan_loop())
+    try:
+        yield
+    finally:
+        scan_task.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def _inbox_scan_loop():
+    while True:
+        try:
+            scan_inbox()
+        except Exception as exc:
+            print(f"[scan_inbox] {exc}", flush=True)
+        await asyncio.sleep(INBOX_SCAN_INTERVAL)
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")
 async def health():
     return {"ok": True}
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _new_job(job_id: str, url: str) -> dict:
@@ -67,9 +106,7 @@ async def submit_job(req: SubmitRequest):
     job_id = str(uuid.uuid4())
     job = _new_job(job_id, req.url)
     upsert_job(job)
-    task = process_video.apply_async(args=[job_id, req.url], task_id=job_id)
-    job["task_id"] = task.id
-    upsert_job(job)
+    executor.submit(process_video, job_id, req.url)
     return {"job_id": job_id, "status": "PENDING"}
 
 
@@ -96,7 +133,10 @@ async def retry_job(job_id: str):
     job["progress"] = {}
     job["updated_at"] = _now()
     upsert_job(job)
-    process_video.apply_async(args=[job_id, job["url"]], task_id=job_id + "-retry")
+    if job.get("source_file"):
+        executor.submit(transcribe_file, job_id, os.path.join(SCAN_DIR, job["source_file"]))
+    else:
+        executor.submit(process_video, job_id, job["url"])
     return {"ok": True}
 
 
