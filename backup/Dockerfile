@@ -1,6 +1,6 @@
 FROM alpine:3.19
 
-RUN apk add --no-cache rclone sqlite
+RUN apk add --no-cache rclone sqlite tzdata
 
 COPY backup.sh /backup.sh
 COPY pull.sh /pull.sh

@@ -9,7 +9,7 @@ notify() {
     wget -qO- "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=$1" > /dev/null || true
 }
 
-trap 'notify "Backup+FAILED+at+${STEP}+on+${DATE}"' EXIT
+trap 'notify "Backup+FAILED+at+${STEP}+on+$(TZ=Asia/Taipei date +%Y-%m-%d+%H:%M:%S)"' EXIT
 
 echo "[$(date)] Starting backup for tools: ${TOOLS}"
 
@@ -62,6 +62,6 @@ ELAPSED=$(( $(date +%s) - START ))
 TOOLS_ENC=$(echo "$TOOLS" | tr ' ' '+')
 
 trap - EXIT
-notify "Backup+done+${DATE}+%7C+${TOOLS_ENC}+%7C+${ELAPSED}s"
+notify "Backup+done+$(TZ=Asia/Taipei date +%Y-%m-%d+%H:%M:%S)+%7C+${TOOLS_ENC}+%7C+${ELAPSED}s"
 
 echo "[$(date)] Done"
