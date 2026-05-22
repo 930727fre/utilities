@@ -5,10 +5,10 @@ services:
     volumes:
       # one entry per tool with persistent data — mount path must be /tools/<tool>/data
       - ../flashcard/data:/tools/flashcard/data
-      # future: - ../free2speak/data:/tools/free2speak/data
+      - ../free2speak/data:/tools/free2speak/data
     environment:
       # space-separated list of tools to back up; must match volume mount names above
-      - TOOLS=flashcard
+      - TOOLS=flashcard free2speak
       - RCLONE_CONFIG_R2_TYPE=${RCLONE_CONFIG_R2_TYPE:?RCLONE_CONFIG_R2_TYPE env var is required}
       - RCLONE_CONFIG_R2_PROVIDER=${RCLONE_CONFIG_R2_PROVIDER:?RCLONE_CONFIG_R2_PROVIDER env var is required}
       - RCLONE_CONFIG_R2_ACCESS_KEY_ID=${RCLONE_CONFIG_R2_ACCESS_KEY_ID:?RCLONE_CONFIG_R2_ACCESS_KEY_ID env var is required}
