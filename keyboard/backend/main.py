@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
@@ -131,16 +131,31 @@ async def transcribe(audio: UploadFile):
     audio_bytes = await audio.read()
 
     t0 = time.perf_counter()
-    whisper_result = await call_whisper(audio_bytes, audio.filename or "audio.webm")
+    try:
+        whisper_result = await call_whisper(audio_bytes, audio.filename or "audio.webm")
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content={"error": "whisper_unavailable", "detail": str(e)},
+        )
     raw_text = (whisper_result.get("text") or "").strip()
     t1 = time.perf_counter()
 
-    final_text = await call_ollama_correction(raw_text) if raw_text else ""
+    warning = None
+    if raw_text:
+        try:
+            final_text = await call_ollama_correction(raw_text)
+        except Exception as e:
+            final_text = raw_text
+            warning = f"llm_unavailable: {e}"
+    else:
+        final_text = ""
     t2 = time.perf_counter()
 
     return {
         "raw": raw_text,
         "final": final_text,
+        "warning": warning,
         "timing": {
             "whisper_ms": int((t1 - t0) * 1000),
             "llm_ms": int((t2 - t1) * 1000),

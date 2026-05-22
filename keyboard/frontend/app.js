@@ -205,14 +205,28 @@ async function stopRecording(e) {
   const t0 = performance.now();
   try {
     const res = await fetch('/api/transcribe', { method: 'POST', body: formData });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
+    if (!res.ok) {
+      let errorCode = 'HTTP ' + res.status;
+      try {
+        const body = await res.json();
+        if (body && body.error) errorCode = body.error;
+      } catch (_) {}
+      throw new Error(errorCode);
+    }
     const data = await res.json();
     showResult(data, performance.now() - t0);
     setHint('按住說話');
+    if (data.warning) {
+      showToast('LLM 離線，顯示原始辨識。修復：docker start ollama', 6000);
+    }
   } catch (err) {
     console.error(err);
     setHint('辨識失敗');
-    showToast('辨識失敗');
+    if (err.message === 'whisper_unavailable') {
+      showToast('Whisper 離線。修復：docker start keyboard-whisper', 6000);
+    } else {
+      showToast('辨識失敗：' + err.message, 4000);
+    }
   }
 }
 
@@ -238,12 +252,12 @@ async function copyText(text) {
 copyFinalBtn.addEventListener('click', () => copyText(resultFinalEl.textContent));
 copyRawBtn.addEventListener('click', () => copyText(resultRawEl.textContent));
 
-function showToast(msg) {
+function showToast(msg, ms = 1500) {
   const el = document.createElement('div');
   el.className = 'toast';
   el.textContent = msg;
   document.body.appendChild(el);
-  setTimeout(() => el.remove(), 1500);
+  setTimeout(() => el.remove(), ms);
 }
 
 recordBtn.addEventListener('pointerdown', (e) => {
