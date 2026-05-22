@@ -59,3 +59,37 @@ Verify the R2 bucket:
 ```bash
 docker compose run --rm backup rclone ls r2:${R2_BUCKET}
 ```
+
+## Restore
+
+Pull a snapshot from R2 directly into the live `flashcard.db` slot. **Stop all dependent services first** (flashcard, etc.) — the script writes to the live path.
+
+List available snapshots:
+
+```bash
+docker compose run --rm backup rclone lsd r2:${R2_BUCKET}/flashcard/
+```
+
+Before pulling, manually remove the existing `flashcard.db` on the host (or move it aside for rollback):
+
+```bash
+cd flashcard/data
+mv flashcard.db flashcard.db.bak
+```
+
+If a service ever crashed mid-write, you may also see `flashcard.db-wal` and `flashcard.db-shm` siblings — delete those too. Under clean shutdown they don't exist, so usually you won't see them.
+
+Pull a specific date:
+
+```bash
+docker compose run --rm backup /pull.sh 2026-05-21
+```
+
+The script will:
+
+1. Refuse if any of `flashcard.db`, `flashcard.db-wal`, `flashcard.db-shm` still exists.
+2. Prompt for your host UID and GID — get them by running `id -u && id -g` on the host in another terminal. The pulled file is chowned to those values so the flashcard service can read/write it.
+3. Download `r2:${R2_BUCKET}/flashcard/2026-05-21/flashcard.db` to `flashcard/data/flashcard.db`.
+4. Run `PRAGMA integrity_check` to confirm the file is a valid SQLite database.
+
+Restart your services after the pull completes.
