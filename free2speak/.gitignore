@@ -1,15 +1,16 @@
-# Audio
-*.mp3
-*.m4a
-*.mp4
-*.wav
-*.aac
+# Personal practice content (backup via R2, not git)
+/data/
+
+# 1.0 archive (kept locally for migration; not committed)
+/1.0-archive/
+
+# Node / Vite
+node_modules/
+dist/
 
 # Python
 __pycache__/
+*.pyc
 
 # macOS
 .DS_Store
-
-# Personal practice content (backup via rsync, not git)
-/data/

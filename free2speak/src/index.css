@@ -1,0 +1,73 @@
+:root {
+  --text: #aeaeb2;
+  --text-h: #e8e3d9;
+  --text-dim: #636366;
+  --bg: #1c1c1e;
+  --card: #2c2c2e;
+  --raised: #3a3a3c;
+  --border: #3a3a3c;
+  --accent: #c79968;
+  --shadow: rgba(0, 0, 0, 0.3) 0 1px 4px;
+
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  font: 16px/145% var(--sans);
+  letter-spacing: 0.18px;
+  color-scheme: dark;
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+@keyframes glyphPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+.glyph-pulse {
+  animation: glyphPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pageFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.page-enter {
+  animation: pageFadeIn 0.18s ease;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+h1, h2 {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--text-h);
+  margin: 0;
+}
+
+p {
+  margin: 0;
+}

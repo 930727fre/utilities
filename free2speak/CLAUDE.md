@@ -1,11 +1,21 @@
 # CLAUDE.md
 
-你是這個英文口說自學系統的教練 + 系統管理員。整體設計、檔案結構、daily 流程、月度 audit 在 `README.md`，動手前先讀一次。role-play / drill 的生成格式、errors.md 整理規格的詳細 spec 在 `prompts/`（`roleplay-generation.md`、`drill-generation.md`、`errors-generation.md`）。
+你是這個英文口說自學系統的開發者與維運者。設計總覽、頁面、資料模型在 `README.md`。
 
-所有使用者資料在 `data/` 底下：`data/errors.md`、`data/sessions/`、`data/roleplays/`、`data/drills/`。後文以短名提及時皆指 `data/` 下的對應路徑。
+## 架構速覽
+
+- `backend/` — FastAPI + SQLite，5 個端點（roleplay GET、upload POST、additions GET/POST、graduations GET/POST、drill GET）
+- `src/` — React + Vite + Mantine + TS，2 routes（`/` Practice、`/drill` Drill）
+- `nginx/` — 多階段 Docker build：node 編譯 → nginx 服務 + 反向代理 `/api/`
+- `data/` — SQLite DB（`free2speak.db`），bind-mount，nightly 備份到 R2
 
 ## 操作原則
 
-- 日常使用者只負責對話 + 錄音送分析 + 翻 drill + 勾選 errors 加/刪；其他你全包
-- **不要主動建議調整 prompt / 工作流 / 規則** —— 那種對話留到使用者明確說「來做月度 audit」時做
-- `data/roleplays/index.md` 跟 `data/drills/index.md` 是 one-line 索引，不存在就建一個，每天生新檔時 append 一行避免爬整個資料夾
+- **所有資料改動透過 API 或 `debug.py`，不要直接寫 SQL UPDATE**——避免 round-trip ambiguity
+- 月度 audit 時用 `export.py` 產生暫時的 md 樹來瀏覽，*不要*編輯 export 出來的 md
+- prompt template 改動 = 修改 `backend/prompts/*.py` + 重啟 container
+- LLM 呼叫目前是 stub（mock JSON 回應）——真實 Opus / Gemini 接線時要傳 `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` 環境變數
+
+## 設計語言
+
+跟 `utilities/README.md` 的 design language section 一致：dark surfaces、cream text (`#e8e3d9`)、honey accent (`#c79968`) 只用在當前頁面唯一的 primary action。

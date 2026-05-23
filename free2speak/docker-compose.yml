@@ -1,0 +1,28 @@
+services:
+  free2speak-backend:
+    build: ./backend
+    container_name: free2speak-backend
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    expose:
+      - "8000"
+
+  free2speak-frontend:
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+    container_name: free2speak-frontend
+    restart: unless-stopped
+    depends_on:
+      - free2speak-backend
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true

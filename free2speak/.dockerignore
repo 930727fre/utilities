@@ -1,0 +1,9 @@
+node_modules
+dist
+data
+1.0-archive
+backend
+__pycache__
+*.pyc
+.git
+.DS_Store
