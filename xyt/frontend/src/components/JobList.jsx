@@ -5,6 +5,7 @@ const STATUS_LABEL = {
   PENDING:      '○',
   DOWNLOADING:  '○',
   TRANSCRIBING: '○',
+  ENRICHING:    '○',
   SUCCESS:      '',
   FAILED:       '!',
 }
@@ -12,10 +13,11 @@ const STATUS_TITLE = {
   PENDING:      'Pending',
   DOWNLOADING:  'Downloading',
   TRANSCRIBING: 'Transcribing',
+  ENRICHING:    'Enriching',
   SUCCESS:      'Ready',
   FAILED:       'Failed',
 }
-const isWorking = (s) => s === 'PENDING' || s === 'DOWNLOADING' || s === 'TRANSCRIBING'
+const isWorking = (s) => s === 'PENDING' || s === 'DOWNLOADING' || s === 'TRANSCRIBING' || s === 'ENRICHING'
 
 export default function JobList() {
   const [jobs, setJobs] = useState([])
@@ -158,7 +160,7 @@ export default function JobList() {
                   </div>
                   <div style={{ ...styles.actionSlot, textAlign: 'center' }}>
                     {job.status === 'SUCCESS' && job.files?.srt && (
-                      <a href={downloadUrl(job.job_id, 'srt')} download style={styles.srtBtn} title="Download SRT"
+                      <a href={downloadUrl(job.job_id, 'srt')} download style={styles.srtBtn} title="Download SRT (3-line stacked cues)"
                         onClick={e => e.stopPropagation()}>SRT</a>
                     )}
                   </div>

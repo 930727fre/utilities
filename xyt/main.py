@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     jobs = read_jobs()
     changed = False
     for job in jobs:
-        if job["status"] in ("DOWNLOADING", "TRANSCRIBING", "PENDING"):
+        if job["status"] in ("DOWNLOADING", "TRANSCRIBING", "ENRICHING", "PENDING"):
             job["status"] = "FAILED"
             job["error"] = "Interrupted by restart"
             job["updated_at"] = _now()
@@ -219,8 +219,7 @@ async def stream_subtitle(job_id: str):
         raise HTTPException(status_code=404, detail="File missing")
 
     srt = path.read_text(encoding="utf-8")
-    vtt = "WEBVTT\n\n" + srt.replace(",", ".", 1)
-    # replace all timestamp commas (e.g. 00:00:01,000 → 00:00:01.000)
+    # SRT → VTT: timestamps use `.` not `,` for ms separator
     import re
     vtt = "WEBVTT\n\n" + re.sub(r"(\d{2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", srt)
 
@@ -230,10 +229,8 @@ async def stream_subtitle(job_id: str):
 # ── Player HTML helpers ────────────────────────────────────────────────────
 
 def _player_html(job_id: str, title: str) -> str:
-    media = f'<video id="vid" controls autoplay style="width:100%;max-width:900px;border-radius:8px;background:#000"><source src="/api/stream/{job_id}/video" type="video/mp4"><track kind="subtitles" src="/api/stream/{job_id}/subtitle" default></video>'
-    transcript_html = '<script>document.getElementById(\'vid\').play().catch(()=>{});</script>'
     return f"""<!DOCTYPE html>
-<html lang="zh-Hant">
+<html>
 <head>
 <meta charset="UTF-8">
 <title>{title}</title>
@@ -242,12 +239,16 @@ def _player_html(job_id: str, title: str) -> str:
   *{{box-sizing:border-box;margin:0;padding:0}}
   body{{background:#0f0f0f;color:#e5e5e5;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;min-height:100vh;padding:2rem 1rem;padding-bottom:4rem}}
   h1{{font-size:1.1rem;margin-bottom:1rem;color:#d1d5db;max-width:900px;width:100%;text-align:center}}
+  video{{width:100%;max-width:900px;border-radius:8px;background:#000;display:block}}
 </style>
 </head>
 <body>
 <h1>{title}</h1>
-{media}
-{transcript_html}
+<video id="vid" controls autoplay crossorigin>
+  <source src="/api/stream/{job_id}/video" type="video/mp4">
+  <track kind="subtitles" src="/api/stream/{job_id}/subtitle" srclang="ja" label="ja+romaji+zh-Hant" default>
+</video>
+<script>document.getElementById('vid').play().catch(()=>{{}});</script>
 </body>
 </html>"""
 

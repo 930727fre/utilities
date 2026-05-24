@@ -7,6 +7,8 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+import pykakasi
+import requests
 import yt_dlp
 
 from storage import get_job, upsert_job
@@ -15,6 +17,12 @@ DOWNLOADS_DIR = "/app/data/downloads"
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
+ENRICH_TIMEOUT = 2 * 60 * 60      # 2 hours
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+
+_kks = pykakasi.kakasi()
 
 # Single GPU → serialize work to one job at a time.
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="transcribe-worker")
@@ -43,7 +51,7 @@ def _catch_unhandled(fn):
 @_catch_unhandled
 def process_video(job_id: str, url: str, transcribe: bool = True):
     job = get_job(job_id)
-    if not job or job["status"] in ("DELETED", "SUCCESS", "DOWNLOADING", "TRANSCRIBING"):
+    if not job or job["status"] in ("DELETED", "SUCCESS", "DOWNLOADING", "TRANSCRIBING", "ENRICHING"):
         return
 
     base_path = os.path.join(DOWNLOADS_DIR, job_id)
@@ -149,10 +157,96 @@ def _run_transcription(job_id: str, audio_path: str):
             f.write(f"{_fmt_time(seg['start'])} --> {_fmt_time(seg['end'])}\n")
             f.write(f"{seg['text'].strip()}\n\n")
 
-    job["status"] = "SUCCESS"
     job["files"]["srt"] = f"{job_id}.srt"
+    job["status"] = "ENRICHING"
     job["updated_at"] = _now()
     upsert_job(job)
+
+    _run_enrichment(job_id, srt_path)
+
+
+def _run_enrichment(job_id: str, srt_path: str):
+    cues = _parse_srt(srt_path)
+    started = _now()
+
+    def alive() -> bool:
+        if _elapsed(started) > ENRICH_TIMEOUT:
+            _fail(job_id, "Enrichment timed out (2 hour limit)")
+            return False
+        current = get_job(job_id)
+        if not current or current["status"] == "DELETED":
+            return False
+        return True
+
+    combined = []
+    for idx, time_line, text in cues:
+        if not alive():
+            return
+        romaji = _romanize(text)
+        try:
+            zh = _translate_to_zh_hant(text)
+        except Exception as e:
+            _fail(job_id, f"Translation failed at cue {idx}: {e}")
+            return
+        # Stack three lines per cue; browser <track> renders newlines as line breaks.
+        stacked = "\n".join(s for s in (text, romaji, zh) if s)
+        combined.append((idx, time_line, stacked))
+
+    _write_srt(srt_path, combined)
+
+    job = get_job(job_id)
+    if not job or job["status"] == "DELETED":
+        return
+    job["status"] = "SUCCESS"
+    job["updated_at"] = _now()
+    upsert_job(job)
+
+
+def _parse_srt(path: str) -> list:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    out = []
+    for block in content.strip().split("\n\n"):
+        lines = block.split("\n")
+        if len(lines) < 3:
+            continue
+        out.append((lines[0], lines[1], "\n".join(lines[2:])))
+    return out
+
+
+def _write_srt(path: str, cues: list):
+    with open(path, "w", encoding="utf-8") as f:
+        for idx, time_line, text in cues:
+            f.write(f"{idx}\n{time_line}\n{text}\n\n")
+
+
+def _romanize(text: str) -> str:
+    if not text.strip():
+        return ""
+    items = _kks.convert(text)
+    return " ".join(item["hepburn"] for item in items).strip()
+
+
+def _translate_to_zh_hant(text: str) -> str:
+    if not text.strip():
+        return ""
+    resp = requests.post(
+        f"{OLLAMA_URL}/api/generate",
+        json={
+            "model": OLLAMA_MODEL,
+            "prompt": (
+                "Translate the following Japanese subtitle line to Traditional Chinese.\n"
+                "Output ONLY the translation. No commentary, no romanization, no Japanese.\n\n"
+                f"Japanese: {text}\n"
+                "Traditional Chinese:"
+            ),
+            "stream": False,
+            "options": {"temperature": 0.2},
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()["response"].strip()
 
 
 def _transcribe_worker(mp4_path: str, result_file: str):
