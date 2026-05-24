@@ -6,11 +6,11 @@ export async function listJobs() {
   return r.json()
 }
 
-export async function submitJob(url) {
+export async function submitJob(url, transcribe = true) {
   const r = await fetch(`${BASE}/api/jobs`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify({ url, transcribe }),
   })
   if (!r.ok) throw new Error('Submit failed')
   return r.json()

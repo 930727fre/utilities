@@ -21,6 +21,7 @@ export default function JobList() {
   const [jobs, setJobs] = useState([])
   const [expandedIds, setExpandedIds] = useState(() => new Set())
   const [url, setUrl] = useState('')
+  const [transcribe, setTranscribe] = useState(true)
   const submittingRef = useRef(false)
 
   async function refresh() {
@@ -52,7 +53,7 @@ export default function JobList() {
     submittingRef.current = true
     setUrl('')
     try {
-      await submitJob(trimmed)
+      await submitJob(trimmed, transcribe)
       await refresh()
     } catch (err) {
       alert('Submit failed: ' + err.message)
@@ -104,6 +105,20 @@ export default function JobList() {
           onKeyDown={e => { if (e.key === 'Enter') handleSubmit() }}
           style={styles.urlInput}
         />
+        <div role="group" aria-label="Output mode" style={styles.modePill}>
+          <button
+            type="button"
+            onClick={() => setTranscribe(false)}
+            title="Download MP4 only"
+            style={transcribe ? styles.modeSegInactive : styles.modeSegActive}
+          >MP4</button>
+          <button
+            type="button"
+            onClick={() => setTranscribe(true)}
+            title="Download MP4 + generate captions"
+            style={transcribe ? styles.modeSegActive : styles.modeSegInactive}
+          >SRT</button>
+        </div>
         <button onClick={handleSubmit} title="Submit" aria-label="Submit" style={styles.submitBtn}>
           →
         </button>
@@ -179,6 +194,20 @@ const styles = {
     background: '#c79968', color: '#1c1c1e', border: 'none',
     borderRadius: 8, padding: '6px 20px', cursor: 'pointer', fontSize: 22, fontWeight: 700,
     lineHeight: 1,
+  },
+  modePill: {
+    display: 'flex', background: '#2c2c2e', border: '1px solid #3a3a3c',
+    borderRadius: 8, padding: 2, fontFamily: MONO,
+  },
+  modeSegActive: {
+    background: '#3a3a3c', color: '#e8e3d9', border: 'none',
+    borderRadius: 6, padding: '6px 10px', cursor: 'pointer',
+    fontSize: 12, fontWeight: 700, lineHeight: 1, fontFamily: 'inherit',
+  },
+  modeSegInactive: {
+    background: 'transparent', color: '#636366', border: 'none',
+    borderRadius: 6, padding: '6px 10px', cursor: 'pointer',
+    fontSize: 12, fontWeight: 700, lineHeight: 1, fontFamily: 'inherit',
   },
   grid: { display: 'flex', flexDirection: 'column', gap: 12 },
   empty: { color: '#636366', textAlign: 'center', marginTop: 60, fontSize: 14 },

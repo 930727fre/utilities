@@ -1,6 +1,6 @@
 # xyt
 
-Paste a YouTube URL, wait, download SRT — or stream the video/audio back with captions. GPU-accelerated Whisper transcription, single-process.
+Paste a YouTube URL, wait, download SRT — or stream the video back with captions. GPU-accelerated Whisper transcription, single-process.
 
 ## Stack
 
@@ -12,14 +12,13 @@ Paste a YouTube URL, wait, download SRT — or stream the video/audio back with 
 | Whisper isolation | each transcription runs in a `multiprocessing.spawn` subprocess so VRAM is released between jobs |
 | Downloader | `yt-dlp` (best mp4) |
 | Transcriber | `openai-whisper` model `medium`, `device=cuda` |
-| Inbox scanner | asyncio task in FastAPI lifespan, polls `/app/data/inbox/*.mp3` every 5 s |
-| Storage | `data/jobs.json` (file-locked) + `data/downloads/*.mp4` + `.srt` + inbox `.mp3` |
+| Storage | `data/jobs.json` (file-locked) + `data/downloads/*.mp4` + `.srt` |
 
 ## Services
 
 ```
 docker compose
-├── xyt-app        # FastAPI + executor + inbox scan (GPU)
+├── xyt-app        # FastAPI + executor (GPU)
 └── xyt-frontend   # Vite + React — dashboard, proxies /api & /player
 ```
 
@@ -53,10 +52,9 @@ The backend exposes these routes. The frontend container's Vite proxy forwards `
 | `GET`  | `/api/jobs/{id}` | Single job |
 | `POST` | `/api/jobs/{id}/retry` | Re-queue a failed job |
 | `DELETE` | `/api/jobs/{id}` | Cancel + remove job and its files |
-| `GET`  | `/api/download/{id}/{kind}` | `kind` ∈ `mp4` / `mp3` / `srt`; downloads the file |
+| `GET`  | `/api/download/{id}/{kind}` | `kind` ∈ `mp4` / `srt`; downloads the file |
 | `GET`  | `/player/{id}` | Standalone player page (new tab) |
 | `GET`  | `/api/stream/{id}/video` | MP4 with `Range` support for seek |
-| `GET`  | `/api/stream/{id}/audio` | MP3 with `Range` support |
 | `GET`  | `/api/stream/{id}/subtitle` | SRT → VTT on the fly for the `<track>` element |
 
 ## Job states
@@ -74,4 +72,4 @@ UI follows the [utility repo's design language](../README.md#design-language): m
 
 - **`jobs.json` is file-locked**, not a real DB. For two users hammering at once you'd want SQLite — fine for single-user.
 - **Whisper model is hardcoded** to `medium`. Larger models would mean better accuracy + much longer GPU time.
-- **No persistent queue.** Submitting jobs while the app is down is not possible (no broker absorbs them). For single-user this is fine; for anything async, drop files into `data/inbox/` and the scanner will pick them up on next tick.
+- **No persistent queue.** Submitting jobs while the app is down is not possible (no broker absorbs them). For single-user this is fine.

@@ -4,16 +4,14 @@ import multiprocessing
 import os
 import tempfile
 import traceback
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import yt_dlp
 
-from storage import get_job, read_jobs, upsert_job
+from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = "/app/data/downloads"
-SCAN_DIR = os.getenv("SCAN_DIR", "/app/data/inbox")
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
@@ -43,7 +41,7 @@ def _catch_unhandled(fn):
 
 
 @_catch_unhandled
-def process_video(job_id: str, url: str):
+def process_video(job_id: str, url: str, transcribe: bool = True):
     job = get_job(job_id)
     if not job or job["status"] in ("DELETED", "SUCCESS", "DOWNLOADING", "TRANSCRIBING"):
         return
@@ -85,53 +83,18 @@ def process_video(job_id: str, url: str):
 
     job["title"] = title
     job["files"]["mp4"] = f"{job_id}.mp4"
+
+    if not transcribe:
+        job["status"] = "SUCCESS"
+        job["updated_at"] = _now()
+        upsert_job(job)
+        return
+
     job["status"] = "TRANSCRIBING"
     job["updated_at"] = _now()
     upsert_job(job)
 
     _run_transcription(job_id, base_path + ".mp4")
-
-
-@_catch_unhandled
-def transcribe_file(job_id: str, src_path: str):
-    job = get_job(job_id)
-    if not job or job["status"] in ("DELETED", "SUCCESS", "TRANSCRIBING"):
-        return
-
-    job["files"]["mp3"] = src_path
-    job["status"] = "TRANSCRIBING"
-    job["updated_at"] = _now()
-    upsert_job(job)
-
-    _run_transcription(job_id, src_path)
-
-
-def scan_inbox() -> int:
-    os.makedirs(SCAN_DIR, exist_ok=True)
-    tracked = {j.get("source_file") for j in read_jobs() if j["status"] != "DELETED"}
-    count = 0
-    for fname in sorted(os.listdir(SCAN_DIR)):
-        if not fname.lower().endswith(".mp3"):
-            continue
-        if fname in tracked:
-            continue
-        job_id = str(uuid.uuid4())
-        job = {
-            "job_id": job_id,
-            "url": "",
-            "title": os.path.splitext(fname)[0],
-            "source_file": fname,
-            "status": "PENDING",
-            "progress": {},
-            "files": {"mp3": None, "srt": None},
-            "error": None,
-            "created_at": _now(),
-            "updated_at": _now(),
-        }
-        upsert_job(job)
-        executor.submit(transcribe_file, job_id, os.path.join(SCAN_DIR, fname))
-        count += 1
-    return count
 
 
 def _run_transcription(job_id: str, audio_path: str):

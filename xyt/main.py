@@ -1,5 +1,3 @@
-import asyncio
-import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -10,10 +8,9 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileRes
 from pydantic import BaseModel
 
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
-from tasks import SCAN_DIR, executor, process_video, scan_inbox, transcribe_file
+from tasks import executor, process_video
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
-INBOX_SCAN_INTERVAL = 5.0
 
 
 def _now() -> str:
@@ -24,7 +21,6 @@ def _now() -> str:
 async def lifespan(app: FastAPI):
     ensure_jobs_file()
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    Path(SCAN_DIR).mkdir(parents=True, exist_ok=True)
 
     # Any job mid-flight (or queued) at startup is orphaned from a prior crash.
     # Mark FAILED so the UI surfaces ! / ↻ instead of an eternal ○.
@@ -40,21 +36,10 @@ async def lifespan(app: FastAPI):
     if changed:
         write_jobs(jobs)
 
-    scan_task = asyncio.create_task(_inbox_scan_loop())
     try:
         yield
     finally:
-        scan_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
-
-
-async def _inbox_scan_loop():
-    while True:
-        try:
-            scan_inbox()
-        except Exception as exc:
-            print(f"[scan_inbox] {exc}", flush=True)
-        await asyncio.sleep(INBOX_SCAN_INTERVAL)
 
 
 app = FastAPI(lifespan=lifespan)
@@ -65,7 +50,7 @@ async def health():
     return {"ok": True}
 
 
-def _new_job(job_id: str, url: str) -> dict:
+def _new_job(job_id: str, url: str, transcribe: bool) -> dict:
     return {
         "job_id": job_id,
         "url": url,
@@ -73,6 +58,7 @@ def _new_job(job_id: str, url: str) -> dict:
         "status": "PENDING",
         "progress": {},
         "files": {"mp4": None, "srt": None},
+        "transcribe": transcribe,
         "error": None,
         "created_at": _now(),
         "updated_at": _now(),
@@ -91,22 +77,22 @@ async def player(job_id: str):
             content=_player_not_ready_html(job["title"]),
             status_code=200,
         )
-    is_audio = bool(job["files"].get("mp3")) and not job["files"].get("mp4")
-    return HTMLResponse(content=_player_html(job_id, job["title"], audio_only=is_audio))
+    return HTMLResponse(content=_player_html(job_id, job["title"]))
 
 
 # ── API ────────────────────────────────────────────────────────────────────
 
 class SubmitRequest(BaseModel):
     url: str
+    transcribe: bool = True
 
 
 @app.post("/api/jobs", status_code=201)
 async def submit_job(req: SubmitRequest):
     job_id = str(uuid.uuid4())
-    job = _new_job(job_id, req.url)
+    job = _new_job(job_id, req.url, req.transcribe)
     upsert_job(job)
-    executor.submit(process_video, job_id, req.url)
+    executor.submit(process_video, job_id, req.url, req.transcribe)
     return {"job_id": job_id, "status": "PENDING"}
 
 
@@ -133,10 +119,7 @@ async def retry_job(job_id: str):
     job["progress"] = {}
     job["updated_at"] = _now()
     upsert_job(job)
-    if job.get("source_file"):
-        executor.submit(transcribe_file, job_id, os.path.join(SCAN_DIR, job["source_file"]))
-    else:
-        executor.submit(process_video, job_id, job["url"])
+    executor.submit(process_video, job_id, job["url"], job.get("transcribe", True))
     return {"ok": True}
 
 
@@ -150,21 +133,11 @@ async def delete_job(job_id: str):
         filename = job["files"].get(key)
         if filename:
             (DOWNLOADS_DIR / filename).unlink(missing_ok=True)
-    if job["files"].get("mp3"):
-        Path(job["files"]["mp3"]).unlink(missing_ok=True)
 
     job["status"] = "DELETED"
     job["updated_at"] = _now()
     upsert_job(job)
     return {"ok": True}
-
-
-# ── Scan ───────────────────────────────────────────────────────────────────
-
-@app.post("/api/scan")
-async def scan():
-    count = scan_inbox()
-    return {"queued": count}
 
 
 # ── Downloads ─────────────────────────────────────────────────────────────
@@ -178,17 +151,6 @@ async def download_mp4(job_id: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="File missing")
     return FileResponse(path, filename=f"{job['title']}.mp4", media_type="video/mp4")
-
-
-@app.get("/api/download/{job_id}/mp3")
-async def download_mp3(job_id: str):
-    job = get_job(job_id)
-    if not job or not job["files"].get("mp3"):
-        raise HTTPException(status_code=404, detail="Not found")
-    path = Path(job["files"]["mp3"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="File missing")
-    return FileResponse(path, filename=f"{job['title']}.mp3", media_type="audio/mpeg")
 
 
 @app.get("/api/download/{job_id}/srt")
@@ -246,48 +208,6 @@ async def stream_video(job_id: str, request: Request):
     return StreamingResponse(iter_file(), status_code=status_code, headers=headers, media_type="video/mp4")
 
 
-@app.get("/api/stream/{job_id}/audio")
-async def stream_audio(job_id: str, request: Request):
-    job = get_job(job_id)
-    if not job or not job["files"].get("mp3"):
-        raise HTTPException(status_code=404, detail="Not found")
-
-    path = Path(job["files"]["mp3"])
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="File missing")
-
-    file_size = path.stat().st_size
-    start, end = 0, file_size - 1
-
-    range_header = request.headers.get("range")
-    if range_header:
-        range_val = range_header.replace("bytes=", "")
-        parts = range_val.split("-")
-        start = int(parts[0])
-        end = int(parts[1]) if parts[1] else file_size - 1
-
-    chunk_size = end - start + 1
-
-    def iter_file():
-        with open(path, "rb") as f:
-            f.seek(start)
-            remaining = chunk_size
-            while remaining > 0:
-                data = f.read(min(65536, remaining))
-                if not data:
-                    break
-                remaining -= len(data)
-                yield data
-
-    headers = {
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(chunk_size),
-    }
-    status_code = 206 if range_header else 200
-    return StreamingResponse(iter_file(), status_code=status_code, headers=headers, media_type="audio/mpeg")
-
-
 @app.get("/api/stream/{job_id}/subtitle")
 async def stream_subtitle(job_id: str):
     job = get_job(job_id)
@@ -309,72 +229,9 @@ async def stream_subtitle(job_id: str):
 
 # ── Player HTML helpers ────────────────────────────────────────────────────
 
-def _player_html(job_id: str, title: str, audio_only: bool = False) -> str:
-    if audio_only:
-        media = f'<audio id="vid" controls autoplay style="width:100%;max-width:900px"><source src="/api/stream/{job_id}/audio" type="audio/mpeg"></audio>'
-        transcript_html = f"""
-<div id="transcript" style="width:100%;max-width:900px;margin-top:1.5rem;display:flex;flex-direction:column;gap:4px"></div>
-<script>
-  const audio = document.getElementById('vid');
-  audio.play().catch(()=>{{}});
-
-  let cues = [];
-
-  async function loadTranscript() {{
-    const res = await fetch('/api/stream/{job_id}/subtitle');
-    const vtt = await res.text();
-    const lines = vtt.split('\\n');
-    let i = 0;
-    while (i < lines.length) {{
-      const timeLine = lines[i].match(/(\d{{2}}:\d{{2}}:\d{{2}}\.\d{{3}}) --> (\d{{2}}:\d{{2}}:\d{{2}}\.\d{{3}})/);
-      if (timeLine) {{
-        const start = parseVttTime(timeLine[1]);
-        const end = parseVttTime(timeLine[2]);
-        let text = '';
-        i++;
-        while (i < lines.length && lines[i].trim() !== '') {{
-          text += (text ? ' ' : '') + lines[i].trim();
-          i++;
-        }}
-        cues.push({{ start, end, text }});
-      }} else {{
-        i++;
-      }}
-    }}
-    render();
-  }}
-
-  function parseVttTime(t) {{
-    const [h, m, s] = t.split(':');
-    return parseInt(h) * 3600 + parseInt(m) * 60 + parseFloat(s);
-  }}
-
-  function render() {{
-    const el = document.getElementById('transcript');
-    el.innerHTML = cues.map((c, i) =>
-      `<div data-i="${{i}}" onclick="seek(${{c.start}})" style="padding:6px 10px;border-radius:6px;cursor:pointer;font-size:0.9rem;line-height:1.5;color:#9ca3af;transition:background .15s">${{c.text}}</div>`
-    ).join('');
-  }}
-
-  function seek(t) {{ audio.currentTime = t; audio.play(); }}
-
-  audio.addEventListener('timeupdate', () => {{
-    const t = audio.currentTime;
-    cues.forEach((c, i) => {{
-      const el = document.querySelector(`[data-i="${{i}}"]`);
-      if (!el) return;
-      const active = t >= c.start && t < c.end;
-      el.style.background = active ? '#1d2535' : '';
-      el.style.color = active ? '#f3f4f6' : '#9ca3af';
-      if (active) el.scrollIntoView({{ block: 'nearest', behavior: 'smooth' }});
-    }});
-  }});
-
-  loadTranscript();
-</script>"""
-    else:
-        media = f'<video id="vid" controls autoplay style="width:100%;max-width:900px;border-radius:8px;background:#000"><source src="/api/stream/{job_id}/video" type="video/mp4"><track kind="subtitles" src="/api/stream/{job_id}/subtitle" default></video>'
-        transcript_html = '<script>document.getElementById(\'vid\').play().catch(()=>{});</script>'
+def _player_html(job_id: str, title: str) -> str:
+    media = f'<video id="vid" controls autoplay style="width:100%;max-width:900px;border-radius:8px;background:#000"><source src="/api/stream/{job_id}/video" type="video/mp4"><track kind="subtitles" src="/api/stream/{job_id}/subtitle" default></video>'
+    transcript_html = '<script>document.getElementById(\'vid\').play().catch(()=>{});</script>'
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
