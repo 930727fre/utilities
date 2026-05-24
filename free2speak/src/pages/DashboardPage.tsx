@@ -121,12 +121,6 @@ export default function DashboardPage() {
               </Button>
             </Group>
 
-            {/* Footer stat */}
-            <Text size="xs" c="var(--text-dim)" ta="center" mt="sm"
-              style={{ fontFamily: 'var(--mono)' }}>
-              {stats?.active_errors_count ?? 0} active errors
-            </Text>
-
           </Stack>
         )}
       </Transition>

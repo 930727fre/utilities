@@ -1,17 +1,14 @@
 import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Stack, Title, Text, Button, Group, Box,
+  Stack, Title, Text, Group, Box, Button,
 } from '@mantine/core';
-import { useNavigate } from 'react-router-dom';
-import { IconArrowLeft } from '@tabler/icons-react';
+import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import { api } from '../api';
 import PageShell from '../components/PageShell';
 import CardShell from '../components/CardShell';
-import SwipeCard from '../components/SwipeCard';
 
 export default function DrillPage() {
-  const navigate = useNavigate();
   const { data: cards } = useQuery({
     queryKey: ['today-drill'],
     queryFn: api.getTodayDrill,
@@ -55,22 +52,6 @@ export default function DrillPage() {
   return (
     <PageShell scroll="locked">
       <Stack gap="md" style={{ flex: 1, minHeight: 0 }}>
-        <Group justify="space-between">
-          <Button
-            variant="subtle"
-            leftSection={<IconArrowLeft size={16} />}
-            onClick={() => navigate('/')}
-            style={{ color: 'var(--text)', fontFamily: 'var(--mono)' }}
-          >
-            Back
-          </Button>
-          {cards && (
-            <Text c="var(--text-dim)" size="xs" style={{ fontFamily: 'var(--mono)' }}>
-              {total === 0 ? '0 / 0' : `${index + 1} / ${total}`}
-            </Text>
-          )}
-        </Group>
-
         {!cards && (
           <CardShell>
             <Box p="lg"><Text c="var(--text-dim)">Loading...</Text></Box>
@@ -93,47 +74,77 @@ export default function DrillPage() {
 
         {current && (
           <>
-            <SwipeCard
-              onLeft={prev}
-              onRight={next}
-              disabled={index === 0 && index === total - 1}
-              leftHint="rgba(170, 170, 170, 0.15)"
-              rightHint="rgba(170, 170, 170, 0.15)"
-            >
-              <CardShell onClick={() => setFlipped((f) => !f)}>
-                <Stack gap="md" p={{ base: 'lg', sm: 40 }} style={{ flex: 1, justifyContent: 'center' }}>
-                  <Text c="var(--text-h)" ta="center"
-                    style={{ fontSize: 'clamp(1.1rem, 4vw, 1.5rem)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                    {current.prompt}
-                  </Text>
+            <CardShell onClick={() => setFlipped((f) => !f)}>
+              <Stack gap="md" p={{ base: 'lg', sm: 40 }}
+                style={{ flex: 1, justifyContent: 'center', position: 'relative' }}>
+                <Text c="var(--text-dim)" size="xs"
+                  style={{
+                    position: 'absolute', top: 16, right: 20,
+                    fontFamily: 'var(--mono)',
+                  }}>
+                  {index + 1} / {total}
+                </Text>
+                <Text c="var(--text-h)" ta="center"
+                  style={{ fontSize: 'clamp(1.1rem, 4vw, 1.5rem)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                  {current.prompt}
+                </Text>
 
-                  {flipped ? (
-                    <Box mt="xl" pt="lg" style={{ borderTop: '1px solid var(--border)' }}>
-                      <Text c="var(--text-h)" ta="center" fw={600}
-                        style={{ fontSize: 'clamp(1rem, 3.5vw, 1.4rem)', lineHeight: 1.5 }}>
-                        {current.answer}
-                      </Text>
-                      {current.source_error_id && (
-                        <Text c="var(--text-dim)" size="xs" ta="center" mt="md"
-                          style={{ fontFamily: 'var(--mono)' }}>
-                          errors.md: {current.source_error_id}
-                        </Text>
-                      )}
-                    </Box>
-                  ) : (
-                    <Text c="var(--text-dim)" size="xs" ta="center" mt="xl"
-                      style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
-                      tap to reveal
+                {flipped ? (
+                  <Box mt="xl" pt="lg" style={{ borderTop: '1px solid var(--border)' }}>
+                    <Text c="var(--text-h)" ta="center" fw={600}
+                      style={{ fontSize: 'clamp(1rem, 3.5vw, 1.4rem)', lineHeight: 1.5 }}>
+                      {current.answer}
                     </Text>
-                  )}
-                </Stack>
-              </CardShell>
-            </SwipeCard>
+                    {current.source_error_id && (
+                      <Text c="var(--text-dim)" size="xs" ta="center" mt="md"
+                        style={{ fontFamily: 'var(--mono)' }}>
+                        errors.md: {current.source_error_id}
+                      </Text>
+                    )}
+                  </Box>
+                ) : (
+                  <Text c="var(--text-dim)" size="xs" ta="center" mt="xl"
+                    style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
+                    tap to reveal
+                  </Text>
+                )}
+              </Stack>
+            </CardShell>
 
-            <Text c="var(--text-dim)" size="xs" ta="center"
-              style={{ fontFamily: 'var(--mono)' }}>
-              tap to flip · swipe to navigate
-            </Text>
+            <Group grow gap="sm">
+              <Button
+                size="lg"
+                radius={8}
+                disabled={index === 0}
+                onClick={prev}
+                leftSection={<IconChevronLeft size={18} />}
+                style={{
+                  background: 'transparent',
+                  color: 'var(--text-h)',
+                  border: '1px solid var(--border)',
+                  height: 54,
+                  fontFamily: 'var(--mono)',
+                }}
+              >
+                Prev
+              </Button>
+              <Button
+                size="lg"
+                radius={8}
+                disabled={index === total - 1}
+                onClick={next}
+                rightSection={<IconChevronRight size={18} />}
+                style={{
+                  background: 'transparent',
+                  color: 'var(--text-h)',
+                  border: '1px solid var(--border)',
+                  height: 54,
+                  fontFamily: 'var(--mono)',
+                }}
+              >
+                Next
+              </Button>
+            </Group>
           </>
         )}
       </Stack>

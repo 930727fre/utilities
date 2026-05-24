@@ -1,9 +1,8 @@
 import type {
   Roleplay,
-  ErrorCandidate,
-  GraduateCandidate,
   DrillCard,
   TodayStats,
+  ReviewBundle,
 } from './types';
 
 const API_BASE = '/api';
@@ -33,15 +32,13 @@ export const api = {
     return res.json() as Promise<{ session_id: string; date: string; topic: string }>;
   },
 
-  getAdditions: () => apiFetch<ErrorCandidate[]>('/today/review/additions'),
+  getReview: () => apiFetch<ReviewBundle>('/today/review'),
 
   applyAdditions: (candidateIds: string[]) =>
     apiFetch<{ added: number }>('/errors/additions', {
       method: 'POST',
       body: JSON.stringify({ candidate_ids: candidateIds }),
     }),
-
-  getGraduations: () => apiFetch<GraduateCandidate[]>('/today/review/graduations'),
 
   applyGraduations: (errorIds: string[]) =>
     apiFetch<{ graduated: number }>('/errors/graduations', {

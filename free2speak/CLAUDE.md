@@ -4,7 +4,7 @@
 
 ## 架構速覽
 
-- `backend/` — FastAPI + SQLite，5 個端點（roleplay GET、upload POST、additions GET/POST、graduations GET/POST、drill GET）
+- `backend/` — FastAPI + SQLite，端點：roleplay GET、upload POST、review GET（回傳 `{ additions, graduations }` 一次拿齊，避免步驟切換時 loading flash）、additions POST、graduations POST、drill GET
 - `src/` — React + Vite + Mantine + TS，2 routes（`/` Practice、`/drill` Drill）
 - `nginx/` — 多階段 Docker build：node 編譯 → nginx 服務 + 反向代理 `/api/`
 - `data/` — SQLite DB（`free2speak.db`），bind-mount，nightly 備份到 R2

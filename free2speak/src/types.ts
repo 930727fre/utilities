@@ -34,3 +34,8 @@ export interface TodayStats {
   drill_done_today: boolean;
   active_errors_count: number;
 }
+
+export interface ReviewBundle {
+  additions: ErrorCandidate[];
+  graduations: GraduateCandidate[];
+}

@@ -39,6 +39,11 @@ class GraduationsApply(BaseModel):
     error_ids: list[str]
 
 
+class ReviewBundle(BaseModel):
+    additions: list[ErrorCandidate]
+    graduations: list[GraduateCandidate]
+
+
 class TodayStats(BaseModel):
     streak_count: int
     practice_done_today: bool

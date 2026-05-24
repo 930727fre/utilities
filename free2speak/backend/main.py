@@ -8,6 +8,7 @@ from models import (
     DrillCard,
     AdditionsApply,
     GraduationsApply,
+    ReviewBundle,
     TodayStats,
 )
 
@@ -62,49 +63,47 @@ async def upload_audio(file: UploadFile = File(...)):
     }
 
 
-@app.get("/today/review/additions", response_model=list[ErrorCandidate])
-def get_addition_candidates():
-    return [
-        ErrorCandidate(
-            id="add-1",
-            title="break the lease vs. cancel the contract",
-            you_said="Can I cancel the contract?",
-            native="Can I break the lease?",
-        ),
-        ErrorCandidate(
-            id="add-2",
-            title="room for negotiation",
-            you_said="Can we negotiate more?",
-            native="Is there room for negotiation?",
-        ),
-        ErrorCandidate(
-            id="add-3",
-            title="follow up (intransitive)",
-            you_said="follow up it",
-            native="follow up on it / follow it up",
-        ),
-    ]
+@app.get("/today/review", response_model=ReviewBundle)
+def get_today_review():
+    return ReviewBundle(
+        additions=[
+            ErrorCandidate(
+                id="add-1",
+                title="break the lease vs. cancel the contract",
+                you_said="Can I cancel the contract?",
+                native="Can I break the lease?",
+            ),
+            ErrorCandidate(
+                id="add-2",
+                title="room for negotiation",
+                you_said="Can we negotiate more?",
+                native="Is there room for negotiation?",
+            ),
+            ErrorCandidate(
+                id="add-3",
+                title="follow up (intransitive)",
+                you_said="follow up it",
+                native="follow up on it / follow it up",
+            ),
+        ],
+        graduations=[
+            GraduateCandidate(
+                id="grad-1",
+                title="used to + V (過去習慣)",
+                evidence="I used to live in Taipei before moving here.",
+            ),
+            GraduateCandidate(
+                id="grad-2",
+                title="Thanks for X-ing",
+                evidence="Thanks for showing me around.",
+            ),
+        ],
+    )
 
 
 @app.post("/errors/additions")
 def apply_additions(body: AdditionsApply):
     return {"added": len(body.candidate_ids)}
-
-
-@app.get("/today/review/graduations", response_model=list[GraduateCandidate])
-def get_graduation_candidates():
-    return [
-        GraduateCandidate(
-            id="grad-1",
-            title="used to + V (過去習慣)",
-            evidence="I used to live in Taipei before moving here.",
-        ),
-        GraduateCandidate(
-            id="grad-2",
-            title="Thanks for X-ing",
-            evidence="Thanks for showing me around.",
-        ),
-    ]
 
 
 @app.post("/errors/graduations")

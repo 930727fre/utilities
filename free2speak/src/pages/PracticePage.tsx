@@ -5,14 +5,13 @@ import {
   Stack, Title, Text, Button, Group, Box, FileButton,
 } from '@mantine/core';
 import { useNavigate } from 'react-router-dom';
-import { IconArrowLeft, IconUpload } from '@tabler/icons-react';
+import { IconUpload } from '@tabler/icons-react';
 import { api } from '../api';
 import type { ErrorCandidate, GraduateCandidate } from '../types';
 import PageShell from '../components/PageShell';
 import CardShell from '../components/CardShell';
-import SwipeCard from '../components/SwipeCard';
 
-type Step = 'roleplay' | 'upload' | 'additions' | 'graduations' | 'looping';
+type Step = 'roleplay' | 'upload' | 'additions' | 'graduations';
 
 export default function PracticePage() {
   const navigate = useNavigate();
@@ -20,29 +19,22 @@ export default function PracticePage() {
   const [step, setStep] = useState<Step>('roleplay');
   const [audioFile, setAudioFile] = useState<File | null>(null);
 
-  const goNextRoleplay = () => {
-    queryClient.invalidateQueries({ queryKey: ['today-roleplay'] });
-    queryClient.invalidateQueries({ queryKey: ['today-additions'] });
-    queryClient.invalidateQueries({ queryKey: ['today-graduations'] });
+  const { data: review } = useQuery({
+    queryKey: ['today-review'],
+    queryFn: api.getReview,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    gcTime: 0,
+  });
+
+  const finish = () => {
     queryClient.invalidateQueries({ queryKey: ['today-stats'] });
-    setAudioFile(null);
-    setStep('roleplay');
+    navigate('/');
   };
 
   return (
     <PageShell scroll="locked">
       <Stack gap="md" style={{ flex: 1, minHeight: 0 }}>
-        <Group justify="space-between">
-          <Button
-            variant="subtle"
-            leftSection={<IconArrowLeft size={16} />}
-            onClick={() => navigate('/')}
-            style={{ color: 'var(--text)', fontFamily: 'var(--mono)' }}
-          >
-            Back
-          </Button>
-        </Group>
-
         {step === 'roleplay' && (
           <RoleplayStep onDone={() => setStep('upload')} />
         )}
@@ -54,13 +46,16 @@ export default function PracticePage() {
           />
         )}
         {step === 'additions' && (
-          <AdditionsStep onComplete={() => setStep('graduations')} />
+          <AdditionsStep
+            candidates={review?.additions}
+            onComplete={() => setStep('graduations')}
+          />
         )}
         {step === 'graduations' && (
-          <GraduationsStep onComplete={() => setStep('looping')} />
-        )}
-        {step === 'looping' && (
-          <DoneStep onNext={goNextRoleplay} onBack={() => navigate('/')} />
+          <GraduationsStep
+            candidates={review?.graduations}
+            onComplete={finish}
+          />
         )}
       </Stack>
     </PageShell>
@@ -78,39 +73,41 @@ function RoleplayStep({ onDone }: { onDone: () => void }) {
 
   return (
     <>
-      <SwipeCard
-        onLeft={onDone}
-        onRight={onDone}
-        disabled={!roleplay}
-        leftHint="rgba(170, 170, 170, 0.15)"
-        rightHint="rgba(170, 170, 170, 0.15)"
-      >
-        <CardShell>
-          <Stack gap="md" p={{ base: 'lg', sm: 32 }} style={{ flex: 1, minHeight: 0 }}>
-            <Box>
-              <Text c="var(--text-dim)" size="xs"
-                style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
-                {roleplay ? `${roleplay.date} · ${roleplay.topic}` : 'loading...'}
-              </Text>
-              {roleplay && (
-                <Text c="var(--text)" size="sm" mt="xs" style={{ fontFamily: 'var(--mono)' }}>
-                  {roleplay.rationale}
-                </Text>
-              )}
-            </Box>
-            {isLoading && <Text c="var(--text-dim)">Loading...</Text>}
+      <CardShell>
+        <Stack gap="md" p={{ base: 'lg', sm: 32 }} style={{ flex: 1, minHeight: 0 }}>
+          <Box>
+            <Text c="var(--text-dim)" size="xs"
+              style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
+              {roleplay ? `${roleplay.date} · ${roleplay.topic}` : 'loading...'}
+            </Text>
             {roleplay && (
-              <Text c="var(--text-h)" style={{ whiteSpace: 'pre-wrap', fontSize: 16, lineHeight: 1.6 }}>
-                {roleplay.script}
+              <Text c="var(--text)" size="sm" mt="xs" style={{ fontFamily: 'var(--mono)' }}>
+                {roleplay.rationale}
               </Text>
             )}
-          </Stack>
-        </CardShell>
-      </SwipeCard>
-      <Text c="var(--text-dim)" size="xs" ta="center"
-        style={{ fontFamily: 'var(--mono)' }}>
-        swipe in any direction to continue
-      </Text>
+          </Box>
+          {isLoading && <Text c="var(--text-dim)">Loading...</Text>}
+          {roleplay && (
+            <Text c="var(--text-h)" style={{ whiteSpace: 'pre-wrap', fontSize: 16, lineHeight: 1.6 }}>
+              {roleplay.script}
+            </Text>
+          )}
+        </Stack>
+      </CardShell>
+      <Button
+        size="lg"
+        radius={8}
+        onClick={onDone}
+        disabled={!roleplay}
+        style={{
+          background: 'var(--accent)',
+          color: 'var(--bg)',
+          height: 54,
+          fontFamily: 'var(--mono)',
+        }}
+      >
+        Done practicing
+      </Button>
     </>
   );
 }
@@ -209,15 +206,14 @@ function UploadStep({
 
 // ─── Step 3: Additions ───────────────────────────────────────────────────────
 
-function AdditionsStep({ onComplete }: { onComplete: () => void }) {
-  const { data: candidates } = useQuery({
-    queryKey: ['today-additions'],
-    queryFn: api.getAdditions,
-  });
-
+function AdditionsStep({
+  candidates, onComplete,
+}: {
+  candidates: ErrorCandidate[] | undefined;
+  onComplete: () => void;
+}) {
   const [index, setIndex] = useState(0);
   const [addedIds, setAddedIds] = useState<string[]>([]);
-  const [skippedIds, setSkippedIds] = useState<string[]>([]);
 
   const apply = useMutation({
     mutationFn: (ids: string[]) => api.applyAdditions(ids),
@@ -254,7 +250,6 @@ function AdditionsStep({ onComplete }: { onComplete: () => void }) {
   const isLast = index === candidates.length - 1;
 
   const handleSkip = () => {
-    setSkippedIds((p) => [...p, current.id]);
     nextOrCommit(false);
   };
   const handleAdd = () => {
@@ -281,7 +276,6 @@ function AdditionsStep({ onComplete }: { onComplete: () => void }) {
     onLeft={handleSkip}
     onRight={handleAdd}
     pending={apply.isPending}
-    summary={apply.isPending ? `Saving ${addedIds.length} adds, ${skippedIds.length} skips...` : undefined}
   />;
 }
 
@@ -289,7 +283,8 @@ function AdditionBody({ c }: { c: ErrorCandidate }) {
   return (
     <Stack gap="md" mt="lg">
       <Box>
-        <Text c="var(--text-dim)" size="xs" style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
+        <Text c="var(--text-dim)" size="xs"
+          style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
           you said
         </Text>
         <Text c="var(--text-h)" mt="xs" style={{ fontStyle: 'italic' }}>
@@ -297,7 +292,8 @@ function AdditionBody({ c }: { c: ErrorCandidate }) {
         </Text>
       </Box>
       <Box>
-        <Text c="var(--text-dim)" size="xs" style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
+        <Text c="var(--text-dim)" size="xs"
+          style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
           native
         </Text>
         <Text c="var(--text-h)" mt="xs">
@@ -311,15 +307,14 @@ function AdditionBody({ c }: { c: ErrorCandidate }) {
 
 // ─── Step 4: Graduations ─────────────────────────────────────────────────────
 
-function GraduationsStep({ onComplete }: { onComplete: () => void }) {
-  const { data: candidates } = useQuery({
-    queryKey: ['today-graduations'],
-    queryFn: api.getGraduations,
-  });
-
+function GraduationsStep({
+  candidates, onComplete,
+}: {
+  candidates: GraduateCandidate[] | undefined;
+  onComplete: () => void;
+}) {
   const [index, setIndex] = useState(0);
   const [gradIds, setGradIds] = useState<string[]>([]);
-  const [keptIds, setKeptIds] = useState<string[]>([]);
 
   const apply = useMutation({
     mutationFn: (ids: string[]) => api.applyGraduations(ids),
@@ -356,7 +351,6 @@ function GraduationsStep({ onComplete }: { onComplete: () => void }) {
   const isLast = index === candidates.length - 1;
 
   const handleKeep = () => {
-    setKeptIds((p) => [...p, current.id]);
     nextOrCommit(false);
   };
   const handleGrad = () => {
@@ -383,7 +377,6 @@ function GraduationsStep({ onComplete }: { onComplete: () => void }) {
     onLeft={handleKeep}
     onRight={handleGrad}
     pending={apply.isPending}
-    summary={apply.isPending ? `Saving ${gradIds.length} graduations, ${keptIds.length} kept...` : undefined}
   />;
 }
 
@@ -391,7 +384,8 @@ function GraduationBody({ c }: { c: GraduateCandidate }) {
   return (
     <Stack gap="md" mt="lg">
       <Box>
-        <Text c="var(--text-dim)" size="xs" style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
+        <Text c="var(--text-dim)" size="xs"
+          style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
           evidence
         </Text>
         <Text c="var(--text-h)" mt="xs" style={{ fontStyle: 'italic' }}>
@@ -408,7 +402,7 @@ function GraduationBody({ c }: { c: GraduateCandidate }) {
 }
 
 
-// ─── Shared: card stack with left/right action buttons ───────────────────────
+// ─── Shared: card with two action buttons ────────────────────────────────────
 
 interface CandidateStackProps {
   label: string;
@@ -420,65 +414,62 @@ interface CandidateStackProps {
   onLeft: () => void;
   onRight: () => void;
   pending: boolean;
-  summary?: string;
 }
 
 function CandidateStack({
-  label, position, title, body, leftLabel, rightLabel, onLeft, onRight, pending, summary,
+  label, position, title, body, leftLabel, rightLabel, onLeft, onRight, pending,
 }: CandidateStackProps) {
   return (
     <>
-      <SwipeCard onLeft={onLeft} onRight={onRight} disabled={pending}>
-        <CardShell>
-          <Stack gap="md" p={{ base: 'lg', sm: 32 }} style={{ flex: 1, minHeight: 0 }}>
-            <Group justify="space-between">
-              <Text c="var(--text-dim)" size="xs"
-                style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
-                {label}
-              </Text>
-              <Text c="var(--text-dim)" size="xs" style={{ fontFamily: 'var(--mono)' }}>
-                {position}
-              </Text>
-            </Group>
-            <Title order={2} c="var(--text-h)" style={{ fontFamily: 'var(--mono)', fontSize: 22, lineHeight: 1.3 }}>
-              {title}
-            </Title>
-            {body}
-          </Stack>
-        </CardShell>
-      </SwipeCard>
-      <Text c="var(--text-dim)" size="xs" ta="center"
-        style={{ fontFamily: 'var(--mono)' }}>
-        {summary ?? `◀  ${leftLabel}      ${rightLabel}  ▶`}
-      </Text>
-    </>
-  );
-}
-
-
-// ─── Step 5: Done / Loop ─────────────────────────────────────────────────────
-
-function DoneStep({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
-  return (
-    <>
-      <SwipeCard onLeft={onBack} onRight={onNext}>
-        <CardShell>
-          <Stack align="center" justify="center" p={{ base: 'lg', sm: 40 }} style={{ flex: 1 }}>
+      <CardShell>
+        <Stack gap="md" p={{ base: 'lg', sm: 32 }} style={{ flex: 1, minHeight: 0 }}>
+          <Group justify="space-between">
             <Text c="var(--text-dim)" size="xs"
               style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
-              session complete
+              {label}
             </Text>
-            <Title order={1} c="var(--text-h)"
-              style={{ fontFamily: 'var(--mono)', fontSize: 'clamp(2rem, 8vw, 3.5rem)', lineHeight: 1.2 }}>
-              ✓
-            </Title>
-          </Stack>
-        </CardShell>
-      </SwipeCard>
-      <Text c="var(--text-dim)" size="xs" ta="center"
-        style={{ fontFamily: 'var(--mono)' }}>
-        ◀  Dashboard      Next role-play  ▶
-      </Text>
+            <Text c="var(--text-dim)" size="xs" style={{ fontFamily: 'var(--mono)' }}>
+              {position}
+            </Text>
+          </Group>
+          <Title order={2} c="var(--text-h)"
+            style={{ fontFamily: 'var(--mono)', fontSize: 22, lineHeight: 1.3 }}>
+            {title}
+          </Title>
+          {body}
+        </Stack>
+      </CardShell>
+      <Group grow gap="sm">
+        <Button
+          size="lg"
+          radius={8}
+          disabled={pending}
+          onClick={onLeft}
+          style={{
+            background: 'transparent',
+            color: 'var(--text-h)',
+            border: '1px solid var(--border)',
+            height: 54,
+            fontFamily: 'var(--mono)',
+          }}
+        >
+          {leftLabel}
+        </Button>
+        <Button
+          size="lg"
+          radius={8}
+          disabled={pending}
+          onClick={onRight}
+          style={{
+            background: 'var(--accent)',
+            color: 'var(--bg)',
+            height: 54,
+            fontFamily: 'var(--mono)',
+          }}
+        >
+          {rightLabel}
+        </Button>
+      </Group>
     </>
   );
 }
