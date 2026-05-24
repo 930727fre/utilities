@@ -1,0 +1,6 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+yt-dlp
+filelock==3.13.4
+python-multipart==0.0.9
+aiofiles==23.2.1

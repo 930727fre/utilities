@@ -1,0 +1,37 @@
+services:
+  xyt-app:
+    build: .
+    container_name: xyt-app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./data:/app/data
+      - ./data/models:/root/.cache/whisper
+    environment:
+      - JOBS_FILE=/app/data/jobs.json
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    networks:
+      - default
+      - my_network
+
+  xyt-frontend:
+    build: ./frontend
+    container_name: xyt-frontend
+    environment:
+      - BACKEND_URL=http://xyt-app:8000
+    depends_on:
+      - xyt-app
+    restart: unless-stopped
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true
