@@ -64,19 +64,31 @@ Then register `free2speak` subdomain in Cloudflare tunnel dashboard pointing to 
 - `POST /errors/additions` resolves frontend candidate IDs against the latest session's analysis and `INSERT`s real rows into `errors`. `body_md` is rendered from `{you_said, native, note}`.
 - `POST /errors/graduations` maps frontend `grad-N` IDs back to the DB `error_id` via the latest session's analysis, then `UPDATE`s status to `graduated`.
 
-**Phase 3 plan (Opus integration — pick up here):**
+**Phase 3 done — Opus roleplay + drill generation:**
+- `GET /today/roleplay`: returns today's row if exists, otherwise calls Opus (tool-use with the `emit_roleplay` schema) to generate a 5-7 exchange bilingual script. Body is full markdown stored in `roleplays.body_md`. Active errors + recent sessions + recent topics passed as context so the scenario fits the user's current error cluster without repeating.
+- `GET /today/drill`: same pattern. Opus generates 10 cards (`~7 from active errors + ~3 from recent session content`, mix of fill_blank and translate). Persists parent `drills` row + 10 child `drill_cards` rows. Returns the cards sorted by `order_index`.
+- Code layout: `prompts/opus_roleplay.py` + `prompts/opus_drill.py` each define a `TOOL` (Anthropic input_schema for forced structured output) and a `build(...)` for prompt rendering. `opus_client.py` is a thin Anthropic SDK wrapper.
 
-1. `GET /today/roleplay`: if a row exists for today's date, return it. Otherwise call Opus (Anthropic SDK already in `requirements.txt`) with `1.0-archive/prompts/roleplay-generation.md`, passing the active errors + recent sessions metadata. Persist + return.
-2. `GET /today/drill`: same pattern but for drills + `drill-generation.md`. Persist the parent `drills` row and child `drill_cards`.
-3. Consider a separate post-session "errors-generation" pass using `errors-generation.md` if the Gemini per-session detection turns out too noisy.
+**API keys:** compose fails parse if either `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` is missing from the host shell.
 
-**API keys:** compose already wires `GEMINI_API_KEY` and `ANTHROPIC_API_KEY` from the host shell (default empty). Make sure both are exported before `docker compose up -d --build`. Gemini is required for `/upload` to work; Anthropic only needed in Phase 3.
+**Code layout (final):**
+```
+backend/
+├── main.py                       # endpoints + helpers (lifespan, stats, upload, review, additions/graduations, roleplay, drill)
+├── db.py                         # sqlite connection + schema init
+├── opus_client.py                # Anthropic tool-use wrapper
+├── prompts/
+│   ├── gemini_analysis.py        # audio → additions+graduations JSON
+│   ├── opus_roleplay.py          # active_errors + recent_sessions → script
+│   └── opus_drill.py             # active_errors + recent_sessions → 10 cards
+├── models.py                     # pydantic shapes
+├── schema.sql                    # tables (idempotent CREATE IF NOT EXISTS)
+└── import.py                     # one-shot 1.0 → 2.0 importer
+```
 
-**Existing helpers (Phase 2 era):**
-- `db.connect()` — opens a fresh sqlite3 connection with row_factory + FK on.
-- `_build_analysis_prompt(active_errors)` and `_call_gemini_with_audio(audio, mime, prompt)` in `main.py` — reuse the latter as a template for Opus calls in Phase 3 (swap base URL, schema, and auth header).
-
-**Limitations to revisit:**
-- 20 MB inline ceiling on audio — long recordings need the Gemini Files API.
-- Per-call active-error cap of 100 — fine until the error book grows large; then consider top-N by recency/relevance instead of by `last_seen_date` alone.
+**Limitations to revisit (none blocking):**
+- 20 MB inline ceiling on audio uploads — long recordings need the Gemini Files API.
+- Per-call active-error cap of 100 — fine until the error book grows large.
 - Audio files accumulate under `/data/sessions/` indefinitely. No cleanup yet.
+- Drill `source_error_id` returned as string to the frontend (matches stub contract). DB stores it as integer. Frontend doesn't actually use the value yet.
+- No regressions endpoint — active errors that still fail in a session aren't surfaced; only the correct-uses graduations are. Add if "am I still failing this?" feedback becomes annoying.

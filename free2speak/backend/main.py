@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -12,7 +13,10 @@ from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
 from db import connect, init_schema
+from opus_client import emit_tool as opus_emit_tool
 from prompts.gemini_analysis import SCHEMA as ANALYSIS_SCHEMA, build as build_analysis_prompt
+from prompts.opus_drill import TOOL as DRILL_TOOL, build as build_drill_prompt
+from prompts.opus_roleplay import TOOL as ROLEPLAY_TOOL, build as build_roleplay_prompt
 from models import (
     Roleplay,
     ErrorCandidate,
@@ -165,17 +169,62 @@ def get_today_stats():
 
 @app.get("/today/roleplay", response_model=Roleplay)
 def get_today_roleplay():
+    today_iso = _today_local().isoformat()
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT id, date, topic, rationale, body_md FROM roleplays WHERE date = ? LIMIT 1",
+            (today_iso,),
+        ).fetchone()
+        if row:
+            return Roleplay(
+                id=row["id"], date=row["date"], topic=row["topic"],
+                rationale=row["rationale"] or "", script=row["body_md"] or "",
+            )
+
+        # Generate a new one via Opus.
+        active_errors = conn.execute(
+            "SELECT id, title, body_md FROM errors WHERE status='active' "
+            "ORDER BY last_seen_date DESC LIMIT ?",
+            (ACTIVE_ERROR_LIMIT,),
+        ).fetchall()
+        recent_sessions = conn.execute(
+            "SELECT id, summary, uploaded_at FROM sessions "
+            "ORDER BY uploaded_at DESC LIMIT 5"
+        ).fetchall()
+        recent_topics = [r["topic"] for r in conn.execute(
+            "SELECT topic FROM roleplays ORDER BY date DESC LIMIT 10"
+        ).fetchall()]
+    finally:
+        conn.close()
+
+    prompt = build_roleplay_prompt(
+        active_errors=active_errors,
+        recent_sessions=[dict(s) for s in recent_sessions],
+        recent_topics=recent_topics,
+    )
+    print(f"[roleplay] generating for {today_iso}...", flush=True)
+    t0 = time.perf_counter()
+    result = opus_emit_tool(prompt, ROLEPLAY_TOOL)
+    print(f"[roleplay] generated for {today_iso}: topic={result.get('topic')!r} "
+          f"({time.perf_counter() - t0:.1f}s)", flush=True)
+
+    rp_id = uuid.uuid4().hex
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO roleplays (id, date, topic, rationale, body_md, status) "
+            "VALUES (?, ?, ?, ?, ?, 'active')",
+            (rp_id, today_iso, result.get("topic", "(untitled)"),
+             result.get("rationale", ""), result.get("body_md", "")),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
     return Roleplay(
-        id="stub-1",
-        date="2026-05-23",
-        topic="apartment",
-        rationale="練 utilities / deposit / lease / negotiate",
-        script=(
-            "AI:  Hi, are you here for the 2pm showing?\n"
-            "你:  對，是看兩房那間嗎？\n\n"
-            "AI:  Yeah, follow me. What would you like to know first?\n"
-            "你:  想了解租金、押金、什麼時候可以入住\n"
-        ),
+        id=rp_id, date=today_iso, topic=result.get("topic", ""),
+        rationale=result.get("rationale", ""), script=result.get("body_md", ""),
     )
 
 
@@ -361,23 +410,81 @@ def apply_graduations(body: GraduationsApply):
 
 @app.get("/today/drill", response_model=list[DrillCard])
 def get_today_drill():
+    today_iso = _today_local().isoformat()
+    conn = connect()
+    try:
+        existing = conn.execute(
+            "SELECT id FROM drills WHERE date(created_at) = ? LIMIT 1",
+            (today_iso,),
+        ).fetchone()
+        if existing:
+            rows = conn.execute(
+                "SELECT id, kind, prompt, answer, source_error_id "
+                "FROM drill_cards WHERE drill_id = ? ORDER BY order_index",
+                (existing["id"],),
+            ).fetchall()
+            return [
+                DrillCard(
+                    id=str(r["id"]), prompt=r["prompt"], answer=r["answer"],
+                    source_error_id=str(r["source_error_id"]) if r["source_error_id"] is not None else None,
+                )
+                for r in rows
+            ]
+
+        # Generate via Opus.
+        active_errors = conn.execute(
+            "SELECT id, title, body_md FROM errors WHERE status='active' "
+            "ORDER BY last_seen_date DESC LIMIT ?",
+            (ACTIVE_ERROR_LIMIT,),
+        ).fetchall()
+        recent_sessions = conn.execute(
+            "SELECT id, transcript, summary, uploaded_at FROM sessions "
+            "ORDER BY uploaded_at DESC LIMIT 5"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    prompt = build_drill_prompt(
+        active_errors=active_errors,
+        recent_sessions=[dict(s) for s in recent_sessions],
+    )
+    print(f"[drill] generating for {today_iso}...", flush=True)
+    t0 = time.perf_counter()
+    result = opus_emit_tool(prompt, DRILL_TOOL)
+    print(f"[drill] generated for {today_iso}: {len(result.get('cards', []))} cards "
+          f"({time.perf_counter() - t0:.1f}s)", flush=True)
+    cards = result.get("cards", [])
+    if not cards:
+        raise HTTPException(status_code=503, detail="Drill cold-start: not enough material to generate")
+
+    drill_id = uuid.uuid4().hex
+    conn = connect()
+    try:
+        conn.execute(
+            "INSERT INTO drills (id, rationale) VALUES (?, ?)",
+            (drill_id, result.get("rationale", "")),
+        )
+        for i, c in enumerate(cards):
+            conn.execute(
+                "INSERT INTO drill_cards "
+                "(drill_id, order_index, kind, prompt, answer, rationale, source_error_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (drill_id, i, c.get("kind", "translate"), c.get("prompt", ""),
+                 c.get("answer", ""), c.get("rationale", ""), c.get("source_error_id")),
+            )
+        conn.commit()
+        rows = conn.execute(
+            "SELECT id, kind, prompt, answer, source_error_id "
+            "FROM drill_cards WHERE drill_id = ? ORDER BY order_index",
+            (drill_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
     return [
         DrillCard(
-            id="drill-1",
-            prompt="把這句翻成英文：「這個租約有議價空間嗎？」",
-            answer="Is there any room for negotiation on this lease?",
-            source_error_id="err-room-for-negotiation",
-        ),
-        DrillCard(
-            id="drill-2",
-            prompt="把這句翻成英文：「他們會再回覆我關於押金的事。」",
-            answer="They'll get back to me about the deposit.",
-            source_error_id="err-get-back-to",
-        ),
-        DrillCard(
-            id="drill-3",
-            prompt="填空：I used ___ live in Taipei.",
-            answer="I used to live in Taipei.",
-            source_error_id="err-used-to",
-        ),
+            id=str(r["id"]), prompt=r["prompt"], answer=r["answer"],
+            source_error_id=str(r["source_error_id"]) if r["source_error_id"] is not None else None,
+        )
+        for r in rows
     ]
