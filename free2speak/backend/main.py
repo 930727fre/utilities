@@ -1,6 +1,11 @@
+from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
+from db import connect, init_schema
 from models import (
     Roleplay,
     ErrorCandidate,
@@ -12,7 +17,18 @@ from models import (
     TodayStats,
 )
 
-app = FastAPI()
+TZ = ZoneInfo("Asia/Taipei")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    conn = connect()
+    init_schema(conn)
+    conn.close()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,6 +38,40 @@ app.add_middleware(
 )
 
 
+def _today_local() -> date:
+    return datetime.now(TZ).date()
+
+
+def _compute_streak(conn) -> int:
+    """Count consecutive days ending today (or yesterday if today is empty) with at
+    least one practice or drill activity. Returns 0 if no recent activity."""
+    rows = conn.execute("""
+        SELECT day FROM (
+            SELECT date(uploaded_at) AS day FROM sessions WHERE uploaded_at IS NOT NULL
+            UNION
+            SELECT date(completed_at) AS day FROM drills WHERE completed_at IS NOT NULL
+        )
+        WHERE day IS NOT NULL
+        ORDER BY day DESC
+    """).fetchall()
+    if not rows:
+        return 0
+
+    active_days = {date.fromisoformat(r["day"]) for r in rows}
+    today = _today_local()
+
+    # Start from today if active, else yesterday (give the user grace before the day ends).
+    cursor = today if today in active_days else today - timedelta(days=1)
+    if cursor not in active_days:
+        return 0
+
+    streak = 0
+    while cursor in active_days:
+        streak += 1
+        cursor -= timedelta(days=1)
+    return streak
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -29,12 +79,29 @@ def health():
 
 @app.get("/today/stats", response_model=TodayStats)
 def get_today_stats():
-    return TodayStats(
-        streak_count=7,
-        practice_done_today=False,
-        drill_done_today=False,
-        active_errors_count=42,
-    )
+    conn = connect()
+    try:
+        today_iso = _today_local().isoformat()
+        practice_done = conn.execute(
+            "SELECT 1 FROM sessions WHERE date(uploaded_at) = ? LIMIT 1",
+            (today_iso,),
+        ).fetchone() is not None
+        drill_done = conn.execute(
+            "SELECT 1 FROM drills WHERE date(completed_at) = ? LIMIT 1",
+            (today_iso,),
+        ).fetchone() is not None
+        active_errors = conn.execute(
+            "SELECT COUNT(*) FROM errors WHERE status = 'active'"
+        ).fetchone()[0]
+        streak = _compute_streak(conn)
+        return TodayStats(
+            streak_count=streak,
+            practice_done_today=practice_done,
+            drill_done_today=drill_done,
+            active_errors_count=active_errors,
+        )
+    finally:
+        conn.close()
 
 
 @app.get("/today/roleplay", response_model=Roleplay)
