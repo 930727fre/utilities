@@ -1,0 +1,13 @@
+services:
+  gpu-broker:
+    build: .
+    container_name: gpu-broker
+    restart: unless-stopped
+    expose:
+      - "8000"
+    networks:
+      - my_network
+
+networks:
+  my_network:
+    external: true

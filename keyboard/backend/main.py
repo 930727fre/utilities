@@ -10,9 +10,10 @@ from fastapi import FastAPI, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from gemini_client import generate_json_async
+from gpu_lock import gpu_lock_async
+
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
 CORRECTIONS_PATH = Path(os.environ.get("CORRECTIONS_PATH", "/app/data/corrections.json"))
 FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR", "/app/frontend"))
 
@@ -109,21 +110,14 @@ async def call_whisper(audio_bytes: bytes, filename: str) -> dict[str, Any]:
         return r.json()
 
 
-async def call_ollama_correction(text: str) -> str:
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        prompt = LLM_PROMPT_TEMPLATE.format(
-            text=text,
-            vocab_rule=build_vocab_rule(_corrections),
-        )
-        payload = {
-            "model": LLM_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 200},
-        }
-        r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
-        r.raise_for_status()
-        return r.json().get("response", "").strip()
+async def call_gemini_correction(text: str) -> str:
+    prompt = LLM_PROMPT_TEMPLATE.format(
+        text=text,
+        vocab_rule=build_vocab_rule(_corrections),
+    )
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+    result = await generate_json_async(prompt, schema, temperature=0.1)
+    return str(result.get("text", "")).strip()
 
 
 @app.post("/api/transcribe")
@@ -131,20 +125,23 @@ async def transcribe(audio: UploadFile):
     audio_bytes = await audio.read()
 
     t0 = time.perf_counter()
-    try:
-        whisper_result = await call_whisper(audio_bytes, audio.filename or "audio.webm")
-    except Exception as e:
-        return JSONResponse(
-            status_code=502,
-            content={"error": "whisper_unavailable", "detail": str(e)},
-        )
-    raw_text = (whisper_result.get("text") or "").strip()
+    async with gpu_lock_async("keyboard-backend", "whisper"):
+        try:
+            whisper_result = await call_whisper(audio_bytes, audio.filename or "audio.webm")
+        except Exception as e:
+            return JSONResponse(
+                status_code=502,
+                content={"error": "whisper_unavailable", "detail": str(e)},
+            )
+        raw_text = (whisper_result.get("text") or "").strip()
     t1 = time.perf_counter()
 
+    # Gemini correction runs after the GPU lock is released — it's a cloud call,
+    # no GPU contention to coordinate.
     warning = None
     if raw_text:
         try:
-            final_text = await call_ollama_correction(raw_text)
+            final_text = await call_gemini_correction(raw_text)
         except Exception as e:
             final_text = raw_text
             warning = f"llm_unavailable: {e}"

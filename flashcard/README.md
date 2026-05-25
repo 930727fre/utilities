@@ -86,15 +86,15 @@ Follows the [utility repo's design language](../README.md#design-language) — m
 
 **Goal:** the ✨ button on the flipped review card calls a local LLM to generate one example sentence per definition (split by POS markers in `note`), and renders defs + examples aligned in the UI.
 
-**Done (uncommitted):**
+**Done:**
 
-- `POST /api/cards/{id}/examples` — backend endpoint. Reads `word` + `note`, prompts `qwen3:8b` via `http://ollama:11434/api/generate`, parses the numbered response, persists to `sentence` as a `\n`-separated numbered list. Returns the updated card.
-- `backend/requirements.txt`: added `requests==2.32.3`.
-- `docker-compose.yml`: `flashcard-backend` now joins the external `my_network` so it can reach the shared `ollama` container by DNS name.
-- `nginx/nginx.conf`: bumped `proxy_read_timeout` / `proxy_send_timeout` to `180s` on `/api/` (ollama calls run 30–120s).
+- `POST /api/cards/{id}/examples` — backend endpoint. Reads `word` + `note`, sends to Gemini (`gemini-2.5-flash-lite` by default) with a JSON-array response schema, persists to `sentence` as a `\n`-separated numbered list. Returns the updated card.
+- `backend/requirements.txt`: includes `requests==2.32.3` for the Gemini HTTP client.
+- `docker-compose.yml`: `flashcard-backend` joins external `my_network` (legacy from the previous ollama era; not strictly needed now but keeping for symmetry with other tools).
+- `nginx/nginx.conf`: `proxy_read_timeout` / `proxy_send_timeout` bumped to `180s` on `/api/` (Gemini calls are ~1s but retries on 429 could stack).
 - `src/api.ts`: added `regenerateExamples(id)`.
-- `src/pages/ReviewPage.tsx`: replaced clipboard copy button with ✨ `IconSparkles` + `Loader` spinner during the call; sentence `<Text>` now uses `whiteSpace: 'pre-line'` so the numbered lines wrap correctly. Mutation patches the queue head only if it's still the same card (rating mid-generation is safe).
-- **Env vars** (backend, optional): `OLLAMA_URL` (default `http://ollama:11434`), `OLLAMA_MODEL` (default `qwen3:8b`).
+- `src/pages/ReviewPage.tsx`: replaced clipboard copy button with ✨ `IconSparkles` + `Loader` spinner during the call; sentence `<Text>` uses `whiteSpace: 'pre-line'` so the numbered lines wrap correctly. Mutation patches the queue head only if it's still the same card (rating mid-generation is safe).
+- **Env var required**: `GEMINI_API_KEY` — must be exported in the host shell before `docker compose up`. Compose's `${GEMINI_API_KEY:?...}` syntax fails loudly at parse time if missing.
 
 **Pending — UI interleaving:**
 

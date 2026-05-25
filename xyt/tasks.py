@@ -8,9 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pykakasi
-import requests
 import yt_dlp
 
+from gemini_client import generate_json
+from gpu_lock import gpu_lock
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = "/app/data/downloads"
@@ -19,8 +20,10 @@ DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
 ENRICH_TIMEOUT = 2 * 60 * 60      # 2 hours
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
+# Translate this many cues per Gemini request. ~30 amortizes round-trip latency
+# 30x while keeping batches small enough that an alignment mismatch only costs
+# a fallback for that batch (not 100+ cues).
+BATCH_SIZE = 30
 
 _kks = pykakasi.kakasi()
 
@@ -108,30 +111,32 @@ def process_video(job_id: str, url: str, transcribe: bool = True):
 def _run_transcription(job_id: str, audio_path: str):
     result_file = tempfile.mktemp(suffix=".json")
     ctx = multiprocessing.get_context("spawn")
-    proc = ctx.Process(target=_transcribe_worker, args=(audio_path, result_file))
-    proc.start()
     transcribe_started = _now()
 
-    while True:
-        proc.join(timeout=2)
-        if not proc.is_alive():
-            break
+    with gpu_lock("xyt-app", f"whisper:{job_id}"):
+        proc = ctx.Process(target=_transcribe_worker, args=(audio_path, result_file))
+        proc.start()
 
-        if _elapsed(transcribe_started) > TRANSCRIBE_TIMEOUT:
-            proc.terminate()
-            proc.join()
-            if os.path.exists(result_file):
-                os.unlink(result_file)
-            _fail(job_id, "Transcription timed out (4 hour limit)")
-            return
+        while True:
+            proc.join(timeout=2)
+            if not proc.is_alive():
+                break
 
-        current = get_job(job_id)
-        if not current or current["status"] == "DELETED":
-            proc.terminate()
-            proc.join()
-            if os.path.exists(result_file):
-                os.unlink(result_file)
-            return
+            if _elapsed(transcribe_started) > TRANSCRIBE_TIMEOUT:
+                proc.terminate()
+                proc.join()
+                if os.path.exists(result_file):
+                    os.unlink(result_file)
+                _fail(job_id, "Transcription timed out (4 hour limit)")
+                return
+
+            current = get_job(job_id)
+            if not current or current["status"] == "DELETED":
+                proc.terminate()
+                proc.join()
+                if os.path.exists(result_file):
+                    os.unlink(result_file)
+                return
 
     if not os.path.exists(result_file):
         _fail(job_id, "Transcription process exited unexpectedly")
@@ -178,17 +183,27 @@ def _run_enrichment(job_id: str, srt_path: str):
             return False
         return True
 
-    combined = []
-    for idx, time_line, text in cues:
+    # Translate in batches against Gemini. Cloud call, no GPU lock needed.
+    texts = [text for _, _, text in cues]
+    translations = [""] * len(texts)
+    for batch_start in range(0, len(texts), BATCH_SIZE):
         if not alive():
             return
-        romaji = _romanize(text)
+        batch_end = min(batch_start + BATCH_SIZE, len(texts))
+        batch = texts[batch_start:batch_end]
         try:
-            zh = _translate_to_zh_hant(text)
+            batch_translations = _translate_batch(batch)
         except Exception as e:
-            _fail(job_id, f"Translation failed at cue {idx}: {e}")
+            _fail(job_id, f"Translation failed at batch {batch_start}-{batch_end}: {e}")
             return
-        # Stack three lines per cue; browser <track> renders newlines as line breaks.
+        for i, t in enumerate(batch_translations):
+            translations[batch_start + i] = t
+        print(f"[xyt] enrichment {batch_end}/{len(texts)}", flush=True)
+
+    # Romanize locally (pykakasi, CPU, deterministic) and stack.
+    combined = []
+    for (idx, time_line, text), zh in zip(cues, translations):
+        romaji = _romanize(text)
         stacked = "\n".join(s for s in (text, romaji, zh) if s)
         combined.append((idx, time_line, stacked))
 
@@ -200,6 +215,52 @@ def _run_enrichment(job_id: str, srt_path: str):
     job["status"] = "SUCCESS"
     job["updated_at"] = _now()
     upsert_job(job)
+
+
+_TRANSLATION_SCHEMA = {
+    "type": "array",
+    "items": {"type": "string"},
+}
+
+
+def _translate_batch(texts: list[str]) -> list[str]:
+    """Translate N Japanese lines → N zh-Hant lines in one Gemini call.
+
+    Falls back to per-line translation if the batch returns the wrong count
+    (model dropped or merged lines despite the structured-output schema).
+    """
+    if not texts:
+        return []
+
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(texts))
+    prompt = (
+        "Translate the following numbered Japanese subtitle lines to Traditional Chinese.\n"
+        "Return a JSON array of strings, one translation per input line, in the same order.\n"
+        "Translate only. No romanization, no Japanese, no commentary.\n"
+        "If a line is empty or untranslatable, return an empty string for that position.\n\n"
+        f"{numbered}"
+    )
+    result = generate_json(prompt, _TRANSLATION_SCHEMA)
+    if isinstance(result, list) and len(result) == len(texts):
+        return [str(t).strip() for t in result]
+
+    # Length mismatch — fall back to per-line so we don't drop the batch.
+    print(f"[xyt] batch returned {len(result) if isinstance(result, list) else '?'} "
+          f"items for {len(texts)} inputs, falling back to per-line", flush=True)
+    return [_translate_one(t) for t in texts]
+
+
+def _translate_one(text: str) -> str:
+    if not text.strip():
+        return ""
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+    prompt = (
+        "Translate the following Japanese subtitle line to Traditional Chinese.\n"
+        "Return JSON with a single `text` field. Translate only. No romanization, no Japanese, no commentary.\n\n"
+        f"Japanese: {text}"
+    )
+    result = generate_json(prompt, schema)
+    return str(result.get("text", "")).strip()
 
 
 def _parse_srt(path: str) -> list:
@@ -225,28 +286,6 @@ def _romanize(text: str) -> str:
         return ""
     items = _kks.convert(text)
     return " ".join(item["hepburn"] for item in items).strip()
-
-
-def _translate_to_zh_hant(text: str) -> str:
-    if not text.strip():
-        return ""
-    resp = requests.post(
-        f"{OLLAMA_URL}/api/generate",
-        json={
-            "model": OLLAMA_MODEL,
-            "prompt": (
-                "Translate the following Japanese subtitle line to Traditional Chinese.\n"
-                "Output ONLY the translation. No commentary, no romanization, no Japanese.\n\n"
-                f"Japanese: {text}\n"
-                "Traditional Chinese:"
-            ),
-            "stream": False,
-            "options": {"temperature": 0.2},
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    return resp.json()["response"].strip()
 
 
 def _transcribe_worker(mp4_path: str, result_file: str):

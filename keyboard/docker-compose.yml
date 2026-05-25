@@ -24,8 +24,7 @@ services:
     build: ./backend
     environment:
       - WHISPER_URL=http://whisper:8000
-      - OLLAMA_URL=http://ollama:11434
-      - LLM_MODEL=qwen3:8b
+      - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY not exported in shell}
       - CORRECTIONS_PATH=/app/data/corrections.json
       - FRONTEND_DIR=/app/frontend
     volumes:

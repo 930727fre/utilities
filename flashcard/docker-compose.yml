@@ -3,6 +3,8 @@ services:
     build: ./backend
     container_name: flashcard-backend
     restart: unless-stopped
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY not exported in shell}
     volumes:
       - ./data:/data
     expose:

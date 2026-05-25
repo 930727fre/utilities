@@ -8,6 +8,7 @@ services:
       - ./data/models:/root/.cache/whisper
     environment:
       - JOBS_FILE=/app/data/jobs.json
+      - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY not exported in shell}
     deploy:
       resources:
         reservations:

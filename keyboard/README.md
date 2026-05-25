@@ -36,8 +36,7 @@ keyboard-backend (FastAPI on 8080)
 ## Models
 
 - **Whisper**: `deepdml/faster-whisper-large-v3-turbo-ct2` (set in `docker-compose.yml`, downloaded once into the `whisper-models` named volume on first request).
-- **LLM**: `qwen3:8b` on Ollama. Previously `gemma3:12b` — switched to qwen3 for ~half the VRAM footprint (≈5 GB vs ≈9 GB), which removes cross-container OOM pressure when whisper jobs run concurrently on the same GPU. Earlier qwen versions leaked simplified Chinese into zh-Hant output; qwen3 handles zh-Hant cleanly in practice. If zh-Hans leakage reappears, swap back via the `LLM_MODEL` env var.
-- LLM model is configurable via `LLM_MODEL` env var in compose. Pull with `ollama pull <model>` first.
+- **LLM**: Gemini API (`gemini-2.5-flash-lite` by default) — moved off local ollama (`qwen3:8b`, previously `gemma3:12b`). Cloud is ~10× faster per call, better at zh-Hant, and frees ~5 GB of VRAM that whisper can use. Requires `GEMINI_API_KEY` in the shell at `docker compose up` time. Privacy tradeoff: cleaned transcript text + your `corrections.json` vocab list get sent to Google (audio stays local).
 
 ## Layout
 
@@ -62,11 +61,9 @@ keyboard/
 Prerequisites:
 - Docker with NVIDIA GPU support (RTX 3060 here).
 - External Docker network `my_network` already exists.
-- An Ollama instance reachable as `ollama:11434` on `my_network`, with the LLM model already pulled. **Ollama does not auto-download** — pull it manually first:
+- A `GEMINI_API_KEY` from https://aistudio.google.com/app/apikey, exported in the shell:
   ```sh
-  ollama pull qwen3:8b
-  # or, if you don't have the CLI handy:
-  curl -X POST http://<ollama-host>:11434/api/pull -d '{"model":"qwen3:8b"}'
+  export GEMINI_API_KEY="<paste>"
   ```
 - A Cloudflare Tunnel pointed at `backend:8080` on `my_network` (also external, not in this compose).
 
@@ -102,13 +99,13 @@ Saved to `backend/data/corrections.json` via atomic write (tmp + `os.replace`).
 | GET    | `/api/corrections`  | —                     | `{<canonical>: [<mishearing>, …], …}`            |
 | PUT    | `/api/corrections`  | same shape as GET     | `{ok: true}`, persists to disk and reloads       |
 
-## Latency (warm, RTX 3060, qwen3:8b)
+## Latency (warm, RTX 3060 + Gemini Flash-Lite)
 
 - Whisper (≤2s of audio): ~150–300 ms
-- LLM correction: ~600–1200 ms
+- Gemini correction: ~600–1000 ms
 - Total round-trip incl. network: ~1–1.5 s
 
-Cold start (model load): +30–120 s on first request after restart or 5 min idle.
+Cold start (whisper model load): +30–120 s on first request after restart or 5 min idle. Gemini has no warm/cold distinction from our side.
 
 ## Known small things
 

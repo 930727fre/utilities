@@ -17,17 +17,13 @@ The whole folder is later zipped on demand and returned to the user.
 import re
 import shutil
 import subprocess
-import threading
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
-ACCEPTED_EXTENSIONS = {".epub", ".pdf"}
+from gpu_lock import gpu_lock
 
-# Process-wide lock so concurrent uploads serialize the GPU-bound marker call
-# instead of fighting for VRAM. The flattening logic after marker exits is fast
-# and runs unlocked.
-_marker_lock = threading.Lock()
+ACCEPTED_EXTENSIONS = {".epub", ".pdf"}
 
 
 def _extract_pdf_meta(path: Path) -> dict:
@@ -93,7 +89,7 @@ def convert_file(book_id: str, src_path: str, book_dir: str) -> None:
     book_dir_p = Path(book_dir)
     book_dir_p.mkdir(parents=True, exist_ok=True)
 
-    with _marker_lock:
+    with gpu_lock("marker-pipeline-backend", f"marker:{book_id}"):
         subprocess.run(
             [
                 "marker_single", str(src),
