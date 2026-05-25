@@ -19,17 +19,17 @@ keyboard-backend (FastAPI on 8080)
   │  └────────────────────────────────┘
   │
   ├──► keyboard-whisper          (in compose, on my_network)
-  └──► ollama (external)         (separate compose, on my_network)
+  └──► Gemini API                (https://generativelanguage.googleapis.com)
 ```
 
-`my_network` is a shared Docker network used across multiple personal services (cloudflared, ollama). It must already exist; this repo doesn't create it.
+`my_network` is a shared Docker network used across multiple personal services (cloudflared, gpu-broker, etc.). It must already exist; this repo doesn't create it.
 
 ## Pipeline (per recording)
 
 1. Browser records `audio/webm;codecs=opus` while the button is held, with a live waveform driven by Web Audio `AnalyserNode`.
 2. On release, blob is `POST`ed to `/api/transcribe`.
 3. Backend forwards to whisper (`/v1/audio/transcriptions`) — language auto-detected, bilingual `initial_prompt`.
-4. Whisper raw text → LLM correction via Ollama (`/api/generate`, `stream:false`).
+4. Whisper raw text → LLM correction via Gemini (`generativelanguage.googleapis.com`, structured-output JSON).
 5. LLM prompt embeds the user's vocabulary list (`corrections.json`) as a hard override so the model rewrites mishearings to the canonical form.
 6. Response: `{raw, final, timing: {whisper_ms, llm_ms}}`. UI shows both raw and final in two columns, each with its own copy button.
 
@@ -46,7 +46,7 @@ keyboard/
 ├── backend/
 │   ├── Dockerfile          # python:3.12-slim + uvicorn
 │   ├── requirements.txt    # fastapi, uvicorn, httpx, python-multipart
-│   ├── main.py             # FastAPI app, whisper+ollama proxy, static mount
+│   ├── main.py             # FastAPI app, whisper proxy + Gemini correction, static mount
 │   └── data/
 │       └── corrections.json   # vocabulary overrides; bind-mounted, persists across restarts
 └── frontend/

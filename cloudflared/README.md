@@ -16,16 +16,16 @@ Runs a Cloudflare Tunnel to expose all services via subdomains on your domain.
    - Domain: `*.domain.com`
    - Under Policies, add a rule: **Emails → `you@gmail.com`** (one-time PIN sent to your email)
 
-`ollama` is shared infrastructure (no public route) — only accessible from inside `my_network` on `http://ollama:11434`.
+`ollama` is shared infrastructure (no public route) — only accessible from inside `my_network` on `http://ollama:11434`. As of the Gemini migration it's no longer started by default; bring it up only if you re-enable a local-LLM consumer.
 
 ## Usage
 
-Start the tunnel first (it creates `my_network` automatically), then each service:
+Start the tunnel first (it creates `my_network` automatically), then each service. The `ollama` line below is commented out because no current consumer needs it — uncomment if you revive local-LLM usage.
 
 **Linux/macOS**
 ```bash
 cd cloudflared && CLOUDFLARE_TUNNEL_TOKEN=<token> docker compose up -d
-cd ../ollama && docker compose up -d
+# cd ../ollama && docker compose up -d
 cd ../marker-pipeline && docker compose up -d
 cd ../transcribe && docker compose up -d
 cd ../flashcard && docker compose up -d
@@ -36,7 +36,7 @@ cd ../clock && docker compose up -d
 **Windows CMD**
 ```cmd
 cd cloudflared && set CLOUDFLARE_TUNNEL_TOKEN=<token> && docker compose up -d
-cd ../ollama && docker compose up -d
+:: cd ../ollama && docker compose up -d
 cd ../marker-pipeline && docker compose up -d
 cd ../transcribe && docker compose up -d
 cd ../flashcard && docker compose up -d
@@ -47,7 +47,7 @@ cd ../clock && docker compose up -d
 **Windows PowerShell**
 ```powershell
 cd cloudflared; $env:CLOUDFLARE_TUNNEL_TOKEN="<token>"; docker compose up -d
-cd ../ollama; docker compose up -d
+# cd ../ollama; docker compose up -d
 cd ../marker-pipeline; docker compose up -d
 cd ../transcribe; docker compose up -d
 cd ../flashcard; docker compose up -d

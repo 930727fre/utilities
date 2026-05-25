@@ -90,7 +90,7 @@ Follows the [utility repo's design language](../README.md#design-language) — m
 
 - `POST /api/cards/{id}/examples` — backend endpoint. Reads `word` + `note`, sends to Gemini (`gemini-2.5-flash-lite` by default) with a JSON-array response schema, persists to `sentence` as a `\n`-separated numbered list. Returns the updated card.
 - `backend/requirements.txt`: includes `requests==2.32.3` for the Gemini HTTP client.
-- `docker-compose.yml`: `flashcard-backend` joins external `my_network` (legacy from the previous ollama era; not strictly needed now but keeping for symmetry with other tools).
+- `docker-compose.yml`: `flashcard-backend` joins external `my_network` for parity with other tools — not strictly needed now that the LLM call goes out to Gemini, but kept so the container is reachable from anything else on the shared network.
 - `nginx/nginx.conf`: `proxy_read_timeout` / `proxy_send_timeout` bumped to `180s` on `/api/` (Gemini calls are ~1s but retries on 429 could stack).
 - `src/api.ts`: added `regenerateExamples(id)`.
 - `src/pages/ReviewPage.tsx`: replaced clipboard copy button with ✨ `IconSparkles` + `Loader` spinner during the call; sentence `<Text>` uses `whiteSpace: 'pre-line'` so the numbered lines wrap correctly. Mutation patches the queue head only if it's still the same card (rating mid-generation is safe).

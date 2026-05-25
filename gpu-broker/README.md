@@ -38,16 +38,16 @@ with gpu_lock("xyt-app", "whisper:{job_id}"):
 ```
 
 ```python
-async with gpu_lock_async("keyboard-backend", "whisper+ollama"):
+async with gpu_lock_async("keyboard-backend", "whisper"):
     await call_whisper(...)
-    await call_ollama_correction(...)
+# Gemini correction runs after release — cloud call, no GPU contention to coordinate
 ```
 
 Consumers:
-- `xyt-app` — whisper subprocess and per-cue ollama
-- `flashcard-backend` — regenerate-examples ollama call
-- `keyboard-backend` — whisper + ollama correction (combined lease)
+- `xyt-app` — whisper subprocess (translation now runs through Gemini API, no lock needed)
+- `keyboard-backend` — whisper call (Gemini correction is outside the lock)
 - `marker-pipeline-backend` — `marker_single` subprocess
+- `flashcard-backend` — currently no GPU work (regenerate-examples is Gemini-only)
 
 ## Adding a new GPU consumer
 
@@ -56,8 +56,8 @@ When you build a new container that loads a model or hits an inference server, r
 - **Copy `gpu_lock.py`** from any existing consumer (e.g. `cp xyt/gpu_lock.py new-tool/backend/`). All four copies are identical and stay that way — if you change the helper, update everywhere or extract it to a shared base image.
 - **Make sure the consumer is on `my_network`** in its `docker-compose.yml` — the lock client resolves `http://gpu-broker:8000` via container DNS.
 - **Add the HTTP client dependency** to `requirements.txt`: sync code needs `requests`; async (`async def`) handlers need `httpx`.
-- **Wrap every GPU-touching call** with `gpu_lock(container, workload)` (sync) or `gpu_lock_async(container, workload)` (async). The `workload` string shows up on the dashboard — make it specific (`whisper:{job_id}`, `ollama:cue`, `marker:{book_id}`) so you can tell what's running at a glance.
-- **For ollama calls**, set `keep_alive` explicitly in the request body. One-shot: `"keep_alive": 0` so the model unloads right after and the next lock holder gets a clean GPU. Batch loop: `"keep_alive": "30s"` between calls + a final `"keep_alive": 0` cleanup request after the loop.
+- **Wrap every GPU-touching call** with `gpu_lock(container, workload)` (sync) or `gpu_lock_async(container, workload)` (async). The `workload` string shows up on the dashboard — make it specific (`whisper:{job_id}`, `marker:{book_id}`) so you can tell what's running at a glance.
+- **If you bring back a local LLM server** (e.g. re-enable ollama for a privacy-sensitive consumer), set `keep_alive` explicitly per request — `0` for one-shot, `"30s"` mid-batch with a final `0` cleanup — so the model unloads before the next lock holder acquires.
 - **For Dockerfiles using `COPY <specific files>`** (rather than `COPY . .`), remember to add `gpu_lock.py` to the COPY line. Easy to miss — keyboard's Dockerfile hit this exact bug during the initial rollout.
 - **No host setup** — the broker owns its own state, no `/var/run/...` bind-mount needed.
 
@@ -65,10 +65,9 @@ When you build a new container that loads a model or hits an inference server, r
 
 - Loading a model directly in-process (e.g. `whisper.load_model(...)`, `torch.load(...)`)
 - Starting a subprocess that loads a model (e.g. `marker_single`, xyt's `multiprocessing.spawn` whisper)
-- HTTP call to `ollama:11434` (model gets loaded server-side, occupies VRAM)
-- HTTP call to `keyboard-whisper:8000` or similar containerized model servers
+- HTTP call to a containerized model server on this host (e.g. `keyboard-whisper:8000`, or `ollama:11434` if you ever revive it)
 
-CPU-only inference does *not* need the lock.
+Cloud LLM calls (Gemini, OpenAI, etc.) do **not** count — they don't touch your GPU. CPU-only inference doesn't either.
 
 ## Run
 

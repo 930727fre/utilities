@@ -217,7 +217,7 @@ async function stopRecording(e) {
     showResult(data, performance.now() - t0);
     setHint('按住說話');
     if (data.warning) {
-      showToast('LLM 離線，顯示原始辨識。修復：docker start ollama', 6000);
+      showToast('LLM offline, showing raw transcript. Fix: check GEMINI_API_KEY', 6000);
     }
   } catch (err) {
     console.error(err);
