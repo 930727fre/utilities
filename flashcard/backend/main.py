@@ -2,13 +2,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import asyncio
+import os
+import re
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+
+import requests
 from fsrs import Scheduler as FSRSScheduler, Card as FSRSCard, Rating as FSRSRating, State as FSRSState
 from models import Card, CardUpdate, ReviewRequest, Settings, SettingsUpdate, SyncPayload
 
 TZ = ZoneInfo("Asia/Taipei")
+
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
 
 app = FastAPI()
 
@@ -219,6 +226,65 @@ def update_card(card_id: str, body: CardUpdate):
     conn.close()
     result = dict(row)
     print(f"[update_card] id={card_id} word={result.get('word')} state={result.get('state')} due={result.get('due')}", flush=True)
+    return result
+
+
+@app.post("/cards/{card_id}/examples")
+def regenerate_examples(card_id: str):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Card not found")
+
+    d = dict(row)
+    word = d["word"]
+    note = d["note"] or ""
+
+    prompt = (
+        "You are given an English word and its Chinese definitions grouped by part of speech "
+        "(e.g. n., v., vt., vi., adj., adv., prep., conj., pron., interj.).\n"
+        "For EACH part-of-speech group, write ONE natural English example sentence using the word in that role.\n"
+        "Output ONLY a numbered list of sentences, one per group. No commentary, no translations, no quotes.\n\n"
+        f"Word: {word}\n"
+        f"Definitions: {note}\n"
+        "Examples:"
+    )
+
+    try:
+        resp = requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.3},
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        raw = resp.json()["response"].strip()
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=502, detail=f"Ollama call failed: {e}")
+
+    # Parse "1. ...\n2. ..." → list of sentences, strip leading numbering
+    lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+    sentences = []
+    for ln in lines:
+        m = re.match(r"^\d+[.)]\s*(.*)$", ln)
+        sentences.append(m.group(1).strip() if m else ln)
+    if not sentences:
+        conn.close()
+        raise HTTPException(status_code=502, detail="Ollama returned no sentences")
+
+    new_sentence = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, 1))
+    conn.execute("UPDATE cards SET sentence = ? WHERE id = ?", (new_sentence, card_id))
+    conn.commit()
+    row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()
+    conn.close()
+    result = dict(row)
+    print(f"[regenerate_examples] id={card_id} word={word} n={len(sentences)}", flush=True)
     return result
 
 

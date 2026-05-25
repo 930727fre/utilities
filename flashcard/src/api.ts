@@ -36,4 +36,7 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(fields),
     }),
+
+  regenerateExamples: (id: string) =>
+    apiFetch<Card>(`/cards/${id}/examples`, { method: 'POST' }),
 };

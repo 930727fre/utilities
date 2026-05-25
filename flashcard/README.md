@@ -81,3 +81,30 @@ Nginx maps `/api/*` → backend `/*`.
 ## UI
 
 Follows the [utility repo's design language](../README.md#design-language) — monochrome warm-gray surfaces with one honey accent per page. Review-rating buttons (Again / Hard / Good / Easy) intentionally drop the conventional color coding in favor of position-based muscle memory + keyboard hints `[1] [2] [3] [4]`.
+
+## Work in progress — example-sentence regeneration
+
+**Goal:** the ✨ button on the flipped review card calls a local LLM to generate one example sentence per definition (split by POS markers in `note`), and renders defs + examples aligned in the UI.
+
+**Done (uncommitted):**
+
+- `POST /api/cards/{id}/examples` — backend endpoint. Reads `word` + `note`, prompts `gemma3:12b` via `http://ollama:11434/api/generate`, parses the numbered response, persists to `sentence` as a `\n`-separated numbered list. Returns the updated card.
+- `backend/requirements.txt`: added `requests==2.32.3`.
+- `docker-compose.yml`: `flashcard-backend` now joins the external `my_network` so it can reach the shared `ollama` container by DNS name.
+- `nginx/nginx.conf`: bumped `proxy_read_timeout` / `proxy_send_timeout` to `180s` on `/api/` (ollama calls run 30–120s).
+- `src/api.ts`: added `regenerateExamples(id)`.
+- `src/pages/ReviewPage.tsx`: replaced clipboard copy button with ✨ `IconSparkles` + `Loader` spinner during the call; sentence `<Text>` now uses `whiteSpace: 'pre-line'` so the numbered lines wrap correctly. Mutation patches the queue head only if it's still the same card (rating mid-generation is safe).
+- **Env vars** (backend, optional): `OLLAMA_URL` (default `http://ollama:11434`), `OLLAMA_MODEL` (default `gemma3:12b`).
+
+**Pending — UI interleaving:**
+
+Currently `note` (defs) and `sentence` (examples) render as two separate blocks. Next step is to parse both client-side and render them aligned:
+
+```
+n. 股份；赌注；利害关系
+   "He has a personal stake in the success of the movie."
+vt. 以…打赌，拿…冒險
+   "The President staked out his position on the issue."
+```
+
+Parsing rules: split `note` on POS markers `n. | v. | vt. | vi. | adj. | adv. | prep. | conj. | pron. | interj.`; split `sentence` on `\n`, strip leading `\d+\.\s*`. Zip by index. If counts mismatch, fall back to the current side-by-side rendering instead of crashing.

@@ -2,10 +2,10 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import {
   Paper, Title, Text, Button, Group, Stack,
-  ActionIcon, SimpleGrid, Box, Transition
+  ActionIcon, SimpleGrid, Box, Transition, Loader
 } from '@mantine/core';
 import PageShell from '../components/PageShell';
-import { IconCheck, IconLamp, IconCopy } from '@tabler/icons-react';
+import { IconLamp, IconSparkles } from '@tabler/icons-react';
 import { useNavigate } from 'react-router-dom';
 import { notifications } from '@mantine/notifications';
 import { api } from '../api';
@@ -42,7 +42,20 @@ export default function ReviewPage() {
   const [dueQueue, setDueQueue] = useState<Card[]>([]);
   const [newQueue, setNewQueue] = useState<Card[]>([]);
   const [isFlipped, setIsFlipped] = useState(false);
-  const [copied, setCopied] = useState(false);
+
+  const regenerate = useMutation({
+    mutationFn: (id: string) => api.regenerateExamples(id),
+    onSuccess: (updatedCard: Card) => {
+      // Only patch the queue if the card is still the head (user hasn't rated past it).
+      const patch = (q: Card[]) =>
+        q.length > 0 && q[0].id === updatedCard.id ? [updatedCard, ...q.slice(1)] : q;
+      setDueQueue(patch);
+      setNewQueue(patch);
+    },
+    onError: (err: Error) => {
+      notifications.show({ title: 'Generation failed', message: err.message });
+    },
+  });
 
   // Always holds a fresh closure over current phase/queue state.
   // Called from onSuccess so the queue advances only after server confirms.
@@ -312,7 +325,14 @@ export default function ReviewPage() {
                   </Title>
 
                   {currentCard?.sentence && (
-                    <Text c="var(--text)" ta="center" size="lg" mt="xl" fs="italic" style={{ maxWidth: '90%' }}>
+                    <Text
+                      c="var(--text)"
+                      ta="center"
+                      size="lg"
+                      mt="xl"
+                      fs="italic"
+                      style={{ maxWidth: '90%', whiteSpace: 'pre-line' }}
+                    >
                       "{currentCard.sentence}"
                     </Text>
                   )}
@@ -331,16 +351,15 @@ export default function ReviewPage() {
                           variant="subtle"
                           size="lg"
                           radius="xl"
-                          title={copied ? 'Prompt copied' : 'Copy prompt'}
+                          title={regenerate.isPending ? 'Generating…' : 'Regenerate example sentences'}
+                          disabled={regenerate.isPending}
                           onClick={(e) => {
                             e.stopPropagation();
-                            navigator.clipboard.writeText(`幫我造 ${currentCard?.word} 的例句`);
-                            setCopied(true);
-                            setTimeout(() => setCopied(false), 2000);
+                            if (currentCard) regenerate.mutate(currentCard.id);
                           }}
                           style={{ color: 'var(--text)', border: '1px solid var(--border)' }}
                         >
-                          {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+                          {regenerate.isPending ? <Loader size={14} color="var(--text)" /> : <IconSparkles size={16} />}
                         </ActionIcon>
                       </Group>
                     </Box>

@@ -7,6 +7,9 @@ services:
       - ./data:/data
     expose:
       - "8000"
+    networks:
+      - default
+      - my_network
 
   flashcard-frontend:
     build:
