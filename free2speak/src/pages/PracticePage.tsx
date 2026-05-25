@@ -1,6 +1,8 @@
 import { useState, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+// upload's onSuccess refetches /today/review so the additions/graduations screens
+// see the analysis we just persisted (not the empty fetch from page mount).
 import {
   Stack, Title, Text, Button, Group, Box, FileButton,
 } from '@mantine/core';
@@ -94,20 +96,36 @@ function RoleplayStep({ onDone }: { onDone: () => void }) {
           )}
         </Stack>
       </CardShell>
-      <Button
-        size="lg"
-        radius={8}
-        onClick={onDone}
-        disabled={!roleplay}
-        style={{
-          background: 'var(--accent)',
-          color: 'var(--bg)',
-          height: 54,
-          fontFamily: 'var(--mono)',
-        }}
-      >
-        Done practicing
-      </Button>
+      <Group grow gap="sm">
+        <Button
+          size="lg"
+          radius={8}
+          onClick={onDone}
+          style={{
+            background: 'transparent',
+            color: 'var(--text-h)',
+            border: '1px solid var(--border)',
+            height: 54,
+            fontFamily: 'var(--mono)',
+          }}
+        >
+          Skip (free chat)
+        </Button>
+        <Button
+          size="lg"
+          radius={8}
+          onClick={onDone}
+          disabled={!roleplay}
+          style={{
+            background: 'var(--accent)',
+            color: 'var(--bg)',
+            height: 54,
+            fontFamily: 'var(--mono)',
+          }}
+        >
+          Done practicing
+        </Button>
+      </Group>
     </>
   );
 }
@@ -123,13 +141,19 @@ function UploadStep({
   onUploaded: () => void;
 }) {
   const resetRef = useRef<() => void>(() => {});
+  const queryClient = useQueryClient();
 
   const upload = useMutation({
     mutationFn: () => {
       if (!file) throw new Error('No file selected');
       return api.uploadAudio(file);
     },
-    onSuccess: () => onUploaded(),
+    onSuccess: async () => {
+      // Pull a fresh /today/review now that a session exists — the page-mount
+      // fetch happened before upload, so its result was empty.
+      await queryClient.invalidateQueries({ queryKey: ['today-review'] });
+      onUploaded();
+    },
   });
 
   return (
@@ -279,6 +303,45 @@ function AdditionsStep({
   />;
 }
 
+// Split a sentence on `"..."` segments and wrap the quoted portions in a
+// styled span. Gemini wraps the specific error (in you_said) or correction
+// (in native) with double quotes so the diff is visible at a glance.
+function highlightQuoted(text: string, highlightColor: string): ReactNode {
+  const parts: ReactNode[] = [];
+  const re = /"([^"]+)"/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    parts.push(
+      <span key={key++} style={{ color: highlightColor, fontWeight: 600 }}>
+        {match[1]}
+      </span>
+    );
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+  return parts.length > 0 ? parts : text;
+}
+
+// When a card groups multiple instances of one pattern, Gemini joins them with
+// ' / '. Split-render each on its own line so they're scannable.
+function MultiLineHighlight({ text, color, italic }: { text: string; color: string; italic?: boolean }) {
+  const lines = text.split(' / ');
+  return (
+    <Stack gap={6} mt="xs">
+      {lines.map((line, i) => (
+        <Text key={i} c="var(--text-h)" style={{ fontStyle: italic ? 'italic' : undefined }}>
+          {highlightQuoted(line, color)}
+        </Text>
+      ))}
+    </Stack>
+  );
+}
+
 function AdditionBody({ c }: { c: ErrorCandidate }) {
   return (
     <Stack gap="md" mt="lg">
@@ -287,18 +350,14 @@ function AdditionBody({ c }: { c: ErrorCandidate }) {
           style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
           you said
         </Text>
-        <Text c="var(--text-h)" mt="xs" style={{ fontStyle: 'italic' }}>
-          "{c.you_said}"
-        </Text>
+        <MultiLineHighlight text={c.you_said} color="#ff8a8a" italic />
       </Box>
       <Box>
         <Text c="var(--text-dim)" size="xs"
           style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
           native
         </Text>
-        <Text c="var(--text-h)" mt="xs">
-          "{c.native}"
-        </Text>
+        <MultiLineHighlight text={c.native} color="var(--accent)" />
       </Box>
     </Stack>
   );

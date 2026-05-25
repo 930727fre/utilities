@@ -53,33 +53,30 @@ Then register `free2speak` subdomain in Cloudflare tunnel dashboard pointing to 
 
 ## Build status — picking up next session
 
-**Phase 1 done (current state):**
+**Phase 1 done — DB layer:**
 - Backend lifespan calls `init_schema` on startup; DB tables exist on a fresh container.
 - `GET /today/stats` is real: practice/drill done-today flags, active errors count, and a computed streak (consecutive days with sessions or completed drills, ending today or yesterday).
 - 1.0 archive data has already been imported via `import.py` — DB currently has ~52 active errors.
 
-**Still stubs (return hardcoded data):**
-- `GET /today/roleplay` — needs Opus to generate when no row for today
-- `POST /upload` — needs Gemini to analyze the audio; should persist a row in `sessions` with `raw_response` JSON containing extracted additions/graduations
-- `GET /today/review` — needs to read the latest session's `raw_response` and return its `additions` + `graduations`
-- `POST /errors/additions` — needs to resolve `candidate_ids` against the latest session's analysis, then `INSERT INTO errors`
-- `POST /errors/graduations` — needs to `UPDATE errors SET status='graduated'` for the given IDs
-- `GET /today/drill` — needs Opus to generate when no row for today
+**Phase 2 done — Gemini audio analysis:**
+- `POST /upload` accepts audio (≤20 MB), inline-base64 it to Gemini 2.5 Flash with the prompt in `main.py:_build_analysis_prompt`. Structured-output JSON schema enforces shape: `{transcript, summary, fluency_notes, additions[], graduations[]}`. Active errors (up to 100) are injected into the prompt so Gemini can flag graduations by their DB ID. Session row persisted with the raw JSON in `raw_response`; audio file saved under `/data/sessions/{id}.{ext}`.
+- `GET /today/review` reads the latest session's `raw_response` and returns its `additions` + `graduations` (frontend's swipe screens consume this directly).
+- `POST /errors/additions` resolves frontend candidate IDs against the latest session's analysis and `INSERT`s real rows into `errors`. `body_md` is rendered from `{you_said, native, note}`.
+- `POST /errors/graduations` maps frontend `grad-N` IDs back to the DB `error_id` via the latest session's analysis, then `UPDATE`s status to `graduated`.
 
-**Phase 2 plan (Gemini integration — pick up here):**
+**Phase 3 plan (Opus integration — pick up here):**
 
-1. `POST /upload`: accept audio, call Gemini with the audio + `1.0-archive/prompts/gemini-analysis.md` prompt, expect structured JSON with `{transcript, summary, fluency_notes, additions: [...], graduations: [...]}`. Persist a `sessions` row including `raw_response` (the full JSON dumped as TEXT). Return `{session_id, date, topic}` — topic from today's roleplay row if it exists, else `"(no roleplay)"`.
-2. `GET /today/review`: `SELECT raw_response FROM sessions ORDER BY uploaded_at DESC LIMIT 1`, parse JSON, return its `additions` + `graduations`. The frontend's review-swipe screen will then work end-to-end.
-3. `POST /errors/additions`: load latest session's `raw_response`, filter additions by `candidate_ids`, insert each into `errors`. Set `source_session_id`, `first_seen_date`, `last_seen_date`, `body_md`.
-4. `POST /errors/graduations`: `UPDATE errors SET status='graduated', graduated_at=datetime('now') WHERE id IN (...)`.
-
-**Phase 3 plan (Opus integration):**
-
-1. `GET /today/roleplay`: if a row exists for today's date, return it. Otherwise call Opus with `1.0-archive/prompts/roleplay-generation.md`, passing the active errors + recent sessions metadata. Persist + return.
+1. `GET /today/roleplay`: if a row exists for today's date, return it. Otherwise call Opus (Anthropic SDK already in `requirements.txt`) with `1.0-archive/prompts/roleplay-generation.md`, passing the active errors + recent sessions metadata. Persist + return.
 2. `GET /today/drill`: same pattern but for drills + `drill-generation.md`. Persist the parent `drills` row and child `drill_cards`.
+3. Consider a separate post-session "errors-generation" pass using `errors-generation.md` if the Gemini per-session detection turns out too noisy.
 
-**API keys:** compose already wires `GEMINI_API_KEY` and `ANTHROPIC_API_KEY` from the host shell (default empty). Make sure both are exported before `docker compose up -d --build`.
+**API keys:** compose already wires `GEMINI_API_KEY` and `ANTHROPIC_API_KEY` from the host shell (default empty). Make sure both are exported before `docker compose up -d --build`. Gemini is required for `/upload` to work; Anthropic only needed in Phase 3.
 
-**Existing helpers:**
-- `db.connect()` — opens a fresh sqlite3 connection with row_factory + FK on
-- `gemini_client.py` from xyt/flashcard/keyboard is the established pattern for Gemini HTTP calls. For audio upload, use the File API (`files.upload`) or pass `inline_data` with base64 — not the YouTube-URL pattern.
+**Existing helpers (Phase 2 era):**
+- `db.connect()` — opens a fresh sqlite3 connection with row_factory + FK on.
+- `_build_analysis_prompt(active_errors)` and `_call_gemini_with_audio(audio, mime, prompt)` in `main.py` — reuse the latter as a template for Opus calls in Phase 3 (swap base URL, schema, and auth header).
+
+**Limitations to revisit:**
+- 20 MB inline ceiling on audio — long recordings need the Gemini Files API.
+- Per-call active-error cap of 100 — fine until the error book grows large; then consider top-N by recency/relevance instead of by `last_seen_date` alone.
+- Audio files accumulate under `/data/sessions/` indefinitely. No cleanup yet.

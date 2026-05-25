@@ -6,8 +6,8 @@ services:
     volumes:
       - ./data:/data
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY not exported in shell}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY not exported in shell}
     expose:
       - "8000"
 

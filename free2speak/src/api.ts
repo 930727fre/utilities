@@ -28,7 +28,10 @@ export const api = {
     const form = new FormData();
     form.append('file', file);
     const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: form });
-    if (!res.ok) throw new Error(`Upload failed: HTTP ${res.status}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error((err as { detail?: string }).detail ?? `HTTP ${res.status}`);
+    }
     return res.json() as Promise<{ session_id: string; date: string; topic: string }>;
   },
 
