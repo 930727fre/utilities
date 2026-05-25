@@ -88,13 +88,13 @@ Follows the [utility repo's design language](../README.md#design-language) — m
 
 **Done (uncommitted):**
 
-- `POST /api/cards/{id}/examples` — backend endpoint. Reads `word` + `note`, prompts `gemma3:12b` via `http://ollama:11434/api/generate`, parses the numbered response, persists to `sentence` as a `\n`-separated numbered list. Returns the updated card.
+- `POST /api/cards/{id}/examples` — backend endpoint. Reads `word` + `note`, prompts `qwen3:8b` via `http://ollama:11434/api/generate`, parses the numbered response, persists to `sentence` as a `\n`-separated numbered list. Returns the updated card.
 - `backend/requirements.txt`: added `requests==2.32.3`.
 - `docker-compose.yml`: `flashcard-backend` now joins the external `my_network` so it can reach the shared `ollama` container by DNS name.
 - `nginx/nginx.conf`: bumped `proxy_read_timeout` / `proxy_send_timeout` to `180s` on `/api/` (ollama calls run 30–120s).
 - `src/api.ts`: added `regenerateExamples(id)`.
 - `src/pages/ReviewPage.tsx`: replaced clipboard copy button with ✨ `IconSparkles` + `Loader` spinner during the call; sentence `<Text>` now uses `whiteSpace: 'pre-line'` so the numbered lines wrap correctly. Mutation patches the queue head only if it's still the same card (rating mid-generation is safe).
-- **Env vars** (backend, optional): `OLLAMA_URL` (default `http://ollama:11434`), `OLLAMA_MODEL` (default `gemma3:12b`).
+- **Env vars** (backend, optional): `OLLAMA_URL` (default `http://ollama:11434`), `OLLAMA_MODEL` (default `qwen3:8b`).
 
 **Pending — UI interleaving:**
 

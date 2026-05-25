@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-LLM_MODEL = os.environ.get("LLM_MODEL", "gemma3:12b")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen3:8b")
 CORRECTIONS_PATH = Path(os.environ.get("CORRECTIONS_PATH", "/app/data/corrections.json"))
 FRONTEND_DIR = Path(os.environ.get("FRONTEND_DIR", "/app/frontend"))
 

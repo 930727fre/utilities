@@ -15,7 +15,7 @@ from models import Card, CardUpdate, ReviewRequest, Settings, SettingsUpdate, Sy
 TZ = ZoneInfo("Asia/Taipei")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 
 app = FastAPI()
 

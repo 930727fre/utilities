@@ -36,7 +36,7 @@ keyboard-backend (FastAPI on 8080)
 ## Models
 
 - **Whisper**: `deepdml/faster-whisper-large-v3-turbo-ct2` (set in `docker-compose.yml`, downloaded once into the `whisper-models` named volume on first request).
-- **LLM**: `gemma3:12b` on Ollama. Gemma was chosen over Qwen (China-trained, simplified-Chinese leak) and over a plain 4B variant (couldn't follow instructions reliably). 12B follows the "don't translate" / "don't add commentary" / "use Traditional Chinese" rules consistently.
+- **LLM**: `qwen3:8b` on Ollama. Previously `gemma3:12b` — switched to qwen3 for ~half the VRAM footprint (≈5 GB vs ≈9 GB), which removes cross-container OOM pressure when whisper jobs run concurrently on the same GPU. Earlier qwen versions leaked simplified Chinese into zh-Hant output; qwen3 handles zh-Hant cleanly in practice. If zh-Hans leakage reappears, swap back via the `LLM_MODEL` env var.
 - LLM model is configurable via `LLM_MODEL` env var in compose. Pull with `ollama pull <model>` first.
 
 ## Layout
@@ -64,9 +64,9 @@ Prerequisites:
 - External Docker network `my_network` already exists.
 - An Ollama instance reachable as `ollama:11434` on `my_network`, with the LLM model already pulled. **Ollama does not auto-download** — pull it manually first:
   ```sh
-  ollama pull gemma3:12b
+  ollama pull qwen3:8b
   # or, if you don't have the CLI handy:
-  curl -X POST http://<ollama-host>:11434/api/pull -d '{"model":"gemma3:12b"}'
+  curl -X POST http://<ollama-host>:11434/api/pull -d '{"model":"qwen3:8b"}'
   ```
 - A Cloudflare Tunnel pointed at `backend:8080` on `my_network` (also external, not in this compose).
 
@@ -102,7 +102,7 @@ Saved to `backend/data/corrections.json` via atomic write (tmp + `os.replace`).
 | GET    | `/api/corrections`  | —                     | `{<canonical>: [<mishearing>, …], …}`            |
 | PUT    | `/api/corrections`  | same shape as GET     | `{ok: true}`, persists to disk and reloads       |
 
-## Latency (warm, RTX 3060, gemma3:12b)
+## Latency (warm, RTX 3060, qwen3:8b)
 
 - Whisper (≤2s of audio): ~150–300 ms
 - LLM correction: ~600–1200 ms

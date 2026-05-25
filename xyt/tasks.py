@@ -20,7 +20,7 @@ TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
 ENRICH_TIMEOUT = 2 * 60 * 60      # 2 hours
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 
 _kks = pykakasi.kakasi()
 

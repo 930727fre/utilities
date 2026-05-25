@@ -13,7 +13,7 @@ Paste a YouTube URL, wait, download SRT — or stream the video back with captio
 | Downloader | `yt-dlp` (best mp4) |
 | Transcriber | `openai-whisper` model `medium`, `device=cuda` |
 | Romanizer | `pykakasi` (Japanese kanji+kana → Hepburn romaji), deterministic, CPU |
-| Translator | Ollama HTTP at `http://ollama:11434`, model `gemma3:12b` (configurable via `OLLAMA_MODEL`); one call per cue |
+| Translator | Ollama HTTP at `http://ollama:11434`, model `qwen3:8b` (configurable via `OLLAMA_MODEL`); one call per cue |
 | Storage | `data/jobs.json` (file-locked) + `data/downloads/{id}.mp4` + `.srt`. The `.srt` is a single file where each cue body is 3 stacked lines: original / romaji / zh-Hant. |
 
 ## Services
@@ -79,6 +79,6 @@ UI follows the [utility repo's design language](../README.md#design-language): m
 - **`jobs.json` is file-locked**, not a real DB. For two users hammering at once you'd want SQLite — fine for single-user.
 - **Whisper model is hardcoded** to `medium`. Larger models would mean better accuracy + much longer GPU time.
 - **Translation assumes Japanese source.** Romanization uses pykakasi (Hepburn); translation prompt is hardcoded to JA→zh-Hant. Other source languages will produce garbage in both extra tracks.
-- **Translation is one ollama call per cue.** Simple but slow — a 30 min video with ~500 cues takes 10–25 min of GPU time on `gemma3:12b`. Batching cues would help but isn't implemented.
+- **Translation is one ollama call per cue.** Simple but slow — a 30 min video with ~500 cues takes 10–25 min of GPU time on `qwen3:8b`. Batching cues would help but isn't implemented.
 - **Retry re-runs from scratch.** If enrichment fails after Whisper succeeded, retry re-downloads and re-transcribes too. Acceptable for now; can add an enrichment-only retry path later.
 - **No persistent queue.** Submitting jobs while the app is down is not possible (no broker absorbs them). For single-user this is fine.

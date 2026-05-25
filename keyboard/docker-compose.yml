@@ -25,7 +25,7 @@ services:
     environment:
       - WHISPER_URL=http://whisper:8000
       - OLLAMA_URL=http://ollama:11434
-      - LLM_MODEL=gemma3:12b
+      - LLM_MODEL=qwen3:8b
       - CORRECTIONS_PATH=/app/data/corrections.json
       - FRONTEND_DIR=/app/frontend
     volumes:
