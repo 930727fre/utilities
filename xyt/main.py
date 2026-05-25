@@ -1,9 +1,12 @@
+import os
+import tempfile
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 from pydantic import BaseModel
 
@@ -162,6 +165,39 @@ async def download_srt(job_id: str):
     if not path.exists():
         raise HTTPException(status_code=404, detail="File missing")
     return FileResponse(path, filename=f"{job['title']}.srt", media_type="text/plain")
+
+
+@app.get("/api/download/{job_id}/zip")
+async def download_zip(job_id: str, background_tasks: BackgroundTasks):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    title = job["title"]
+    members: list[tuple[Path, str]] = []
+    for kind in ("mp4", "srt"):
+        filename = job["files"].get(kind)
+        if not filename:
+            continue
+        path = DOWNLOADS_DIR / filename
+        if path.exists():
+            members.append((path, f"{title}.{kind}"))
+
+    if not members:
+        raise HTTPException(status_code=404, detail="No files to download")
+
+    # ZIP_STORED (no compression) — MP4 is already compressed, deflate would waste CPU
+    # for ~0% size gain. Build to temp file so we can stream without holding the
+    # whole archive in memory.
+    tmp_path = tempfile.mktemp(suffix=".zip", dir=str(DOWNLOADS_DIR))
+    with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED) as zf:
+        for src, arcname in members:
+            zf.write(src, arcname=arcname)
+
+    # Delete the temp zip after the response is streamed.
+    background_tasks.add_task(lambda p=tmp_path: os.unlink(p) if os.path.exists(p) else None)
+
+    return FileResponse(tmp_path, filename=f"{title}.zip", media_type="application/zip")
 
 
 # ── Streaming ──────────────────────────────────────────────────────────────

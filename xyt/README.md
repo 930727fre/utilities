@@ -54,7 +54,7 @@ The backend exposes these routes. The frontend container's Vite proxy forwards `
 | `GET`  | `/api/jobs/{id}` | Single job |
 | `POST` | `/api/jobs/{id}/retry` | Re-queue a failed job |
 | `DELETE` | `/api/jobs/{id}` | Cancel + remove job and its files |
-| `GET`  | `/api/download/{id}/{kind}` | `kind` ∈ `mp4` / `srt`; downloads the file |
+| `GET`  | `/api/download/{id}/{kind}` | `kind` ∈ `mp4` / `srt` / `zip`; `zip` bundles whatever files exist |
 | `GET`  | `/player/{id}` | Standalone player page (new tab) |
 | `GET`  | `/api/stream/{id}/video` | MP4 with `Range` support for seek |
 | `GET`  | `/api/stream/{id}/subtitle` | SRT → VTT on the fly for the `<track>` element |
