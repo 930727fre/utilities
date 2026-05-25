@@ -237,10 +237,20 @@ def regenerate_examples(card_id: str):
     note = d["note"] or ""
 
     prompt = (
-        "You are given an English word and its Chinese definitions grouped by part of speech "
-        "(e.g. n., v., vt., vi., adj., adv., prep., conj., pron., interj.).\n"
-        "For EACH part-of-speech group, write ONE natural English example sentence using the word in that role.\n"
-        "Return a JSON array of sentences, one per group, in order. No commentary, no translations.\n\n"
+        "You are given an English word and its Chinese definitions grouped by part of speech.\n"
+        "POS abbreviations used in this input style:\n"
+        "  n. = noun\n"
+        "  v. = verb (general/unspecified)\n"
+        "  vt. = transitive verb\n"
+        "  vi. = intransitive verb\n"
+        "  a. = adjective (same as adj.)\n"
+        "  ad. = adverb (same as adv.)\n"
+        "  prep., conj., pron., interj., art., num., abbr.\n"
+        "Compound forms like 'vi./n.' or 'v./n.' mean one definition serves multiple roles — treat as ONE group.\n"
+        "The leading bracketed IPA + slash (e.g. '[ɡrænt]/') is pronunciation, not a POS group.\n"
+        "English synonyms in parentheses inside Chinese defs (e.g. '（award）', '（＊cover）') are hints, not new groups.\n\n"
+        "For EACH distinct POS group, write ONE natural English example sentence using the word in that role.\n"
+        "Return a JSON array of sentences, one per group, in the same order as the input. No commentary, no translations.\n\n"
         f"Word: {word}\n"
         f"Definitions: {note}"
     )
@@ -249,7 +259,7 @@ def regenerate_examples(card_id: str):
         sentences = generate_json(
             prompt,
             {"type": "array", "items": {"type": "string"}},
-            temperature=0.3,
+            temperature=0.6,
         )
     except Exception as e:
         conn.close()
@@ -260,7 +270,11 @@ def regenerate_examples(card_id: str):
         conn.close()
         raise HTTPException(status_code=502, detail="Gemini returned no sentences")
 
-    new_sentence = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, 1))
+    # Only number when there's more than one — a lone sentence reads cleaner unprefixed.
+    if len(sentences) == 1:
+        new_sentence = sentences[0]
+    else:
+        new_sentence = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, 1))
     conn.execute("UPDATE cards SET sentence = ? WHERE id = ?", (new_sentence, card_id))
     conn.commit()
     row = conn.execute("SELECT * FROM cards WHERE id = ?", (card_id,)).fetchone()

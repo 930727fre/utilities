@@ -84,7 +84,7 @@ Follows the [utility repo's design language](../README.md#design-language) — m
 
 ## Work in progress — example-sentence regeneration
 
-**Goal:** the ✨ button on the flipped review card calls a local LLM to generate one example sentence per definition (split by POS markers in `note`), and renders defs + examples aligned in the UI.
+**Goal:** the ✨ button on the flipped review card calls Gemini to generate one example sentence per definition (split by POS markers in `note`), and renders defs + examples aligned in the UI.
 
 **Done:**
 
