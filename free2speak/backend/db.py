@@ -15,4 +15,22 @@ def connect() -> sqlite3.Connection:
 
 def init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    # Migrations for existing DBs created before a column was added. sqlite has no
+    # IF NOT EXISTS on ADD COLUMN, so we try and swallow the "duplicate column" error.
+    for table, col, defn in (
+        ("drills", "date", "TEXT NOT NULL DEFAULT ''"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+        except sqlite3.OperationalError:
+            pass
+    # Backfill drills.date for rows created before the column existed — derive from
+    # the UTC `created_at` plus the Asia/Taipei +8h offset.
+    conn.execute(
+        "UPDATE drills SET date = date(created_at, '+8 hours') "
+        "WHERE date = '' OR date IS NULL"
+    )
+    # Indexes that depend on migrated columns live here (not in schema.sql) so they
+    # don't run before the ALTER TABLE on existing DBs.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_drills_date ON drills(date)")
     conn.commit()

@@ -9,10 +9,12 @@ import PageShell from '../components/PageShell';
 import CardShell from '../components/CardShell';
 
 export default function DrillPage() {
-  const { data: cards } = useQuery({
+  const { data: cards, isLoading, isFetching } = useQuery({
     queryKey: ['today-drill'],
     queryFn: api.getTodayDrill,
   });
+  // Show indicator when a background refetch is happening but cached cards are visible
+  const refreshing = isFetching && !isLoading;
 
   const [index, setIndex] = useState(0);
   const [flipped, setFlipped] = useState(false);
@@ -52,6 +54,13 @@ export default function DrillPage() {
   return (
     <PageShell scroll="locked">
       <Stack gap="md" style={{ flex: 1, minHeight: 0 }}>
+        {refreshing && (
+          <Text c="var(--text)" className="glyph-pulse"
+            style={{ fontFamily: 'var(--mono)', fontSize: 13, textAlign: 'center' }}>
+            ○ regenerating drill…
+          </Text>
+        )}
+
         {!cards && (
           <CardShell>
             <Box p="lg"><Text c="var(--text-dim)">Loading...</Text></Box>

@@ -414,7 +414,7 @@ def get_today_drill():
     conn = connect()
     try:
         existing = conn.execute(
-            "SELECT id FROM drills WHERE date(created_at) = ? LIMIT 1",
+            "SELECT id FROM drills WHERE date = ? LIMIT 1",
             (today_iso,),
         ).fetchone()
         if existing:
@@ -461,8 +461,8 @@ def get_today_drill():
     conn = connect()
     try:
         conn.execute(
-            "INSERT INTO drills (id, rationale) VALUES (?, ?)",
-            (drill_id, result.get("rationale", "")),
+            "INSERT INTO drills (id, date, rationale) VALUES (?, ?, ?)",
+            (drill_id, today_iso, result.get("rationale", "")),
         )
         for i, c in enumerate(cards):
             conn.execute(

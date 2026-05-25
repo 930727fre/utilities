@@ -68,10 +68,13 @@ export default function PracticePage() {
 // ─── Step 1: Roleplay ────────────────────────────────────────────────────────
 
 function RoleplayStep({ onDone }: { onDone: () => void }) {
-  const { data: roleplay, isLoading } = useQuery({
+  const { data: roleplay, isLoading, isFetching } = useQuery({
     queryKey: ['today-roleplay'],
     queryFn: api.getTodayRoleplay,
   });
+  // Cached data is shown while a background refetch is in flight (stale-while-revalidate).
+  // Surface that to the user with a pulsing indicator so they know an Opus regen is happening.
+  const refreshing = isFetching && !isLoading;
 
   return (
     <>
@@ -89,6 +92,12 @@ function RoleplayStep({ onDone }: { onDone: () => void }) {
             )}
           </Box>
           {isLoading && <Text c="var(--text-dim)">Loading...</Text>}
+          {refreshing && (
+            <Text c="var(--text)" className="glyph-pulse"
+              style={{ fontFamily: 'var(--mono)', fontSize: 13 }}>
+              ○ regenerating roleplay…
+            </Text>
+          )}
           {roleplay && (
             <Text c="var(--text-h)" style={{ whiteSpace: 'pre-wrap', fontSize: 16, lineHeight: 1.6 }}>
               {roleplay.script}
@@ -115,12 +124,13 @@ function RoleplayStep({ onDone }: { onDone: () => void }) {
           size="lg"
           radius={8}
           onClick={onDone}
-          disabled={!roleplay}
+          disabled={!roleplay || refreshing}
           style={{
             background: 'var(--accent)',
             color: 'var(--bg)',
             height: 54,
             fontFamily: 'var(--mono)',
+            opacity: !roleplay || refreshing ? 0.5 : 1,
           }}
         >
           Done practicing

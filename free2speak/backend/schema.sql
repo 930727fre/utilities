@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS errors (
 
 CREATE TABLE IF NOT EXISTS drills (
     id            TEXT PRIMARY KEY,
+    date          TEXT NOT NULL DEFAULT '',
     rationale     TEXT,
     completed_at  TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
