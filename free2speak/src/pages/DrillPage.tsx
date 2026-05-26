@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
-  Stack, Title, Text, Group, Box, Button,
+  Stack, Title, Text, Group, Box, Button, Transition,
 } from '@mantine/core';
 import { IconChevronLeft, IconChevronRight } from '@tabler/icons-react';
 import { api } from '../api';
@@ -55,112 +55,112 @@ export default function DrillPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, total]);
 
+  // Slide the card stack in once cards arrive — matches Dashboard's pattern,
+  // empty space during fetch instead of a "Loading..." flash.
   return (
     <PageShell scroll="locked">
-      <Stack gap="md" style={{ flex: 1, minHeight: 0 }}>
-        {refreshing && (
-          <Text c="var(--text)" className="glyph-pulse"
-            style={{ fontFamily: 'var(--mono)', fontSize: 13, textAlign: 'center' }}>
-            ○ regenerating drill…
-          </Text>
-        )}
-
-        {!cards && (
-          <CardShell>
-            <Box p="lg"><Text c="var(--text-dim)">Loading...</Text></Box>
-          </CardShell>
-        )}
-
-        {cards && cards.length === 0 && (
-          <CardShell>
-            <Stack align="center" justify="center" p={{ base: 'lg', sm: 40 }} style={{ flex: 1 }}>
-              <Text c="var(--text-dim)" size="xs"
-                style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
-                no drill today
+      <Transition mounted={!!cards} transition="slide-up" duration={400}>
+        {(styles) => (
+          <Stack gap="md" style={{ ...styles, flex: 1, minHeight: 0 }}>
+            {refreshing && (
+              <Text c="var(--text)" className="glyph-pulse"
+                style={{ fontFamily: 'var(--mono)', fontSize: 13, textAlign: 'center' }}>
+                ○ regenerating drill…
               </Text>
-              <Title order={2} c="var(--text-h)" ff="var(--mono)">
-                ✓ Done
-              </Title>
-            </Stack>
-          </CardShell>
-        )}
+            )}
 
-        {current && (
-          <>
-            <CardShell onClick={() => setFlipped((f) => !f)}>
-              <Stack gap="md" p={{ base: 'lg', sm: 40 }}
-                style={{ flex: 1, justifyContent: 'center', position: 'relative' }}>
-                <Text c="var(--text-dim)" size="xs"
-                  style={{
-                    position: 'absolute', top: 16, right: 20,
-                    fontFamily: 'var(--mono)',
-                  }}>
-                  {index + 1} / {total}
-                </Text>
-                <Text c="var(--text-h)" ta="center"
-                  style={{ fontSize: 'clamp(1.1rem, 4vw, 1.5rem)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                  {current.prompt}
-                </Text>
+            {cards && cards.length === 0 && (
+              <CardShell>
+                <Stack align="center" justify="center" p={{ base: 'lg', sm: 40 }} style={{ flex: 1 }}>
+                  <Text c="var(--text-dim)" size="xs"
+                    style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
+                    no drill today
+                  </Text>
+                  <Title order={2} c="var(--text-h)" ff="var(--mono)">
+                    ✓ Done
+                  </Title>
+                </Stack>
+              </CardShell>
+            )}
 
-                {flipped ? (
-                  <Box mt="xl" pt="lg" style={{ borderTop: '1px solid var(--border)' }}>
-                    <Text c="var(--text-h)" ta="center" fw={600}
-                      style={{ fontSize: 'clamp(1rem, 3.5vw, 1.4rem)', lineHeight: 1.5 }}>
-                      {current.answer}
+            {current && (
+              <>
+                <CardShell onClick={() => setFlipped((f) => !f)}>
+                  <Stack gap="md" p={{ base: 'lg', sm: 40 }}
+                    style={{ flex: 1, justifyContent: 'center', position: 'relative' }}>
+                    <Text c="var(--text-dim)" size="xs"
+                      style={{
+                        position: 'absolute', top: 16, right: 20,
+                        fontFamily: 'var(--mono)',
+                      }}>
+                      {index + 1} / {total}
                     </Text>
-                    {current.source_error_id && (
-                      <Text c="var(--text-dim)" size="xs" ta="center" mt="md"
-                        style={{ fontFamily: 'var(--mono)' }}>
-                        errors.md: {current.source_error_id}
+                    <Text c="var(--text-h)" ta="center"
+                      style={{ fontSize: 'clamp(1.1rem, 4vw, 1.5rem)', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                      {current.prompt}
+                    </Text>
+
+                    {flipped ? (
+                      <Box mt="xl" pt="lg" style={{ borderTop: '1px solid var(--border)' }}>
+                        <Text c="var(--text-h)" ta="center" fw={600}
+                          style={{ fontSize: 'clamp(1rem, 3.5vw, 1.4rem)', lineHeight: 1.5 }}>
+                          {current.answer}
+                        </Text>
+                        {current.source_error_id && (
+                          <Text c="var(--text-dim)" size="xs" ta="center" mt="md"
+                            style={{ fontFamily: 'var(--mono)' }}>
+                            errors.md: {current.source_error_id}
+                          </Text>
+                        )}
+                      </Box>
+                    ) : (
+                      <Text c="var(--text-dim)" size="xs" ta="center" mt="xl"
+                        style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
+                        tap to reveal
                       </Text>
                     )}
-                  </Box>
-                ) : (
-                  <Text c="var(--text-dim)" size="xs" ta="center" mt="xl"
-                    style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
-                    tap to reveal
-                  </Text>
-                )}
-              </Stack>
-            </CardShell>
+                  </Stack>
+                </CardShell>
 
-            <Group grow gap="sm">
-              <Button
-                size="lg"
-                radius={8}
-                disabled={index === 0}
-                onClick={prev}
-                leftSection={<IconChevronLeft size={18} />}
-                style={{
-                  background: 'transparent',
-                  color: 'var(--text-h)',
-                  border: '1px solid var(--border)',
-                  height: 54,
-                  fontFamily: 'var(--mono)',
-                }}
-              >
-                Prev
-              </Button>
-              <Button
-                size="lg"
-                radius={8}
-                disabled={index === total - 1}
-                onClick={next}
-                rightSection={<IconChevronRight size={18} />}
-                style={{
-                  background: 'transparent',
-                  color: 'var(--text-h)',
-                  border: '1px solid var(--border)',
-                  height: 54,
-                  fontFamily: 'var(--mono)',
-                }}
-              >
-                Next
-              </Button>
-            </Group>
-          </>
+                <Group grow gap="sm">
+                  <Button
+                    size="lg"
+                    radius={8}
+                    disabled={index === 0}
+                    onClick={prev}
+                    title="Previous card"
+                    aria-label="Previous card"
+                    style={{
+                      background: 'transparent',
+                      color: 'var(--text-h)',
+                      border: '1px solid var(--border)',
+                      height: 54,
+                    }}
+                  >
+                    <IconChevronLeft size={24} />
+                  </Button>
+                  <Button
+                    size="lg"
+                    radius={8}
+                    disabled={index === total - 1}
+                    onClick={next}
+                    title="Next card"
+                    aria-label="Next card"
+                    style={{
+                      background: 'transparent',
+                      color: 'var(--text-h)',
+                      border: '1px solid var(--border)',
+                      height: 54,
+                    }}
+                  >
+                    <IconChevronRight size={24} />
+                  </Button>
+                </Group>
+              </>
+            )}
+          </Stack>
         )}
-      </Stack>
+      </Transition>
     </PageShell>
   );
 }

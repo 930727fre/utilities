@@ -18,6 +18,23 @@ export default function DashboardPage() {
     staleTime: 30_000,
   });
 
+  // Prefetch Practice's roleplay and Drill's cards in the background while the
+  // user looks at stats. If either needs an Opus generation (~10s), it happens
+  // silently here rather than blocking the page they navigate to next. Same
+  // staleTime as the consuming pages so the cache survives the hop.
+  const roleplayPrefetch = useQuery({
+    queryKey: ['today-roleplay'],
+    queryFn: api.getTodayRoleplay,
+    staleTime: 5 * 60 * 1000,
+  });
+  const drillPrefetch = useQuery({
+    queryKey: ['today-drill'],
+    queryFn: api.getTodayDrill,
+    staleTime: 5 * 60 * 1000,
+  });
+  const practiceReady = !!roleplayPrefetch.data;
+  const drillReady = !!drillPrefetch.data;
+
   const isReady = !!stats && !(isStale && isFetching);
 
   const doneCount =
@@ -89,35 +106,43 @@ export default function DashboardPage() {
               </Group>
             </Paper>
 
-            {/* Actions — parallel, equal-weight */}
+            {/* Actions — icon-only (label conveyed by icon + aria-label).
+                Disabled until prefetch resolves so clicking always lands on a
+                fully-loaded page rather than a spinner. */}
             <Group grow gap="sm">
               <Button
                 size="lg"
                 radius={8}
+                disabled={!practiceReady}
                 onClick={() => navigate('/practice')}
+                title="Practice"
+                aria-label="Practice"
                 style={{
                   background: 'transparent',
                   color: 'var(--text-h)',
                   border: '1px solid var(--border)',
                   height: 54,
-                  fontFamily: 'var(--mono)',
+                  opacity: practiceReady ? 1 : 0.45,
                 }}
               >
-                Practice
+                <IconMicrophone size={24} />
               </Button>
               <Button
                 size="lg"
                 radius={8}
+                disabled={!drillReady}
                 onClick={() => navigate('/drill')}
+                title="Drill"
+                aria-label="Drill"
                 style={{
                   background: 'transparent',
                   color: 'var(--text-h)',
                   border: '1px solid var(--border)',
                   height: 54,
-                  fontFamily: 'var(--mono)',
+                  opacity: drillReady ? 1 : 0.45,
                 }}
               >
-                Drill
+                <IconCards size={24} />
               </Button>
             </Group>
 

@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  Stack, Title, Text, Button, Group, Box, FileButton,
+  Stack, Title, Text, Button, Group, Box, FileButton, Transition,
 } from '@mantine/core';
 import { useNavigate } from 'react-router-dom';
 import { IconUpload } from '@tabler/icons-react';
@@ -50,39 +50,43 @@ export default function PracticePage() {
     navigate('/');
   };
 
+  // Slide the whole step container in once practice-state resolves. While it's
+  // in flight (step === 'init') the page is empty — no "Loading..." flash, the
+  // content just appears with the same slide-up the Dashboard uses.
   return (
     <PageShell scroll="locked">
-      <Stack gap="md" style={{ flex: 1, minHeight: 0 }}>
-        {step === 'init' && (
-          <CardShell><Box p="lg"><Text c="var(--text-dim)">Loading...</Text></Box></CardShell>
+      <Transition mounted={step !== 'init'} transition="slide-up" duration={400}>
+        {(styles) => (
+          <Stack gap="md" style={{ ...styles, flex: 1, minHeight: 0 }}>
+            {step === 'roleplay' && (
+              <RoleplayStep onDone={(m) => { setMode(m); setStep('upload'); }} />
+            )}
+            {step === 'upload' && (
+              <UploadStep
+                file={audioFile}
+                mode={mode}
+                onFileChange={setAudioFile}
+                onUploaded={(sid) => {
+                  setSessionId(sid);
+                  setStep('additions');
+                }}
+              />
+            )}
+            {step === 'additions' && sessionId && (
+              <AdditionsStep
+                sessionId={sessionId}
+                onComplete={() => setStep('graduations')}
+              />
+            )}
+            {step === 'graduations' && sessionId && (
+              <GraduationsStep
+                sessionId={sessionId}
+                onComplete={finish}
+              />
+            )}
+          </Stack>
         )}
-        {step === 'roleplay' && (
-          <RoleplayStep onDone={(m) => { setMode(m); setStep('upload'); }} />
-        )}
-        {step === 'upload' && (
-          <UploadStep
-            file={audioFile}
-            mode={mode}
-            onFileChange={setAudioFile}
-            onUploaded={(sid) => {
-              setSessionId(sid);
-              setStep('additions');
-            }}
-          />
-        )}
-        {step === 'additions' && sessionId && (
-          <AdditionsStep
-            sessionId={sessionId}
-            onComplete={() => setStep('graduations')}
-          />
-        )}
-        {step === 'graduations' && sessionId && (
-          <GraduationsStep
-            sessionId={sessionId}
-            onComplete={finish}
-          />
-        )}
-      </Stack>
+      </Transition>
     </PageShell>
   );
 }
@@ -150,7 +154,7 @@ function RoleplayStep({ onDone }: { onDone: (mode: UploadMode) => void }) {
             fontFamily: 'var(--mono)',
           }}
         >
-          Skip (free chat)
+          Freestyle
         </Button>
         <Button
           size="lg"
@@ -165,7 +169,7 @@ function RoleplayStep({ onDone }: { onDone: (mode: UploadMode) => void }) {
             opacity: !roleplay || refreshing ? 0.5 : 1,
           }}
         >
-          Done practicing
+          Done
         </Button>
       </Group>
     </>
@@ -204,11 +208,6 @@ function UploadStep({
       <CardShell>
         <Stack gap="lg" align="center" justify="center" p={{ base: 'lg', sm: 32 }}
           style={{ flex: 1, minHeight: 0 }}>
-          <Text c="var(--text-dim)" size="xs"
-            style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
-            upload recording · mode: {mode}
-          </Text>
-
           <FileButton
             resetRef={resetRef}
             onChange={onFileChange}
@@ -228,7 +227,7 @@ function UploadStep({
                   fontFamily: 'var(--mono)',
                 }}
               >
-                {file ? 'Choose different file' : 'Choose audio file'}
+                {file ? 'Replace' : 'Choose file'}
               </Button>
             )}
           </FileButton>
@@ -331,7 +330,7 @@ function AdditionsStep({
             onComplete();
           }}
           style={{ background: 'var(--accent)', color: 'var(--bg)', height: 54, fontFamily: 'var(--mono)' }}>
-          Continue to graduate
+          Continue
         </Button>
       </>
     );
