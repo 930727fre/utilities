@@ -12,6 +12,10 @@ export default function DrillPage() {
   const { data: cards, isLoading, isFetching } = useQuery({
     queryKey: ['today-drill'],
     queryFn: api.getTodayDrill,
+    // Same reasoning as PracticePage's today-roleplay query: without this,
+    // every Drill mount refetches and the cached-data stale-while-revalidate
+    // window flashes the "regenerating" pulse even when nothing changed.
+    staleTime: 5 * 60 * 1000,
   });
   // Show indicator when a background refetch is happening but cached cards are visible
   const refreshing = isFetching && !isLoading;

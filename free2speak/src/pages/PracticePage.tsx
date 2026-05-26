@@ -94,6 +94,12 @@ function RoleplayStep({ onDone }: { onDone: (mode: UploadMode) => void }) {
   const { data: roleplay, isLoading, isFetching } = useQuery({
     queryKey: ['today-roleplay'],
     queryFn: api.getTodayRoleplay,
+    // Without this, every Practice mount refetches and the cached-data
+    // stale-while-revalidate window briefly flashes the "regenerating" pulse
+    // even when nothing's changed. 5 min stays cached, then naturally refreshes
+    // when the user comes back after a real break. Page reload (F5) clears the
+    // in-memory cache and triggers a fresh fetch regardless.
+    staleTime: 5 * 60 * 1000,
   });
   // Cached data is shown while a background refetch is in flight (stale-while-revalidate).
   // Surface that to the user with a pulsing indicator so they know an Opus regen is happening.
