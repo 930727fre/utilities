@@ -82,7 +82,7 @@ Nginx maps `/api/*` → backend `/*`.
 
 Follows the [utility repo's design language](../README.md#design-language) — monochrome warm-gray surfaces with one honey accent per page. Review-rating buttons (Again / Hard / Good / Easy) intentionally drop the conventional color coding in favor of position-based muscle memory + keyboard hints `[1] [2] [3] [4]`.
 
-## Work in progress — example-sentence regeneration
+## Example-sentence regeneration
 
 **Goal:** the ✨ button on the flipped review card calls Gemini to generate one example sentence per definition (split by POS markers in `note`), and renders defs + examples aligned in the UI.
 

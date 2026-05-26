@@ -51,7 +51,7 @@ Then register `free2speak` subdomain in Cloudflare tunnel dashboard pointing to 
 
 `python export.py --out /tmp/audit-YYYY-MM/` regenerates a browsable markdown tree from the DB for human / Claude Code review. Read-only, throwaway. Mutations during audit go through the API or `debug.py`, never by editing the exported MD.
 
-## Build status — picking up next session
+## Build status
 
 **Phase 1 done — DB layer:**
 - Backend lifespan calls `init_schema` on startup; DB tables exist on a fresh container.
@@ -59,7 +59,7 @@ Then register `free2speak` subdomain in Cloudflare tunnel dashboard pointing to 
 - 1.0 archive data has already been imported via `import.py` — DB currently has ~52 active errors.
 
 **Phase 2 done — Gemini audio analysis:**
-- `POST /upload` accepts audio (≤20 MB), inline-base64 it to Gemini 2.5 Flash with the prompt in `main.py:_build_analysis_prompt`. Structured-output JSON schema enforces shape: `{transcript, summary, fluency_notes, additions[], graduations[]}`. Active errors (up to 100) are injected into the prompt so Gemini can flag graduations by their DB ID. Session row persisted with the raw JSON in `raw_response`; audio file saved under `/data/sessions/{id}.{ext}`.
+- `POST /upload` accepts audio (≤20 MB), inline-base64 it to Gemini 2.5 Flash with the prompt in `prompts/gemini_analysis.py:build`. Structured-output JSON schema enforces shape: `{transcript, summary, fluency_notes, additions[], graduations[]}`. Active errors (up to 100) are injected into the prompt so Gemini can flag graduations by their DB ID. Session row persisted with the raw JSON in `raw_response`; audio file saved under `/data/sessions/{id}.{ext}`.
 - `GET /today/review` reads the latest session's `raw_response` and returns its `additions` + `graduations` (frontend's swipe screens consume this directly).
 - `POST /errors/additions` resolves frontend candidate IDs against the latest session's analysis and `INSERT`s real rows into `errors`. `body_md` is rendered from `{you_said, native, note}`.
 - `POST /errors/graduations` maps frontend `grad-N` IDs back to the DB `error_id` via the latest session's analysis, then `UPDATE`s status to `graduated`.
