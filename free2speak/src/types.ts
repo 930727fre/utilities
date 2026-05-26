@@ -18,7 +18,6 @@ export interface GraduateCandidate {
   id: string;
   title: string;
   evidence: string;
-  occurrences?: number;
 }
 
 export interface DrillCard {

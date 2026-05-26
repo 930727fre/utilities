@@ -13,7 +13,6 @@ class GraduateCandidate(BaseModel):
     id: str
     title: str
     evidence: str
-    occurrences: int = 1
 
 
 class Roleplay(BaseModel):

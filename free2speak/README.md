@@ -48,7 +48,7 @@ Then register `free2speak` subdomain in Cloudflare tunnel dashboard pointing to 
 
 ## Migration from 1.0
 
-1.0 markdown tree is archived under `1.0-archive/` (`analyze.py`, `prompts/`, `CLAUDE.md`, `README.md`). The `data/` folder is preserved and will be consumed by `import.py` (next chunk of work) to seed the SQLite DB.
+1.0 markdown tree is archived under `1.0-archive/` (`analyze.py`, `prompts/`, `CLAUDE.md`, `README.md`). The `data/` folder is preserved as a source of truth; `backend/import.py` reads from it (`errors.md`, `roleplays/*.md`, `sessions/*.json`, `drills/*.md`) and seeds the SQLite DB. Re-runnable any time by deleting `data/free2speak.db` first (the importer refuses to run on a non-empty DB).
 
 ## Monthly audit
 

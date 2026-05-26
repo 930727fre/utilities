@@ -515,11 +515,6 @@ function GraduationBody({ c }: { c: GraduateCandidate }) {
           "{c.evidence}"
         </Text>
       </Box>
-      {c.occurrences !== undefined && (
-        <Text c="var(--text-dim)" size="sm" style={{ fontFamily: 'var(--mono)' }}>
-          ({c.occurrences} correct {c.occurrences === 1 ? 'use' : 'uses'})
-        </Text>
-      )}
     </Stack>
   );
 }
