@@ -7,11 +7,14 @@
 ## Pages
 
 - **Practice** (`/`) — single-page flow that steps through:
-  1. View today's role-play script
+  1. View the currently active role-play script. Two paths out:
+     - **Done practicing** → upload in `mode='roleplay'` (consumes this roleplay when review completes)
+     - **Skip (free chat)** → upload in `mode='freestyle'` (roleplay stays active for next time)
   2. Upload recording (Gemini analysis)
-  3. Tinder-swipe through new error candidates (add / skip)
-  4. Tinder-swipe through old errors that look used-correctly (graduate / keep)
-  5. Loop back to step 1 for next session
+  3. Tinder-swipe through new error candidates (add / skip) — *each swipe persists immediately*
+  4. Tinder-swipe through old errors that look used-correctly (graduate / keep) — *each swipe persists immediately*
+  5. Loop back to step 1: if it was roleplay-mode, a fresh active roleplay is generated; if freestyle, the same roleplay is still there
+  - **Resume**: closing the tab mid-flow doesn't lose state. On next visit, `/today/practice/state` lands you on the next undecided card.
 - **Drill** (`/drill`) — Tinder-swipe stack of drill cards. Tap to flip and reveal answer. No rating / no state mutation.
 
 ## Architecture
@@ -59,14 +62,14 @@ Then register `free2speak` subdomain in Cloudflare tunnel dashboard pointing to 
 - 1.0 archive data has already been imported via `import.py` — DB currently has ~52 active errors.
 
 **Phase 2 done — Gemini audio analysis:**
-- `POST /upload` accepts audio (≤20 MB), inline-base64 it to Gemini 2.5 Flash with the prompt in `prompts/gemini_analysis.py:build`. Structured-output JSON schema enforces shape: `{transcript, summary, fluency_notes, additions[], graduations[]}`. Active errors (up to 100) are injected into the prompt so Gemini can flag graduations by their DB ID. Session row persisted with the raw JSON in `raw_response`; audio file saved under `/data/sessions/{id}.{ext}`.
-- `GET /today/review` reads the latest session's `raw_response` and returns its `additions` + `graduations` (frontend's swipe screens consume this directly).
-- `POST /errors/additions` resolves frontend candidate IDs against the latest session's analysis and `INSERT`s real rows into `errors`. `body_md` is rendered from `{you_said, native, note}`.
-- `POST /errors/graduations` maps frontend `grad-N` IDs back to the DB `error_id` via the latest session's analysis, then `UPDATE`s status to `graduated`.
+- `POST /upload` accepts audio (≤20 MB) + a `mode='roleplay'|'freestyle'` form field. Audio is inline-base64'd to Gemini 2.5 Flash with the prompt in `prompts/gemini_analysis.py:build`. Structured-output JSON schema enforces shape: `{transcript, summary, fluency_notes, additions[], graduations[]}`. Active errors (up to 100) are injected so Gemini can flag graduations by their DB ID. Session row persisted with `mode`, the raw JSON in `raw_response`, an empty `decisions={}` JSON map, and (for roleplay mode) the active roleplay's id as a foreign key.
+- `GET /today/review` returns only the **undecided** additions + graduations from the latest pending session (filtered against `session.decisions`).
+- `POST /sessions/{id}/decide` body `{candidate_id, action}` — per-card persistence. `action='added'` inserts the error row; `'graduated'` flips the matching active error to graduated; `'skipped'` / `'kept'` just record the decision. When all candidates are decided, the session is finalized (`review_done=1`) and — if the session was roleplay-mode — the linked roleplay transitions to `status='done'`.
+- `GET /today/practice/state` returns the step the frontend should land on (`'roleplay'`, `'additions'`, or `'graduations'`) plus a `session_id` for resume. Drives no-data-loss reload behavior: close the tab mid-swipe, come back later, pick up at the next undecided card.
 
 **Phase 3 done — Opus roleplay + drill generation:**
-- `GET /today/roleplay`: returns today's row if exists, otherwise calls Opus (tool-use with the `emit_roleplay` schema) to generate a 5-7 exchange bilingual script. Body is full markdown stored in `roleplays.body_md`. Active errors + recent sessions + recent topics passed as context so the scenario fits the user's current error cluster without repeating.
-- `GET /today/drill`: same pattern. Opus generates 10 cards (`~7 from active errors + ~3 from recent session content`, mix of fill_blank and translate). Persists parent `drills` row + 10 child `drill_cards` rows. Returns the cards sorted by `order_index`.
+- `GET /today/roleplay`: returns the **currently active roleplay** (`WHERE status='active'`, partial-unique-indexed for at-most-one). If none exists, calls Opus (tool-use with the `emit_roleplay` schema) to generate a 5-7 exchange bilingual script and inserts as the new active row. Body is full markdown stored in `roleplays.body_md`. Active errors + recent sessions + recent topics passed as context so the scenario fits the user's current error cluster without repeating. A roleplay persists across days until a roleplay-mode session consumes it (or the user manually flips it to `done`).
+- `GET /today/drill`: same pattern but date-keyed (one drill per day). Opus generates 10 cards (`~7 from active errors + ~3 from recent session content`, mix of fill_blank and translate). Persists parent `drills` row + 10 child `drill_cards` rows. Returns the cards sorted by `order_index`.
 - Code layout: `prompts/opus_roleplay.py` + `prompts/opus_drill.py` each define a `TOOL` (Anthropic input_schema for forced structured output) and a `build(...)` for prompt rendering. `opus_client.py` is a thin Anthropic SDK wrapper.
 
 **API keys:** compose fails parse if either `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` is missing from the host shell.
@@ -74,7 +77,7 @@ Then register `free2speak` subdomain in Cloudflare tunnel dashboard pointing to 
 **Code layout (final):**
 ```
 backend/
-├── main.py                       # endpoints + helpers (lifespan, stats, upload, review, additions/graduations, roleplay, drill)
+├── main.py                       # endpoints + helpers (lifespan, stats, roleplay, upload, practice/state, review, decide, drill)
 ├── db.py                         # sqlite connection + schema init
 ├── opus_client.py                # Anthropic tool-use wrapper
 ├── prompts/

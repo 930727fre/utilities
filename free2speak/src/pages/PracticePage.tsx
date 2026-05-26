@@ -1,61 +1,84 @@
-import { useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-// upload's onSuccess refetches /today/review so the additions/graduations screens
-// see the analysis we just persisted (not the empty fetch from page mount).
 import {
   Stack, Title, Text, Button, Group, Box, FileButton,
 } from '@mantine/core';
 import { useNavigate } from 'react-router-dom';
 import { IconUpload } from '@tabler/icons-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { api } from '../api';
-import type { ErrorCandidate, GraduateCandidate } from '../types';
+import type { ErrorCandidate, GraduateCandidate, PracticeStep, UploadMode } from '../types';
 import PageShell from '../components/PageShell';
 import CardShell from '../components/CardShell';
 
-type Step = 'roleplay' | 'upload' | 'additions' | 'graduations';
+// Local step adds 'upload' (transient — not persisted server-side). The backend
+// step machine is roleplay → additions → graduations; 'upload' lives only on the
+// frontend between "Done practicing" and the per-card review screens.
+type LocalStep = 'init' | PracticeStep | 'upload';
 
 export default function PracticePage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [step, setStep] = useState<Step>('roleplay');
+  const [step, setStep] = useState<LocalStep>('init');
   const [audioFile, setAudioFile] = useState<File | null>(null);
+  const [mode, setMode] = useState<UploadMode>('roleplay');
+  const [sessionId, setSessionId] = useState<string | null>(null);
 
-  const { data: review } = useQuery({
-    queryKey: ['today-review'],
-    queryFn: api.getReview,
-    staleTime: Infinity,
+  // On mount, ask the server where to land. Drives resume-after-bail: if there's
+  // a pending session, we jump straight to the additions/graduations swipe.
+  const { data: practiceState } = useQuery({
+    queryKey: ['practice-state'],
+    queryFn: api.getPracticeState,
+    staleTime: 0,
     refetchOnWindowFocus: false,
     gcTime: 0,
   });
 
+  useEffect(() => {
+    if (step === 'init' && practiceState) {
+      setStep(practiceState.step);
+      if (practiceState.session_id) setSessionId(practiceState.session_id);
+    }
+  }, [practiceState, step]);
+
   const finish = () => {
     queryClient.invalidateQueries({ queryKey: ['today-stats'] });
+    queryClient.invalidateQueries({ queryKey: ['today-roleplay'] });
+    queryClient.invalidateQueries({ queryKey: ['practice-state'] });
     navigate('/');
   };
 
   return (
     <PageShell scroll="locked">
       <Stack gap="md" style={{ flex: 1, minHeight: 0 }}>
+        {step === 'init' && (
+          <CardShell><Box p="lg"><Text c="var(--text-dim)">Loading...</Text></Box></CardShell>
+        )}
         {step === 'roleplay' && (
-          <RoleplayStep onDone={() => setStep('upload')} />
+          <RoleplayStep onDone={(m) => { setMode(m); setStep('upload'); }} />
         )}
         {step === 'upload' && (
           <UploadStep
             file={audioFile}
+            mode={mode}
             onFileChange={setAudioFile}
-            onUploaded={() => setStep('additions')}
+            onUploaded={(sid) => {
+              setSessionId(sid);
+              setStep('additions');
+            }}
           />
         )}
-        {step === 'additions' && (
+        {step === 'additions' && sessionId && (
           <AdditionsStep
-            candidates={review?.additions}
+            sessionId={sessionId}
             onComplete={() => setStep('graduations')}
           />
         )}
-        {step === 'graduations' && (
+        {step === 'graduations' && sessionId && (
           <GraduationsStep
-            candidates={review?.graduations}
+            sessionId={sessionId}
             onComplete={finish}
           />
         )}
@@ -67,7 +90,7 @@ export default function PracticePage() {
 
 // ─── Step 1: Roleplay ────────────────────────────────────────────────────────
 
-function RoleplayStep({ onDone }: { onDone: () => void }) {
+function RoleplayStep({ onDone }: { onDone: (mode: UploadMode) => void }) {
   const { data: roleplay, isLoading, isFetching } = useQuery({
     queryKey: ['today-roleplay'],
     queryFn: api.getTodayRoleplay,
@@ -99,9 +122,12 @@ function RoleplayStep({ onDone }: { onDone: () => void }) {
             </Text>
           )}
           {roleplay && (
-            <Text c="var(--text-h)" style={{ whiteSpace: 'pre-wrap', fontSize: 16, lineHeight: 1.6 }}>
-              {roleplay.script}
-            </Text>
+            <Box className="roleplay-md" c="var(--text-h)"
+              style={{ fontSize: 16, lineHeight: 1.6 }}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {roleplay.script}
+              </ReactMarkdown>
+            </Box>
           )}
         </Stack>
       </CardShell>
@@ -109,7 +135,7 @@ function RoleplayStep({ onDone }: { onDone: () => void }) {
         <Button
           size="lg"
           radius={8}
-          onClick={onDone}
+          onClick={() => onDone('freestyle')}
           style={{
             background: 'transparent',
             color: 'var(--text-h)',
@@ -123,7 +149,7 @@ function RoleplayStep({ onDone }: { onDone: () => void }) {
         <Button
           size="lg"
           radius={8}
-          onClick={onDone}
+          onClick={() => onDone('roleplay')}
           disabled={!roleplay || refreshing}
           style={{
             background: 'var(--accent)',
@@ -144,11 +170,12 @@ function RoleplayStep({ onDone }: { onDone: () => void }) {
 // ─── Step 2: Upload ──────────────────────────────────────────────────────────
 
 function UploadStep({
-  file, onFileChange, onUploaded,
+  file, mode, onFileChange, onUploaded,
 }: {
   file: File | null;
+  mode: UploadMode;
   onFileChange: (f: File | null) => void;
-  onUploaded: () => void;
+  onUploaded: (sessionId: string) => void;
 }) {
   const resetRef = useRef<() => void>(() => {});
   const queryClient = useQueryClient();
@@ -156,13 +183,13 @@ function UploadStep({
   const upload = useMutation({
     mutationFn: () => {
       if (!file) throw new Error('No file selected');
-      return api.uploadAudio(file);
+      return api.uploadAudio(file, mode);
     },
-    onSuccess: async () => {
-      // Pull a fresh /today/review now that a session exists — the page-mount
-      // fetch happened before upload, so its result was empty.
+    onSuccess: async (result) => {
+      // Freshly-uploaded session means /today/review now returns its candidates.
+      // Invalidate so the next mount of AdditionsStep refetches.
       await queryClient.invalidateQueries({ queryKey: ['today-review'] });
-      onUploaded();
+      onUploaded(result.session_id);
     },
   });
 
@@ -173,7 +200,7 @@ function UploadStep({
           style={{ flex: 1, minHeight: 0 }}>
           <Text c="var(--text-dim)" size="xs"
             style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
-            upload recording
+            upload recording · mode: {mode}
           </Text>
 
           <FileButton
@@ -241,24 +268,44 @@ function UploadStep({
 // ─── Step 3: Additions ───────────────────────────────────────────────────────
 
 function AdditionsStep({
-  candidates, onComplete,
+  sessionId, onComplete,
 }: {
-  candidates: ErrorCandidate[] | undefined;
+  sessionId: string;
   onComplete: () => void;
 }) {
-  const [index, setIndex] = useState(0);
-  const [addedIds, setAddedIds] = useState<string[]>([]);
-
-  const apply = useMutation({
-    mutationFn: (ids: string[]) => api.applyAdditions(ids),
-    onSuccess: () => onComplete(),
+  const queryClient = useQueryClient();
+  const { data: review, isLoading, isFetching } = useQuery({
+    queryKey: ['today-review'],
+    queryFn: api.getReview,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   });
 
-  if (!candidates) {
+  // Snapshot the candidates returned at mount and iterate locally — the
+  // server-side review query filters by decisions, so a refetch would
+  // shrink the list out from under us mid-swipe. Wait for `!isFetching`
+  // so we don't capture stale-cached data from a just-invalidated query.
+  const [snapshot, setSnapshot] = useState<ErrorCandidate[] | null>(null);
+  useEffect(() => {
+    if (snapshot === null && review && !isFetching) setSnapshot(review.additions);
+  }, [review, isFetching, snapshot]);
+
+  const [index, setIndex] = useState(0);
+
+  const decide = useMutation({
+    mutationFn: (args: { candidateId: string; action: 'added' | 'skipped' }) =>
+      api.decide(sessionId, args.candidateId, args.action),
+    onError: (err: Error) => {
+      // Surface in console for now; user will see the disabled state lift on next render.
+      console.error('[additions] decide failed:', err.message);
+    },
+  });
+
+  if (isLoading || snapshot === null) {
     return <CardShell><Box p="lg"><Text c="var(--text-dim)">Loading...</Text></Box></CardShell>;
   }
 
-  if (candidates.length === 0) {
+  if (snapshot.length === 0) {
     return (
       <>
         <CardShell>
@@ -272,7 +319,11 @@ function AdditionsStep({
             </Title>
           </Stack>
         </CardShell>
-        <Button size="lg" radius={8} onClick={onComplete}
+        <Button size="lg" radius={8}
+          onClick={() => {
+            queryClient.invalidateQueries({ queryKey: ['today-review'] });
+            onComplete();
+          }}
           style={{ background: 'var(--accent)', color: 'var(--bg)', height: 54, fontFamily: 'var(--mono)' }}>
           Continue to graduate
         </Button>
@@ -280,36 +331,28 @@ function AdditionsStep({
     );
   }
 
-  const current = candidates[index];
-  const isLast = index === candidates.length - 1;
+  const current = snapshot[index];
 
-  const handleSkip = () => {
-    nextOrCommit(false);
-  };
-  const handleAdd = () => {
-    setAddedIds((p) => [...p, current.id]);
-    nextOrCommit(true);
-  };
-
-  function nextOrCommit(justAdded: boolean) {
-    if (isLast) {
-      const finalAdds = justAdded ? [...addedIds, current.id] : addedIds;
-      apply.mutate(finalAdds);
+  async function recordAndAdvance(action: 'added' | 'skipped') {
+    await decide.mutateAsync({ candidateId: current.id, action });
+    if (index < snapshot!.length - 1) {
+      setIndex(index + 1);
     } else {
-      setIndex((i) => i + 1);
+      queryClient.invalidateQueries({ queryKey: ['today-review'] });
+      onComplete();
     }
   }
 
   return <CandidateStack
     label="new errors"
-    position={`${index + 1} / ${candidates.length}`}
+    position={`${index + 1} / ${snapshot.length}`}
     title={current.title}
     body={<AdditionBody c={current} />}
     leftLabel="Skip"
     rightLabel="Add"
-    onLeft={handleSkip}
-    onRight={handleAdd}
-    pending={apply.isPending}
+    onLeft={() => recordAndAdvance('skipped')}
+    onRight={() => recordAndAdvance('added')}
+    pending={decide.isPending}
   />;
 }
 
@@ -377,24 +420,39 @@ function AdditionBody({ c }: { c: ErrorCandidate }) {
 // ─── Step 4: Graduations ─────────────────────────────────────────────────────
 
 function GraduationsStep({
-  candidates, onComplete,
+  sessionId, onComplete,
 }: {
-  candidates: GraduateCandidate[] | undefined;
+  sessionId: string;
   onComplete: () => void;
 }) {
-  const [index, setIndex] = useState(0);
-  const [gradIds, setGradIds] = useState<string[]>([]);
-
-  const apply = useMutation({
-    mutationFn: (ids: string[]) => api.applyGraduations(ids),
-    onSuccess: () => onComplete(),
+  const queryClient = useQueryClient();
+  const { data: review, isLoading, isFetching } = useQuery({
+    queryKey: ['today-review'],
+    queryFn: api.getReview,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
   });
 
-  if (!candidates) {
+  const [snapshot, setSnapshot] = useState<GraduateCandidate[] | null>(null);
+  useEffect(() => {
+    if (snapshot === null && review && !isFetching) setSnapshot(review.graduations);
+  }, [review, isFetching, snapshot]);
+
+  const [index, setIndex] = useState(0);
+
+  const decide = useMutation({
+    mutationFn: (args: { candidateId: string; action: 'graduated' | 'kept' }) =>
+      api.decide(sessionId, args.candidateId, args.action),
+    onError: (err: Error) => {
+      console.error('[graduations] decide failed:', err.message);
+    },
+  });
+
+  if (isLoading || snapshot === null) {
     return <CardShell><Box p="lg"><Text c="var(--text-dim)">Loading...</Text></Box></CardShell>;
   }
 
-  if (candidates.length === 0) {
+  if (snapshot.length === 0) {
     return (
       <>
         <CardShell>
@@ -408,7 +466,11 @@ function GraduationsStep({
             </Title>
           </Stack>
         </CardShell>
-        <Button size="lg" radius={8} onClick={onComplete}
+        <Button size="lg" radius={8}
+          onClick={() => {
+            queryClient.invalidateQueries({ queryKey: ['today-review'] });
+            onComplete();
+          }}
           style={{ background: 'var(--accent)', color: 'var(--bg)', height: 54, fontFamily: 'var(--mono)' }}>
           Finish
         </Button>
@@ -416,36 +478,28 @@ function GraduationsStep({
     );
   }
 
-  const current = candidates[index];
-  const isLast = index === candidates.length - 1;
+  const current = snapshot[index];
 
-  const handleKeep = () => {
-    nextOrCommit(false);
-  };
-  const handleGrad = () => {
-    setGradIds((p) => [...p, current.id]);
-    nextOrCommit(true);
-  };
-
-  function nextOrCommit(justGrad: boolean) {
-    if (isLast) {
-      const finalGrads = justGrad ? [...gradIds, current.id] : gradIds;
-      apply.mutate(finalGrads);
+  async function recordAndAdvance(action: 'graduated' | 'kept') {
+    await decide.mutateAsync({ candidateId: current.id, action });
+    if (index < snapshot!.length - 1) {
+      setIndex(index + 1);
     } else {
-      setIndex((i) => i + 1);
+      queryClient.invalidateQueries({ queryKey: ['today-review'] });
+      onComplete();
     }
   }
 
   return <CandidateStack
     label="graduate?"
-    position={`${index + 1} / ${candidates.length}`}
+    position={`${index + 1} / ${snapshot.length}`}
     title={current.title}
     body={<GraduationBody c={current} />}
     leftLabel="Keep"
     rightLabel="Graduate"
-    onLeft={handleKeep}
-    onRight={handleGrad}
-    pending={apply.isPending}
+    onLeft={() => recordAndAdvance('kept')}
+    onRight={() => recordAndAdvance('graduated')}
+    pending={decide.isPending}
   />;
 }
 

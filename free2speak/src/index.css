@@ -71,3 +71,49 @@ h1, h2 {
 p {
   margin: 0;
 }
+
+.roleplay-md h1 {
+  font-size: 1.15rem;
+  margin: 0 0 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.roleplay-md h2 {
+  font-size: 1rem;
+  margin: 1.25rem 0 0.5rem;
+  color: var(--text-h);
+}
+.roleplay-md h3 {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin: 1rem 0 0.4rem;
+}
+.roleplay-md p { margin: 0.5rem 0; }
+.roleplay-md ul, .roleplay-md ol { margin: 0.4rem 0 0.4rem 1.2rem; padding: 0; }
+.roleplay-md li { margin: 0.15rem 0; }
+.roleplay-md strong { color: var(--text-h); font-weight: 600; }
+.roleplay-md blockquote {
+  margin: 0.5rem 0;
+  padding: 0.25rem 0.75rem;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+  font-style: italic;
+}
+.roleplay-md code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: rgba(255,255,255,0.05);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+.roleplay-md pre {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  overflow-x: auto;
+}
+.roleplay-md pre code { background: none; padding: 0; }

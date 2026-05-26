@@ -19,6 +19,8 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # IF NOT EXISTS on ADD COLUMN, so we try and swallow the "duplicate column" error.
     for table, col, defn in (
         ("drills", "date", "TEXT NOT NULL DEFAULT ''"),
+        ("sessions", "mode", "TEXT NOT NULL DEFAULT 'roleplay' CHECK (mode IN ('roleplay','freestyle'))"),
+        ("sessions", "decisions", "TEXT NOT NULL DEFAULT '{}'"),
     ):
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
@@ -33,4 +35,25 @@ def init_schema(conn: sqlite3.Connection) -> None:
     # Indexes that depend on migrated columns live here (not in schema.sql) so they
     # don't run before the ALTER TABLE on existing DBs.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_drills_date ON drills(date)")
+    # Dedupe existing active roleplays before creating the partial unique index.
+    # Pre-migration the endpoint inserted every roleplay with status='active', so
+    # legacy DBs have many. Keep the most recent (by created_at, tie-break on id)
+    # active; demote the rest to 'done'.
+    conn.execute("""
+        UPDATE roleplays SET status='done'
+        WHERE status='active' AND id NOT IN (
+            SELECT id FROM roleplays
+            WHERE status='active'
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+        )
+    """)
+    # Partial unique index: at most one active roleplay across the table. Created
+    # after schema/ALTER ran so it sees the right column. Will reject any future
+    # concurrent inserts of status='active' — INSERT-then-SELECT in the endpoint
+    # catches IntegrityError and returns the already-existing active row.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_roleplay "
+        "ON roleplays(status) WHERE status='active'"
+    )
     conn.commit()

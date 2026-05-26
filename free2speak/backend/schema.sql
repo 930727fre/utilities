@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS roleplays (
     topic       TEXT NOT NULL,
     rationale   TEXT,
     body_md     TEXT,
-    status      TEXT NOT NULL DEFAULT 'done' CHECK (status IN ('active','done')),
+    status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','done')),
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     summary         TEXT,
     fluency_notes   TEXT,
     raw_response    TEXT,
+    mode            TEXT NOT NULL DEFAULT 'roleplay' CHECK (mode IN ('roleplay','freestyle')),
+    decisions       TEXT NOT NULL DEFAULT '{}',
     review_done     INTEGER NOT NULL DEFAULT 0 CHECK (review_done IN (0,1)),
     uploaded_at     TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY (roleplay_id) REFERENCES roleplays(id)

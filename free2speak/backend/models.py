@@ -31,17 +31,19 @@ class DrillCard(BaseModel):
     source_error_id: str | None = None
 
 
-class AdditionsApply(BaseModel):
-    candidate_ids: list[str]
-
-
-class GraduationsApply(BaseModel):
-    error_ids: list[str]
+class Decision(BaseModel):
+    candidate_id: str
+    action: str  # 'added' | 'skipped' | 'graduated' | 'kept'
 
 
 class ReviewBundle(BaseModel):
     additions: list[ErrorCandidate]
     graduations: list[GraduateCandidate]
+
+
+class PracticeState(BaseModel):
+    step: str  # 'roleplay' | 'additions' | 'graduations'
+    session_id: str | None = None
 
 
 class TodayStats(BaseModel):

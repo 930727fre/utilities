@@ -39,3 +39,14 @@ export interface ReviewBundle {
   additions: ErrorCandidate[];
   graduations: GraduateCandidate[];
 }
+
+export type PracticeStep = 'roleplay' | 'additions' | 'graduations';
+
+export interface PracticeState {
+  step: PracticeStep;
+  session_id?: string;
+}
+
+export type UploadMode = 'roleplay' | 'freestyle';
+
+export type DecisionAction = 'added' | 'skipped' | 'graduated' | 'kept';
