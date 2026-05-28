@@ -235,6 +235,7 @@ def regenerate_examples(card_id: str):
     d = dict(row)
     word = d["word"]
     note = d["note"] or ""
+    current_sentence = d["sentence"] or ""
 
     prompt = (
         "You are given an English word and its Chinese definitions grouped by part of speech.\n"
@@ -250,16 +251,23 @@ def regenerate_examples(card_id: str):
         "The leading bracketed IPA + slash (e.g. '[ɡrænt]/') is pronunciation, not a POS group.\n"
         "English synonyms in parentheses inside Chinese defs (e.g. '（award）', '（＊cover）') are hints, not new groups.\n\n"
         "For EACH distinct POS group, write ONE natural English example sentence using the word in that role.\n"
-        "Return a JSON array of sentences, one per group, in the same order as the input. No commentary, no translations.\n\n"
-        f"Word: {word}\n"
-        f"Definitions: {note}"
+        "Return a JSON array of sentences, one per group, in the same order as the input. No commentary, no translations.\n"
     )
+    if current_sentence:
+        # User is regenerating — they didn't like what was there. Break the
+        # model's attractor pattern by forcing a different scenario + frame.
+        prompt += (
+            "\nAVOID the scenario, syntactic frame, and collocations of the example below. "
+            "Pick a different setting/register and a different sentence structure.\n"
+            f"Example to avoid:\n{current_sentence}\n"
+        )
+    prompt += f"\nWord: {word}\nDefinitions: {note}"
 
     try:
         sentences = generate_json(
             prompt,
             {"type": "array", "items": {"type": "string"}},
-            temperature=0.6,
+            temperature=0.3,
         )
     except Exception as e:
         conn.close()
