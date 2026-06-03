@@ -42,6 +42,34 @@ def _catch_unhandled(fn):
     return wrapped
 
 
+def enumerate_playlist(url: str) -> list[dict]:
+    """Return [{id, title, url}, ...] for a YouTube playlist URL.
+
+    extract_flat=True walks the playlist index without downloading any video.
+    Unavailable / deleted entries surface as None and are dropped.
+    """
+    ydl_opts = {
+        "extract_flat": True,
+        "quiet": True,
+        "skip_download": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+    out = []
+    for e in (info.get("entries") or []):
+        if not e:
+            continue
+        vid = e.get("id")
+        if not vid:
+            continue
+        out.append({
+            "id": vid,
+            "title": e.get("title") or "",
+            "url": e.get("url") or f"https://www.youtube.com/watch?v={vid}",
+        })
+    return out
+
+
 @_catch_unhandled
 def process_video(job_id: str, url: str):
     job = get_job(job_id)

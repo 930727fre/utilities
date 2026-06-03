@@ -4,13 +4,14 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 from pydantic import BaseModel
 
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
-from tasks import SCAN_DIR, executor, process_video, scan_inbox, transcribe_file
+from tasks import SCAN_DIR, enumerate_playlist, executor, process_video, scan_inbox, transcribe_file
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
 INBOX_SCAN_INTERVAL = 5.0
@@ -101,8 +102,43 @@ class SubmitRequest(BaseModel):
     url: str
 
 
+_YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}
+
+
+def _is_playlist_url(url: str) -> bool:
+    """True only for canonical playlist URLs (`/playlist?list=…`).
+
+    `watch?v=…&list=…` is intentionally NOT treated as a playlist — the user
+    typically means the single video that happens to be inside one.
+    """
+    try:
+        u = urlparse(url)
+    except Exception:
+        return False
+    host = (u.netloc or "").lower().split(":", 1)[0]
+    return host in _YT_HOSTS and u.path == "/playlist" and "list" in parse_qs(u.query)
+
+
 @app.post("/api/jobs", status_code=201)
 async def submit_job(req: SubmitRequest):
+    if _is_playlist_url(req.url):
+        try:
+            entries = await asyncio.to_thread(enumerate_playlist, req.url)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Playlist enumeration failed: {e}")
+        if not entries:
+            raise HTTPException(status_code=400, detail="Playlist is empty or all entries unavailable")
+        job_ids = []
+        for entry in entries:
+            job_id = str(uuid.uuid4())
+            job = _new_job(job_id, entry["url"])
+            if entry["title"]:
+                job["title"] = entry["title"]
+            upsert_job(job)
+            executor.submit(process_video, job_id, entry["url"])
+            job_ids.append(job_id)
+        return {"playlist": True, "count": len(job_ids), "job_ids": job_ids}
+
     job_id = str(uuid.uuid4())
     job = _new_job(job_id, req.url)
     upsert_job(job)
