@@ -310,6 +310,41 @@ async def stream_subtitle(job_id: str):
 # ── Player HTML helpers ────────────────────────────────────────────────────
 
 def _player_html(job_id: str, title: str, audio_only: bool = False) -> str:
+    # Resume-position script — same for audio and video (both use id="vid").
+    # Restores on loadedmetadata, throttle-saves every 1 s, clears within 10 s
+    # of the end so re-watching doesn't dump the user back at the credits.
+    resume_script = f"""
+<script>
+(() => {{
+  const KEY = 'transcribe:resume:{job_id}';
+  const vid = document.getElementById('vid');
+  vid.addEventListener('loadedmetadata', () => {{
+    const t = parseFloat(localStorage.getItem(KEY) || '');
+    if (Number.isFinite(t) && t > 5) vid.currentTime = t;
+  }}, {{ once: true }});
+  function save() {{
+    const t = vid.currentTime;
+    if (!Number.isFinite(t) || t < 5) return;
+    const dur = vid.duration;
+    if (Number.isFinite(dur) && dur > 0 && dur - t < 10) {{
+      localStorage.removeItem(KEY);
+      return;
+    }}
+    localStorage.setItem(KEY, String(t));
+  }}
+  let last = 0;
+  vid.addEventListener('timeupdate', () => {{
+    const now = Date.now();
+    if (now - last > 1000) {{ last = now; save(); }}
+  }});
+  vid.addEventListener('pause', save);
+  vid.addEventListener('ended', () => localStorage.removeItem(KEY));
+  document.addEventListener('visibilitychange', () => {{
+    if (document.visibilityState === 'hidden') save();
+  }});
+}})();
+</script>"""
+
     if audio_only:
         media = f'<audio id="vid" controls autoplay style="width:100%;max-width:900px"><source src="/api/stream/{job_id}/audio" type="audio/mpeg"></audio>'
         transcript_html = f"""
@@ -374,7 +409,7 @@ def _player_html(job_id: str, title: str, audio_only: bool = False) -> str:
 </script>"""
     else:
         media = f'<video id="vid" controls autoplay style="width:100%;max-width:900px;border-radius:8px;background:#000"><source src="/api/stream/{job_id}/video" type="video/mp4"><track kind="subtitles" src="/api/stream/{job_id}/subtitle" default></video>'
-        transcript_html = '<script>document.getElementById(\'vid\').play().catch(()=>{});</script>'
+        transcript_html = ''
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
@@ -390,6 +425,7 @@ def _player_html(job_id: str, title: str, audio_only: bool = False) -> str:
 <body>
 <h1>{title}</h1>
 {media}
+{resume_script}
 {transcript_html}
 </body>
 </html>"""
