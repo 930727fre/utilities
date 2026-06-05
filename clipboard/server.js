@@ -61,12 +61,14 @@ async function writeSlot(n, data) {
       if (comma < 0) return;
       let buf = Buffer.from(data.content.slice(comma + 1), 'base64');
       let ext = safeExt(data.name) || (data.type === 'image' ? '.bin' : '');
-      // Transcode HEIC/HEIF to PNG so the Anthropic API can read it (HEIC unsupported).
+      // Transcode HEIC/HEIF to JPEG so the Anthropic API can read it (HEIC unsupported).
+      // JPEG (not PNG) because HEIC sources are photos: lossless PNG produces
+      // 10+ MB files that exceed the Read tool's image size cap.
       if (ext === '.heic' || ext === '.heif') {
         try {
-          const png = await heicConvert({ buffer: buf, format: 'PNG' });
-          buf = Buffer.from(png);
-          ext = '.png';
+          const jpg = await heicConvert({ buffer: buf, format: 'JPEG', quality: 0.5 });
+          buf = Buffer.from(jpg);
+          ext = '.jpg';
         } catch (err) {
           console.error(`slot ${n} HEIC transcode failed, writing raw:`, err.message);
         }
