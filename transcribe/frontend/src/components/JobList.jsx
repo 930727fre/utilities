@@ -143,8 +143,8 @@ export default function JobList() {
                   </div>
                   <div style={{ ...styles.actionSlot, textAlign: 'center' }}>
                     {job.status === 'SUCCESS' && job.files?.srt && (
-                      <a href={downloadUrl(job.job_id, 'srt')} download style={styles.srtBtn} title="Download SRT"
-                        onClick={e => e.stopPropagation()}>SRT</a>
+                      <a href={downloadUrl(job.job_id, 'zip')} download style={styles.srtBtn} title="Download media + SRT as ZIP"
+                        onClick={e => e.stopPropagation()}>ZIP</a>
                     )}
                   </div>
                   <div style={{ ...styles.actionSlot, textAlign: 'right' }}>
