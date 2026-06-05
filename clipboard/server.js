@@ -46,10 +46,7 @@ function clearSlotFiles(n) {
   }
 }
 
-const slotSeq = { 1: 0, 2: 0, 3: 0 };
-
-async function writeSlot(n, data) {
-  const seq = ++slotSeq[n];
+function writeSlot(n, data) {
   clearSlotFiles(n);
   try {
     if (data.type === 'text') {
@@ -59,21 +56,8 @@ async function writeSlot(n, data) {
       // content is a data URL: "data:<mime>;base64,<payload>"
       const comma = typeof data.content === 'string' ? data.content.indexOf(',') : -1;
       if (comma < 0) return;
-      let buf = Buffer.from(data.content.slice(comma + 1), 'base64');
-      let ext = safeExt(data.name) || (data.type === 'image' ? '.bin' : '');
-      // Transcode HEIC/HEIF to JPEG so the Anthropic API can read it (HEIC unsupported).
-      // JPEG (not PNG) because HEIC sources are photos: lossless PNG produces
-      // 10+ MB files that exceed the Read tool's image size cap.
-      if (ext === '.heic' || ext === '.heif') {
-        try {
-          const jpg = await heicConvert({ buffer: buf, format: 'JPEG', quality: 0.5 });
-          buf = Buffer.from(jpg);
-          ext = '.jpg';
-        } catch (err) {
-          console.error(`slot ${n} HEIC transcode failed, writing raw:`, err.message);
-        }
-      }
-      if (slotSeq[n] !== seq) return; // a newer write superseded us
+      const buf = Buffer.from(data.content.slice(comma + 1), 'base64');
+      const ext = safeExt(data.name) || (data.type === 'image' ? '.bin' : '');
       fs.writeFileSync(path.join(DATA_DIR, `slot${n}${ext}`), buf);
     }
   } catch (err) {
@@ -81,23 +65,59 @@ async function writeSlot(n, data) {
   }
 }
 
+// Transcode HEIC/HEIF → JPEG. Browsers can't render <img src="data:image/heic;...">,
+// and the Anthropic API doesn't accept HEIC either. Doing this server-side once
+// fixes both the in-browser preview and the on-disk file for downstream readers.
+async function maybeTranscode(data) {
+  if (data.type !== 'image' && data.type !== 'file') return data;
+  const ext = safeExt(data.name);
+  if (ext !== '.heic' && ext !== '.heif') return data;
+  const comma = typeof data.content === 'string' ? data.content.indexOf(',') : -1;
+  if (comma < 0) return data;
+  try {
+    const inputBuf = Buffer.from(data.content.slice(comma + 1), 'base64');
+    const jpgBuf = await heicConvert({ buffer: inputBuf, format: 'JPEG', quality: 0.5 });
+    const jpgB64 = Buffer.from(jpgBuf).toString('base64');
+    return {
+      type: 'image',
+      content: `data:image/jpeg;base64,${jpgB64}`,
+      name: data.name.replace(/\.(heic|heif)$/i, '.jpg'),
+      size: jpgBuf.length,
+    };
+  } catch (err) {
+    console.error(`HEIC transcode failed:`, err.message);
+    return data;
+  }
+}
+
+const slotSeq = { 1: 0, 2: 0, 3: 0 };
+
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 wss.on('connection', ws => {
   ws.send(JSON.stringify({ type: 'init', slots }));
 
-  ws.on('message', raw => {
+  ws.on('message', async raw => {
     try {
       const msg = JSON.parse(raw);
       if (msg.type !== 'update' || ![1, 2, 3].includes(msg.slot)) return;
-      const data = msg.data;
+      let data = msg.data;
       if (!data || typeof data.type !== 'string') return;
       if (data.content && data.content.length > MAX_BYTES) return;
+
+      const seq = ++slotSeq[msg.slot];
+      const original = data;
+      data = await maybeTranscode(data);
+      if (slotSeq[msg.slot] !== seq) return; // superseded during transcode
+
+      const modified = data !== original;
       slots[msg.slot] = data;
       writeSlot(msg.slot, data);
       const out = JSON.stringify({ type: 'update', slot: msg.slot, data });
       for (const client of wss.clients) {
-        if (client !== ws && client.readyState === 1) client.send(out);
+        if (client.readyState !== 1) continue;
+        if (client === ws && !modified) continue; // skip echo unless we rewrote the data
+        client.send(out);
       }
     } catch {}
   });
