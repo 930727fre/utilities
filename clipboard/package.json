@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "express": "^4.21.2",
+    "heic-convert": "^2.1.0",
     "ws": "^8.18.0"
   }
 }

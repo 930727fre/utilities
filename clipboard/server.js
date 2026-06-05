@@ -3,6 +3,7 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
 const fs = require('fs');
+const heicConvert = require('heic-convert');
 
 const app = express();
 const server = http.createServer(app);
@@ -45,7 +46,10 @@ function clearSlotFiles(n) {
   }
 }
 
-function writeSlot(n, data) {
+const slotSeq = { 1: 0, 2: 0, 3: 0 };
+
+async function writeSlot(n, data) {
+  const seq = ++slotSeq[n];
   clearSlotFiles(n);
   try {
     if (data.type === 'text') {
@@ -55,8 +59,19 @@ function writeSlot(n, data) {
       // content is a data URL: "data:<mime>;base64,<payload>"
       const comma = typeof data.content === 'string' ? data.content.indexOf(',') : -1;
       if (comma < 0) return;
-      const buf = Buffer.from(data.content.slice(comma + 1), 'base64');
-      const ext = safeExt(data.name) || (data.type === 'image' ? '.bin' : '');
+      let buf = Buffer.from(data.content.slice(comma + 1), 'base64');
+      let ext = safeExt(data.name) || (data.type === 'image' ? '.bin' : '');
+      // Transcode HEIC/HEIF to PNG so the Anthropic API can read it (HEIC unsupported).
+      if (ext === '.heic' || ext === '.heif') {
+        try {
+          const png = await heicConvert({ buffer: buf, format: 'PNG' });
+          buf = Buffer.from(png);
+          ext = '.png';
+        } catch (err) {
+          console.error(`slot ${n} HEIC transcode failed, writing raw:`, err.message);
+        }
+      }
+      if (slotSeq[n] !== seq) return; // a newer write superseded us
       fs.writeFileSync(path.join(DATA_DIR, `slot${n}${ext}`), buf);
     }
   } catch (err) {
