@@ -2,18 +2,67 @@ const express = require('express');
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 const MAX_BYTES = 5 * 1024 * 1024; // 5 MB base64 payload limit per slot
+const DATA_DIR = '/data';
 
 const slots = {
   1: { type: 'text', content: '' },
   2: { type: 'text', content: '' },
   3: { type: 'text', content: '' },
 };
+
+// ── Disk mirror ────────────────────────────────────────────────────────────
+// Each slot mirrors to /data/slotN.<ext>. The slot stays the source of truth;
+// the file is just a read-only view for processes outside this container.
+
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+// Wipe any stale files from a previous run — in-memory slots start empty,
+// so the disk view should match.
+for (const f of fs.readdirSync(DATA_DIR)) {
+  if (/^slot[1-3](\.|$)/.test(f)) {
+    try { fs.unlinkSync(path.join(DATA_DIR, f)); } catch {}
+  }
+}
+
+function safeExt(name) {
+  if (typeof name !== 'string') return '';
+  const m = name.match(/\.([A-Za-z0-9]{1,16})$/);
+  return m ? '.' + m[1].toLowerCase() : '';
+}
+
+function clearSlotFiles(n) {
+  for (const f of fs.readdirSync(DATA_DIR)) {
+    if (new RegExp(`^slot${n}(\\.|$)`).test(f)) {
+      try { fs.unlinkSync(path.join(DATA_DIR, f)); } catch {}
+    }
+  }
+}
+
+function writeSlot(n, data) {
+  clearSlotFiles(n);
+  try {
+    if (data.type === 'text') {
+      if (!data.content) return; // empty text = no file
+      fs.writeFileSync(path.join(DATA_DIR, `slot${n}.txt`), data.content, 'utf8');
+    } else if (data.type === 'image' || data.type === 'file') {
+      // content is a data URL: "data:<mime>;base64,<payload>"
+      const comma = typeof data.content === 'string' ? data.content.indexOf(',') : -1;
+      if (comma < 0) return;
+      const buf = Buffer.from(data.content.slice(comma + 1), 'base64');
+      const ext = safeExt(data.name) || (data.type === 'image' ? '.bin' : '');
+      fs.writeFileSync(path.join(DATA_DIR, `slot${n}${ext}`), buf);
+    }
+  } catch (err) {
+    console.error(`slot ${n} write failed:`, err.message);
+  }
+}
 
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
@@ -28,6 +77,7 @@ wss.on('connection', ws => {
       if (!data || typeof data.type !== 'string') return;
       if (data.content && data.content.length > MAX_BYTES) return;
       slots[msg.slot] = data;
+      writeSlot(msg.slot, data);
       const out = JSON.stringify({ type: 'update', slot: msg.slot, data });
       for (const client of wss.clients) {
         if (client !== ws && client.readyState === 1) client.send(out);

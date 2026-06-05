@@ -3,6 +3,8 @@ services:
     build: .
     container_name: clipboard
     restart: unless-stopped
+    volumes:
+      - ./data:/data
     networks:
       - default
       - my_network
