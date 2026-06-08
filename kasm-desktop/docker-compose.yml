@@ -7,7 +7,7 @@ services:
     ports:
       - "6901:6901"
     environment:
-      - VNC_PW=1234
+      - VNC_PW=123456
     volumes:
       - ./data/home:/home/kasm-user
     deploy:
