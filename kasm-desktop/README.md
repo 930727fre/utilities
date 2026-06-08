@@ -7,7 +7,7 @@ Browser-accessible Ubuntu desktop, powered by [Kasm Workspaces](https://www.kasm
 First run only — chown the bind mount to the container's `kasm-user` (UID 1000), otherwise the first-start profile copy fails with `Permission denied` and the desktop comes up broken:
 
 ```bash
-mkdir -p data/home && sudo chown -R 1000:1000 data/home
+sudo mkdir -p data/home && sudo chown -R 1000:1000 data/home
 docker compose up -d
 ```
 
@@ -24,7 +24,7 @@ To wipe Chrome history / installed apps / everything and start with a fresh kasm
 ```bash
 docker compose down
 sudo rm -rf data/home
-mkdir -p data/home && sudo chown -R 1000:1000 data/home
+sudo mkdir -p data/home && sudo chown -R 1000:1000 data/home
 docker compose up -d
 ```
 
