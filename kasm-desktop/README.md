@@ -10,7 +10,7 @@ docker compose up -d
 
 Access at `https://localhost:6901` (self-signed cert — accept the warning). Login: `kasm_user` / `1234`.
 
-The user home directory persists to `./home/` on the host (gitignored). Drag-and-drop file upload, clipboard sync, and audio passthrough work in the browser UI.
+The user home directory persists to `./data/home/` on the host (gitignored). Drag-and-drop file upload, clipboard sync, and audio passthrough work in the browser UI.
 
 ## Cloudflare Tunnel
 

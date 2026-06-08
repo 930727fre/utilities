@@ -9,7 +9,7 @@ services:
     environment:
       - VNC_PW=1234
     volumes:
-      - ./home:/home/kasm-user
+      - ./data/home:/home/kasm-user
     deploy:
       resources:
         reservations:
