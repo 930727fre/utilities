@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import yt_dlp
 
+from gpu_lock import gpu_lock
 from storage import get_job, read_jobs, upsert_job
 
 DOWNLOADS_DIR = "/app/data/downloads"
@@ -165,30 +166,32 @@ def scan_inbox() -> int:
 def _run_transcription(job_id: str, audio_path: str):
     result_file = tempfile.mktemp(suffix=".json")
     ctx = multiprocessing.get_context("spawn")
-    proc = ctx.Process(target=_transcribe_worker, args=(audio_path, result_file))
-    proc.start()
     transcribe_started = _now()
 
-    while True:
-        proc.join(timeout=2)
-        if not proc.is_alive():
-            break
+    with gpu_lock("transcribe-app", f"whisper:{job_id}"):
+        proc = ctx.Process(target=_transcribe_worker, args=(audio_path, result_file))
+        proc.start()
 
-        if _elapsed(transcribe_started) > TRANSCRIBE_TIMEOUT:
-            proc.terminate()
-            proc.join()
-            if os.path.exists(result_file):
-                os.unlink(result_file)
-            _fail(job_id, "Transcription timed out (4 hour limit)")
-            return
+        while True:
+            proc.join(timeout=2)
+            if not proc.is_alive():
+                break
 
-        current = get_job(job_id)
-        if not current or current["status"] == "DELETED":
-            proc.terminate()
-            proc.join()
-            if os.path.exists(result_file):
-                os.unlink(result_file)
-            return
+            if _elapsed(transcribe_started) > TRANSCRIBE_TIMEOUT:
+                proc.terminate()
+                proc.join()
+                if os.path.exists(result_file):
+                    os.unlink(result_file)
+                _fail(job_id, "Transcription timed out (4 hour limit)")
+                return
+
+            current = get_job(job_id)
+            if not current or current["status"] == "DELETED":
+                proc.terminate()
+                proc.join()
+                if os.path.exists(result_file):
+                    os.unlink(result_file)
+                return
 
     if not os.path.exists(result_file):
         _fail(job_id, "Transcription process exited unexpectedly")
