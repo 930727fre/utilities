@@ -10,6 +10,13 @@ services:
       - VNC_PW=1234
     volumes:
       - ./home:/home/kasm-user
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     networks:
       - my_network
 

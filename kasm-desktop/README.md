@@ -18,7 +18,9 @@ To expose via subdomain, add a route in the Cloudflare tunnel: `desktop.domain.c
 
 ## GPU
 
-No GPU passthrough — the use case is casual browsing, so libx264 on CPU handles the stream and Chrome renders pages on CPU. If you later need NVENC for smoother streaming or hardware-accelerated WebGL / 4K video inside the desktop, add back a `deploy.resources.reservations.devices` block — but be aware kasm would then hold the GPU continuously and conflict with [gpu-broker](../gpu-broker) consumers (transcribe / xyt / keyboard / marker-pipeline).
+GPU passthrough is enabled (`count: all`) for NVENC streaming and Chrome's hardware-accelerated rendering. **Documented exception to the [gpu-broker](../gpu-broker) rule**: kasm doesn't coordinate through the broker because casual desktop use (idle / 1080p video) only touches a few hundred MB of VRAM, which coexists fine with one brokered ML job (whisper-medium ~5 GB, marker ~3-4 GB) on any 8 GB+ card.
+
+If you start running heavy GPU work *inside* the desktop (4K video, WebGL games, local Stable Diffusion) AND a brokered ML job at the same time, you can OOM — bring kasm down for the duration of those concurrent loads. The broker enforces a mutex among its consumers, not a VRAM ceiling, so it can't detect or prevent this on its behalf.
 
 ## Password
 
