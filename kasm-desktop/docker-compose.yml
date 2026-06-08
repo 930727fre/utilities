@@ -1,0 +1,18 @@
+services:
+  kasm-desktop:
+    image: kasmweb/ubuntu-jammy-desktop:1.19.0
+    container_name: kasm-desktop
+    restart: unless-stopped
+    shm_size: 512m
+    ports:
+      - "6901:6901"
+    environment:
+      - VNC_PW=1234
+    volumes:
+      - ./home:/home/kasm-user
+    networks:
+      - my_network
+
+networks:
+  my_network:
+    external: true

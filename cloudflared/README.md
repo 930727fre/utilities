@@ -12,6 +12,7 @@ Runs a Cloudflare Tunnel to expose all services via subdomains on your domain.
    - `transcribe.domain.com` → `http://transcribe-frontend:8000`
    - `flashcard.domain.com` → `http://flashcard-frontend:80`
    - `keyboard.domain.com` → `http://keyboard-backend:8080`
+   - `desktop.domain.com` → `https://kasm-desktop:6901` (HTTPS, enable "No TLS Verify" — self-signed cert)
 4. Go to Zero Trust → Access → Applications → Add an application → Self-hosted:
    - Domain: `*.domain.com`
    - Under Policies, add a rule: **Emails → `you@gmail.com`** (one-time PIN sent to your email)
