@@ -17,6 +17,19 @@ Access at `https://localhost:6901` (self-signed cert — accept the warning). Lo
 
 The user home directory persists to `./data/home/` on the host (gitignored). Drag-and-drop file upload, clipboard sync, and audio passthrough work in the browser UI.
 
+### Reset the home folder
+
+To wipe Chrome history / installed apps / everything and start with a fresh kasm-user home:
+
+```bash
+docker compose down
+sudo rm -rf data/home
+mkdir -p data/home && sudo chown -R 1000:1000 data/home
+docker compose up -d
+```
+
+(Files inside `data/home/` are owned by UID 1000 because the container writes them as `kasm-user`, so `sudo` is needed to remove them from the host. Same chown step as first run keeps the new empty dir writable by the container.)
+
 ## Cloudflare Tunnel
 
 To expose via subdomain, add a route in the Cloudflare tunnel: `desktop.domain.com → https://kasm-desktop:6901`. The container joins `my_network` so cloudflared can reach it by name.
