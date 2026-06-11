@@ -4,31 +4,15 @@ Browser-accessible Ubuntu desktop, powered by [Kasm Workspaces](https://www.kasm
 
 ## Run
 
-First run only — chown the bind mount to the container's `kasm-user` (UID 1000), otherwise the first-start profile copy fails with `Permission denied` and the desktop comes up broken:
-
 ```bash
-sudo mkdir -p data/home && sudo chown -R 1000:1000 data/home
 docker compose up -d
 ```
-
-(Docker creates the bind-mount dir as root; the container runs unprivileged.)
 
 Access at `https://localhost:6901` (self-signed cert — accept the warning). Login: `kasm_user` / `123456`.
 
-The user home directory persists to `./data/home/` on the host (gitignored). Drag-and-drop file upload, clipboard sync, and audio passthrough work in the browser UI.
+The user home lives inside the container — `docker compose down` wipes Chrome history, installed apps, and everything else. To start fresh, just recreate the container.
 
-### Reset the home folder
-
-To wipe Chrome history / installed apps / everything and start with a fresh kasm-user home:
-
-```bash
-docker compose down
-sudo rm -rf data/home
-sudo mkdir -p data/home && sudo chown -R 1000:1000 data/home
-docker compose up -d
-```
-
-(Files inside `data/home/` are owned by UID 1000 because the container writes them as `kasm-user`, so `sudo` is needed to remove them from the host. Same chown step as first run keeps the new empty dir writable by the container.)
+Drag-and-drop file upload, clipboard sync, and audio passthrough work in the browser UI.
 
 ## Cloudflare Tunnel
 
