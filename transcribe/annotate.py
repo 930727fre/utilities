@@ -73,9 +73,8 @@ Required: include role/team/era/why-they-matter so the viewer instantly gets \
 what the speaker is alluding to. Example good: 「Patrick Ewing: 90 年代尼克 \
 中鋒名宿，多年未能拿冠軍的代表人物」.
 - Transcription errors: if a name is clearly Whisper-mishearing a real \
-person (e.g., "McHale bridges" → Mikal Bridges, "Council" → Stephon Castle), \
-write the note as if the correct name was used — don't acknowledge the typo. \
-If you can't confidently identify the intended reference, skip the cue.
+person, write the note as if the correct name was used — don't acknowledge \
+the typo. If you can't confidently identify the intended reference, skip the cue.
 - One annotation per entity for the whole transcript. Don't re-annotate \
 anyone who appears in the "already annotated" list below (even if the cue \
 spells them differently — match by intent).
@@ -211,12 +210,16 @@ def _do_annotate(job_id: str):
         if note:
             c["lines"].append(f"※ {note}")
 
-    # Re-check before overwriting
+    # Re-check before writing
     current = get_job(job_id)
     if not current or current["status"] == "DELETED":
         return
 
-    srt_path.write_text(render_srt(cues), encoding="utf-8")
+    # Write to a sibling .annotated.srt, leave the original untouched so the
+    # caller can still get a clean transcript for VLC / re-annotation.
+    annotated_name = srt_path.stem + ".annotated.srt"
+    annotated_path = srt_path.with_name(annotated_name)
+    annotated_path.write_text(render_srt(cues), encoding="utf-8")
 
     job = get_job(job_id)
     if not job or job["status"] == "DELETED":
@@ -224,5 +227,8 @@ def _do_annotate(job_id: str):
     job["status"] = "SUCCESS"
     job["annotated"] = True
     job["annotation_error"] = None
+    files = job.get("files") or {}
+    files["srt_annotated"] = annotated_name
+    job["files"] = files
     job["updated_at"] = _now()
     upsert_job(job)

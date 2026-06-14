@@ -106,7 +106,8 @@ async def player(job_id: str):
             status_code=200,
         )
     is_audio = bool(job["files"].get("mp3")) and not job["files"].get("mp4")
-    return HTMLResponse(content=_player_html(job_id, job["title"], audio_only=is_audio))
+    has_annotated = bool(job["files"].get("srt_annotated"))
+    return HTMLResponse(content=_player_html(job_id, job["title"], audio_only=is_audio, has_annotated=has_annotated))
 
 
 # ── API ────────────────────────────────────────────────────────────────────
@@ -278,15 +279,16 @@ async def download_zip(job_id: str, background_tasks: BackgroundTasks):
 
     title = job["title"]
     members: list[tuple[Path, str]] = []
-    # mp4 / srt live under DOWNLOADS_DIR; mp3 (inbox jobs) is an absolute path
-    # stored at submission time.
-    for kind in ("mp4", "mp3", "srt"):
+    # mp4 / srt / srt_annotated live under DOWNLOADS_DIR; mp3 (inbox jobs)
+    # is an absolute path stored at submission time.
+    for kind, ext in (("mp4", "mp4"), ("mp3", "mp3"), ("srt", "srt"),
+                     ("srt_annotated", "annotated.srt")):
         ref = job["files"].get(kind)
         if not ref:
             continue
         path = Path(ref) if kind == "mp3" else DOWNLOADS_DIR / ref
         if path.exists():
-            members.append((path, f"{title}.{kind}"))
+            members.append((path, f"{title}.{ext}"))
 
     if not members:
         raise HTTPException(status_code=404, detail="No files to download")
@@ -387,28 +389,33 @@ async def stream_audio(job_id: str, request: Request):
     return StreamingResponse(iter_file(), status_code=status_code, headers=headers, media_type="audio/mpeg")
 
 
-@app.get("/api/stream/{job_id}/subtitle")
-async def stream_subtitle(job_id: str):
+def _serve_vtt(job_id: str, file_key: str) -> Response:
+    import re
     job = get_job(job_id)
-    if not job or not job["files"].get("srt"):
+    if not job or not job["files"].get(file_key):
         raise HTTPException(status_code=404, detail="Not found")
-
-    path = DOWNLOADS_DIR / job["files"]["srt"]
+    path = DOWNLOADS_DIR / job["files"][file_key]
     if not path.exists():
         raise HTTPException(status_code=404, detail="File missing")
-
     srt = path.read_text(encoding="utf-8")
-    vtt = "WEBVTT\n\n" + srt.replace(",", ".", 1)
-    # replace all timestamp commas (e.g. 00:00:01,000 → 00:00:01.000)
-    import re
+    # SRT timestamp commas → VTT periods (e.g. 00:00:01,000 → 00:00:01.000)
     vtt = "WEBVTT\n\n" + re.sub(r"(\d{2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", srt)
-
     return Response(content=vtt, media_type="text/vtt")
+
+
+@app.get("/api/stream/{job_id}/subtitle")
+async def stream_subtitle(job_id: str):
+    return _serve_vtt(job_id, "srt")
+
+
+@app.get("/api/stream/{job_id}/subtitle_annotated")
+async def stream_subtitle_annotated(job_id: str):
+    return _serve_vtt(job_id, "srt_annotated")
 
 
 # ── Player HTML helpers ────────────────────────────────────────────────────
 
-def _player_html(job_id: str, title: str, audio_only: bool = False) -> str:
+def _player_html(job_id: str, title: str, audio_only: bool = False, has_annotated: bool = False) -> str:
     # Resume-position script — same for audio and video (both use id="vid").
     # Restores on loadedmetadata, throttle-saves every 1 s, clears within 10 s
     # of the end so re-watching doesn't dump the user back at the credits.
@@ -446,16 +453,25 @@ def _player_html(job_id: str, title: str, audio_only: bool = False) -> str:
 
     if audio_only:
         media = f'<audio id="vid" controls autoplay style="width:100%;max-width:900px"><source src="/api/stream/{job_id}/audio" type="audio/mpeg"></audio>'
-        transcript_html = f"""
-<div id="transcript" style="width:100%;max-width:900px;margin-top:1.5rem;display:flex;flex-direction:column;gap:4px"></div>
+        toggle_html = (
+            f'<div style="width:100%;max-width:900px;margin-top:1rem;display:flex;gap:8px;font-size:0.85rem">'
+            f'<button id="srt-orig" style="background:none;border:1px solid #3a3a3c;color:#aeaeb2;border-radius:6px;padding:4px 10px;cursor:pointer">Original</button>'
+            f'<button id="srt-anno" style="background:#1d2535;border:1px solid #c79968;color:#e8e3d9;border-radius:6px;padding:4px 10px;cursor:pointer">Annotated</button>'
+            f'</div>'
+        ) if has_annotated else ''
+        initial_variant = "subtitle_annotated" if has_annotated else "subtitle"
+        transcript_html = toggle_html + f"""
+<div id="transcript" style="width:100%;max-width:900px;margin-top:1rem;display:flex;flex-direction:column;gap:4px"></div>
 <script>
   const audio = document.getElementById('vid');
   audio.play().catch(()=>{{}});
 
   let cues = [];
+  let currentVariant = '{initial_variant}';
 
   async function loadTranscript() {{
-    const res = await fetch('/api/stream/{job_id}/subtitle');
+    cues = [];
+    const res = await fetch('/api/stream/{job_id}/' + currentVariant);
     const vtt = await res.text();
     const lines = vtt.split('\\n');
     let i = 0;
@@ -504,10 +520,30 @@ def _player_html(job_id: str, title: str, audio_only: bool = False) -> str:
     }});
   }});
 
+  const origBtn = document.getElementById('srt-orig');
+  const annoBtn = document.getElementById('srt-anno');
+  function styleButtons() {{
+    const active = {{ background: '#1d2535', borderColor: '#c79968', color: '#e8e3d9' }};
+    const idle = {{ background: 'none', borderColor: '#3a3a3c', color: '#aeaeb2' }};
+    const o = currentVariant === 'subtitle' ? active : idle;
+    const a = currentVariant === 'subtitle_annotated' ? active : idle;
+    if (origBtn) Object.assign(origBtn.style, o);
+    if (annoBtn) Object.assign(annoBtn.style, a);
+  }}
+  if (origBtn) origBtn.onclick = () => {{ currentVariant = 'subtitle'; styleButtons(); loadTranscript(); }};
+  if (annoBtn) annoBtn.onclick = () => {{ currentVariant = 'subtitle_annotated'; styleButtons(); loadTranscript(); }};
+
   loadTranscript();
 </script>"""
     else:
-        media = f'<video id="vid" controls autoplay style="width:100%;max-width:900px;border-radius:8px;background:#000"><source src="/api/stream/{job_id}/video" type="video/mp4"><track kind="subtitles" src="/api/stream/{job_id}/subtitle" default></video>'
+        if has_annotated:
+            tracks = (
+                f'<track kind="subtitles" srclang="en" label="Original" src="/api/stream/{job_id}/subtitle">'
+                f'<track kind="subtitles" srclang="zh" label="Annotated" src="/api/stream/{job_id}/subtitle_annotated" default>'
+            )
+        else:
+            tracks = f'<track kind="subtitles" src="/api/stream/{job_id}/subtitle" default>'
+        media = f'<video id="vid" controls autoplay style="width:100%;max-width:900px;border-radius:8px;background:#000"><source src="/api/stream/{job_id}/video" type="video/mp4">{tracks}</video>'
         transcript_html = ''
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">

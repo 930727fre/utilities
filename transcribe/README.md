@@ -65,7 +65,8 @@ The backend exposes these routes. The frontend container's Vite proxy forwards `
 | `GET`  | `/player/{id}` | Standalone player page (new tab) |
 | `GET`  | `/api/stream/{id}/video` | MP4 with `Range` support for seek |
 | `GET`  | `/api/stream/{id}/audio` | MP3 with `Range` support |
-| `GET`  | `/api/stream/{id}/subtitle` | SRT → VTT on the fly for the `<track>` element |
+| `GET`  | `/api/stream/{id}/subtitle` | Original SRT → VTT on the fly for the `<track>` element |
+| `GET`  | `/api/stream/{id}/subtitle_annotated` | Annotated SRT → VTT (404 if ✨ hasn't run) |
 
 ## Job states
 
@@ -80,7 +81,11 @@ The dashboard polls `/api/jobs` every 2 s. Each row is collapsed by default — 
 
 ### ✨ Annotation
 
-Calls Claude (`claude-sonnet-4-6`) via tool-use to scan the SRT for U.S.-cultural references a Taiwanese listener might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues. Overwrites the existing `.srt` in place. Re-annotation isn't supported (the original is gone); delete the job and resubmit if you want to start over.
+Calls Claude (`claude-sonnet-4-6`) via tool-use to scan the SRT for U.S.-cultural references a Taiwanese listener might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues.
+
+Output goes to a sibling `<job_id>.annotated.srt`; the original `<job_id>.srt` is **not** modified. The player picks annotated by default when it exists (video tab via `<track>` switcher, audio tab via a toggle button); ZIP download bundles both. `jobs.json` tracks the annotated file at `files.srt_annotated` and sets `annotated: true`.
+
+To re-run ✨ on the same job (e.g. after tightening the prompt): edit `data/jobs.json` and flip `"annotated": true` back to `false` for that job. Optionally delete `data/downloads/<job_id>.annotated.srt` if you don't want the old version preserved. ✨ reappears in the dashboard within the 2 s poll.
 
 UI follows the [utility repo's design language](../README.md#design-language): monochrome warm-gray surfaces, single honey accent (the `→` submit button), character glyphs for status.
 
