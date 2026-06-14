@@ -41,6 +41,13 @@ docker compose up -d --build
 
 First transcription pulls the Whisper `medium` model on first use. Subsequent runs reuse `data/models/`.
 
+`ANTHROPIC_API_KEY` must be exported before `docker compose up` — used by the ✨ annotation feature. Compose's `${VAR:?err}` syntax fails fast at parse time if it's missing.
+
+```sh
+export ANTHROPIC_API_KEY=…
+docker compose up -d --build
+```
+
 ## API
 
 The backend exposes these routes. The frontend container's Vite proxy forwards `/api`, `/player`, and `/health` to the backend.
@@ -52,6 +59,7 @@ The backend exposes these routes. The frontend container's Vite proxy forwards `
 | `GET`  | `/api/jobs` | List all jobs |
 | `GET`  | `/api/jobs/{id}` | Single job |
 | `POST` | `/api/jobs/{id}/retry` | Re-queue a failed job |
+| `POST` | `/api/jobs/{id}/annotate` | Embed 繁中 cultural-context notes into the SRT (Claude) |
 | `DELETE` | `/api/jobs/{id}` | Cancel + remove job and its files |
 | `GET`  | `/api/download/{id}/{kind}` | `kind` ∈ `mp4` / `mp3` / `srt`; downloads the file |
 | `GET`  | `/player/{id}` | Standalone player page (new tab) |
@@ -62,11 +70,17 @@ The backend exposes these routes. The frontend container's Vite proxy forwards `
 ## Job states
 
 ```
-PENDING → DOWNLOADING → TRANSCRIBING → SUCCESS
+PENDING → DOWNLOADING → TRANSCRIBING → SUCCESS ⇄ ANNOTATING
                                       ↘ FAILED  (any unhandled exception)
 ```
 
-The dashboard polls `/api/jobs` every 2 s. Each row is collapsed by default — tap to reveal the action row (`▸ play …… SRT …… ✕` for ready jobs; `↻ retry …… ✕` for failed). The currently-working `○` glyph pulses; failed jobs show a static `!`.
+`ANNOTATING` is entered from `SUCCESS` via ✨ and always returns to `SUCCESS` (with `annotated: true` on success or `annotation_error` set on failure — never `FAILED`, since retry would re-download/re-transcribe).
+
+The dashboard polls `/api/jobs` every 2 s. Each row is collapsed by default — tap to reveal the action row (`▸ ✨ …… SRT …… ✕` for ready jobs; `↻ …… ✕` for failed). Working states pulse the status glyph: `○` for download/transcribe, `✨` for annotate. While `ANNOTATING`, the other icons are disabled so the SRT isn't read/zipped mid-rewrite.
+
+### ✨ Annotation
+
+Calls Claude (`claude-sonnet-4-6`) via tool-use to scan the SRT for U.S.-cultural references a Taiwanese listener might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues. Overwrites the existing `.srt` in place. Re-annotation isn't supported (the original is gone); delete the job and resubmit if you want to start over.
 
 UI follows the [utility repo's design language](../README.md#design-language): monochrome warm-gray surfaces, single honey accent (the `→` submit button), character glyphs for status.
 

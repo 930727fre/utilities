@@ -28,6 +28,12 @@ export async function deleteJob(id) {
   return r.json()
 }
 
+export async function annotateJob(id) {
+  const r = await fetch(`${BASE}/api/jobs/${id}/annotate`, { method: 'POST' })
+  if (!r.ok) throw new Error('Annotate failed')
+  return r.json()
+}
+
 export function downloadUrl(jobId, kind) {
   return `${BASE}/api/download/${jobId}/${kind}`
 }

@@ -12,6 +12,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 from pydantic import BaseModel
 
+from annotate import annotate_executor, annotate_job
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from tasks import SCAN_DIR, enumerate_playlist, executor, process_video, scan_inbox, transcribe_file
 
@@ -40,6 +41,15 @@ async def lifespan(app: FastAPI):
             job["updated_at"] = _now()
             changed = True
             print(f"[startup] orphaned {job['job_id']} -> FAILED", flush=True)
+        elif job["status"] == "ANNOTATING":
+            # Annotation is optional; if it crashed mid-way, flip back to SUCCESS.
+            # The .srt may be the original (unwritten) or partly written — user
+            # can rerun by deleting + re-transcribing.
+            job["status"] = "SUCCESS"
+            job["annotation_error"] = "Interrupted by restart"
+            job["updated_at"] = _now()
+            changed = True
+            print(f"[startup] orphaned annotation {job['job_id']} -> SUCCESS", flush=True)
     if changed:
         write_jobs(jobs)
 
@@ -49,6 +59,7 @@ async def lifespan(app: FastAPI):
     finally:
         scan_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
+        annotate_executor.shutdown(wait=False, cancel_futures=True)
 
 
 async def _inbox_scan_loop():
@@ -175,6 +186,25 @@ async def retry_job(job_id: str):
         executor.submit(transcribe_file, job_id, os.path.join(SCAN_DIR, job["source_file"]))
     else:
         executor.submit(process_video, job_id, job["url"])
+    return {"ok": True}
+
+
+@app.post("/api/jobs/{job_id}/annotate")
+async def annotate_job_api(job_id: str):
+    job = get_job(job_id)
+    if not job or job["status"] == "DELETED":
+        raise HTTPException(status_code=404, detail="Not found")
+    if job["status"] != "SUCCESS":
+        raise HTTPException(status_code=400, detail="Job is not in SUCCESS state")
+    if job.get("annotated"):
+        raise HTTPException(status_code=400, detail="Job is already annotated")
+    if not (job.get("files") or {}).get("srt"):
+        raise HTTPException(status_code=400, detail="Job has no SRT to annotate")
+    job["status"] = "ANNOTATING"
+    job["annotation_error"] = None
+    job["updated_at"] = _now()
+    upsert_job(job)
+    annotate_executor.submit(annotate_job, job_id)
     return {"ok": True}
 
 

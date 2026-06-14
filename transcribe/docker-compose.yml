@@ -8,6 +8,7 @@ services:
       - ./data/models:/root/.cache/whisper
     environment:
       - JOBS_FILE=/app/data/jobs.json
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be exported before docker compose up}
     deploy:
       resources:
         reservations:

@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
-import { listJobs, submitJob, retryJob, deleteJob, downloadUrl, playerUrl } from '../api'
+import { listJobs, submitJob, retryJob, deleteJob, annotateJob, downloadUrl, playerUrl } from '../api'
 
 const STATUS_LABEL = {
   PENDING:      '○',
   DOWNLOADING:  '○',
   TRANSCRIBING: '○',
+  ANNOTATING:   '○',
   SUCCESS:      '',
   FAILED:       '!',
 }
@@ -12,10 +13,11 @@ const STATUS_TITLE = {
   PENDING:      'Pending',
   DOWNLOADING:  'Downloading',
   TRANSCRIBING: 'Transcribing',
+  ANNOTATING:   'Annotating',
   SUCCESS:      'Ready',
   FAILED:       'Failed',
 }
-const isWorking = (s) => s === 'PENDING' || s === 'DOWNLOADING' || s === 'TRANSCRIBING'
+const isWorking = (s) => s === 'PENDING' || s === 'DOWNLOADING' || s === 'TRANSCRIBING' || s === 'ANNOTATING'
 
 export default function JobList() {
   const [jobs, setJobs] = useState([])
@@ -64,6 +66,15 @@ export default function JobList() {
   async function handleRetry(id) {
     await retryJob(id)
     await refresh()
+  }
+
+  async function handleAnnotate(id) {
+    try {
+      await annotateJob(id)
+      await refresh()
+    } catch (err) {
+      alert('Annotate failed: ' + err.message)
+    }
   }
 
   async function handleDelete(id) {
@@ -131,10 +142,15 @@ export default function JobList() {
               </div>
               {isExpanded && (
                 <div style={styles.actionRow}>
-                  <div style={styles.actionSlot}>
-                    {job.status === 'SUCCESS' && (
-                      <button style={styles.iconBtn} title="Play"
+                  <div style={{ ...styles.actionSlot, display: 'flex', gap: 16, alignItems: 'center' }}>
+                    {(job.status === 'SUCCESS' || job.status === 'ANNOTATING') && (
+                      <button style={{ ...styles.iconBtn, ...(job.status === 'ANNOTATING' ? styles.disabled : {}) }}
+                        title="Play" disabled={job.status === 'ANNOTATING'}
                         onClick={e => { e.stopPropagation(); window.open(playerUrl(job.job_id), '_blank') }}>▸</button>
+                    )}
+                    {job.status === 'SUCCESS' && !job.annotated && job.files?.srt && (
+                      <button style={styles.iconBtn} title="Annotate SRT with cultural context"
+                        onClick={e => { e.stopPropagation(); handleAnnotate(job.job_id) }}>✨</button>
                     )}
                     {job.status === 'FAILED' && (
                       <button style={styles.iconBtn} title="Retry"
@@ -142,19 +158,26 @@ export default function JobList() {
                     )}
                   </div>
                   <div style={{ ...styles.actionSlot, textAlign: 'center' }}>
-                    {job.status === 'SUCCESS' && job.files?.srt && (
-                      <a href={downloadUrl(job.job_id, 'zip')} download style={styles.srtBtn} title="Download media + SRT as ZIP"
-                        onClick={e => e.stopPropagation()}>ZIP</a>
+                    {(job.status === 'SUCCESS' || job.status === 'ANNOTATING') && job.files?.srt && (
+                      job.status === 'ANNOTATING'
+                        ? <span style={{ ...styles.srtBtn, ...styles.disabled }}>ZIP</span>
+                        : <a href={downloadUrl(job.job_id, 'zip')} download style={styles.srtBtn}
+                            title="Download media + SRT as ZIP"
+                            onClick={e => e.stopPropagation()}>ZIP</a>
                     )}
                   </div>
                   <div style={{ ...styles.actionSlot, textAlign: 'right' }}>
-                    <button style={styles.deleteBtn} title="Delete"
+                    <button style={{ ...styles.deleteBtn, ...(job.status === 'ANNOTATING' ? styles.disabled : {}) }}
+                      title="Delete" disabled={job.status === 'ANNOTATING'}
                       onClick={e => { e.stopPropagation(); handleDelete(job.job_id) }}>✕</button>
                   </div>
                 </div>
               )}
               {isExpanded && job.status === 'FAILED' && job.error && (
                 <p style={styles.errorText}>{job.error}</p>
+              )}
+              {isExpanded && job.status === 'SUCCESS' && job.annotation_error && (
+                <p style={styles.errorText}>{job.annotation_error}</p>
               )}
             </div>
           )
@@ -214,5 +237,6 @@ const styles = {
     background: 'none', border: 'none', color: '#636366',
     fontSize: 18, padding: 0, cursor: 'pointer', lineHeight: 1,
   },
+  disabled: { opacity: 0.3, cursor: 'not-allowed', pointerEvents: 'none' },
   errorText: { fontSize: 12, color: '#aeaeb2', marginTop: 8, wordBreak: 'break-all' },
 }
