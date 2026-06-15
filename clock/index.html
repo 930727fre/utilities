@@ -299,6 +299,58 @@
     return VALUES[Math.max(0, Math.min(idx, VALUES.length - 1))];
   }
 
+  let audioCtx = null;
+  let silentLoop = null;
+
+  // Build a 1-second silent WAV blob. Looping this via <audio> flips iOS
+  // Safari's audio session from "ambient" to "playback" so the WebAudio
+  // beep ignores the side silent switch.
+  function makeSilentLoop() {
+    const sampleRate = 8000;
+    const numSamples = sampleRate;
+    const dataSize = numSamples * 2;
+    const buffer = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buffer);
+    let p = 0;
+    const writeStr = (s) => { for (const ch of s) view.setUint8(p++, ch.charCodeAt(0)); };
+    const writeU32 = (n) => { view.setUint32(p, n, true); p += 4; };
+    const writeU16 = (n) => { view.setUint16(p, n, true); p += 2; };
+    writeStr('RIFF'); writeU32(36 + dataSize); writeStr('WAVE');
+    writeStr('fmt '); writeU32(16);
+    writeU16(1); writeU16(1); writeU32(sampleRate);
+    writeU32(sampleRate * 2); writeU16(2); writeU16(16);
+    writeStr('data'); writeU32(dataSize);
+    const url = URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+    const a = new Audio(url);
+    a.loop = true;
+    a.playsInline = true;
+    return a;
+  }
+
+  async function ensureAudio() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      silentLoop = makeSilentLoop();
+      try { await silentLoop.play(); } catch (_) {}
+    }
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+  }
+  function beep(freq) {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.3, t + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.25);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(t);
+    osc.stop(t + 0.26);
+  }
+
   (() => {
     let WORKOUT = 60, REST = 30;
     let phase = 'idle', remaining = WORKOUT, round = 1;
@@ -375,11 +427,13 @@
       if (phase === 'workout') {
         remaining = REST;
         applyPhase('rest');
+        beep(440);
       } else {
         remaining = WORKOUT;
         round++;
         rndCount.textContent = round;
         applyPhase('workout');
+        beep(880);
       }
       startTs = performance.now();
       startRemaining = remaining;
@@ -398,8 +452,9 @@
       raf = requestAnimationFrame(tick);
     }
 
-    btnStart.addEventListener('click', () => {
+    btnStart.addEventListener('click', async () => {
       if (!running) {
+        await ensureAudio();
         if (phase === 'idle') {
           WORKOUT = getPickerValue(pickerWork);
           REST    = getPickerValue(pickerRest);
@@ -407,6 +462,7 @@
           startRemaining = WORKOUT;
           showRing();
           applyPhase('workout');
+          beep(880);
         }
         running = true;
         startTs = performance.now();
