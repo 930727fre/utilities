@@ -161,10 +161,10 @@ def _do_annotate(job_id: str):
     if not job or job["status"] != "ANNOTATING":
         return
 
-    srt_name = (job.get("files") or {}).get("srt")
-    if not srt_name:
-        raise RuntimeError("Job has no SRT file")
-    srt_path = DOWNLOADS_DIR / srt_name
+    basename = job.get("basename")
+    if not basename:
+        raise RuntimeError("Job has no basename — was it transcribed before the schema migration?")
+    srt_path = DOWNLOADS_DIR / f"{basename}.srt"
     if not srt_path.exists():
         raise RuntimeError(f"SRT file missing on disk: {srt_path}")
 
@@ -215,11 +215,10 @@ def _do_annotate(job_id: str):
     if not current or current["status"] == "DELETED":
         return
 
-    # Write to a sibling .annotated.srt, leave the original untouched so the
-    # caller can still get a clean transcript for VLC / re-annotation.
-    annotated_name = srt_path.stem + ".annotated.srt"
-    annotated_path = srt_path.with_name(annotated_name)
-    annotated_path.write_text(render_srt(cues), encoding="utf-8")
+    # Overwrite the SRT in place — Jellyfin picks up the annotated cues as the
+    # only sidecar. Re-annotation isn't supported; to get the plain transcript
+    # back the user re-runs the whole job.
+    srt_path.write_text(render_srt(cues), encoding="utf-8")
 
     job = get_job(job_id)
     if not job or job["status"] == "DELETED":
@@ -227,8 +226,5 @@ def _do_annotate(job_id: str):
     job["status"] = "SUCCESS"
     job["annotated"] = True
     job["annotation_error"] = None
-    files = job.get("files") or {}
-    files["srt_annotated"] = annotated_name
-    job["files"] = files
     job["updated_at"] = _now()
     upsert_job(job)

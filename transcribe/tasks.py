@@ -2,19 +2,19 @@ import functools
 import json
 import multiprocessing
 import os
+import re
 import tempfile
 import traceback
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 
 import yt_dlp
 
 from gpu_lock import gpu_lock
-from storage import get_job, read_jobs, upsert_job
+from storage import get_job, upsert_job
 
-DOWNLOADS_DIR = "/app/data/downloads"
-SCAN_DIR = os.getenv("SCAN_DIR", "/app/data/inbox")
+DOWNLOADS_DIR = Path("/app/data/downloads")
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
@@ -77,7 +77,8 @@ def process_video(job_id: str, url: str):
     if not job or job["status"] in ("DELETED", "SUCCESS", "DOWNLOADING", "TRANSCRIBING"):
         return
 
-    base_path = os.path.join(DOWNLOADS_DIR, job_id)
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    staging_base = DOWNLOADS_DIR / job_id   # UUID-named while download/transcribe in progress
 
     job["status"] = "DOWNLOADING"
     job["updated_at"] = _now()
@@ -95,7 +96,7 @@ def process_video(job_id: str, url: str):
     ydl_opts = {
         "format": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]",
         "merge_output_format": "mp4",
-        "outtmpl": base_path + ".%(ext)s",
+        "outtmpl": str(staging_base) + ".%(ext)s",
         "progress_hooks": [progress_hook],
         "quiet": True,
     }
@@ -113,63 +114,37 @@ def process_video(job_id: str, url: str):
         return
 
     job["title"] = title
-    job["files"]["mp4"] = f"{job_id}.mp4"
     job["status"] = "TRANSCRIBING"
     job["updated_at"] = _now()
     upsert_job(job)
 
-    _run_transcription(job_id, base_path + ".mp4")
+    _run_transcription(job_id, str(staging_base) + ".mp4")
 
 
-@_catch_unhandled
-def transcribe_file(job_id: str, src_path: str):
-    job = get_job(job_id)
-    if not job or job["status"] in ("DELETED", "SUCCESS", "TRANSCRIBING"):
-        return
-
-    job["files"]["mp3"] = src_path
-    job["status"] = "TRANSCRIBING"
-    job["updated_at"] = _now()
-    upsert_job(job)
-
-    _run_transcription(job_id, src_path)
+def _sanitize_title(title: str) -> str:
+    """Strip filesystem-unsafe chars; cap length; fallback if empty."""
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', title)
+    safe = safe.strip('. \t\n')
+    return safe[:180] or "untitled"
 
 
-def scan_inbox() -> int:
-    os.makedirs(SCAN_DIR, exist_ok=True)
-    tracked = {j.get("source_file") for j in read_jobs() if j["status"] != "DELETED"}
-    count = 0
-    for fname in sorted(os.listdir(SCAN_DIR)):
-        if not fname.lower().endswith(".mp3"):
-            continue
-        if fname in tracked:
-            continue
-        job_id = str(uuid.uuid4())
-        job = {
-            "job_id": job_id,
-            "url": "",
-            "title": os.path.splitext(fname)[0],
-            "source_file": fname,
-            "status": "PENDING",
-            "progress": {},
-            "files": {"mp3": None, "srt": None},
-            "error": None,
-            "created_at": _now(),
-            "updated_at": _now(),
-        }
-        upsert_job(job)
-        executor.submit(transcribe_file, job_id, os.path.join(SCAN_DIR, fname))
-        count += 1
-    return count
+def _unique_basename(base: str) -> str:
+    """Suffix `(2)`, `(3)`... if a name with this base already has files."""
+    candidate = base
+    i = 2
+    while (DOWNLOADS_DIR / f"{candidate}.mp4").exists() or (DOWNLOADS_DIR / f"{candidate}.srt").exists():
+        candidate = f"{base} ({i})"
+        i += 1
+    return candidate
 
 
-def _run_transcription(job_id: str, audio_path: str):
+def _run_transcription(job_id: str, staging_mp4: str):
     result_file = tempfile.mktemp(suffix=".json")
     ctx = multiprocessing.get_context("spawn")
     transcribe_started = _now()
 
     with gpu_lock("transcribe-app", f"whisper:{job_id}"):
-        proc = ctx.Process(target=_transcribe_worker, args=(audio_path, result_file))
+        proc = ctx.Process(target=_transcribe_worker, args=(staging_mp4, result_file))
         proc.start()
 
         while True:
@@ -209,16 +184,23 @@ def _run_transcription(job_id: str, audio_path: str):
     if not job or job["status"] == "DELETED":
         return
 
-    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
-    srt_path = os.path.join(DOWNLOADS_DIR, job_id + ".srt")
-    with open(srt_path, "w", encoding="utf-8") as f:
+    # Promote the staging mp4 to a title-based filename Jellyfin can use.
+    base = _unique_basename(_sanitize_title(job["title"]))
+    final_mp4 = DOWNLOADS_DIR / f"{base}.mp4"
+    final_srt = DOWNLOADS_DIR / f"{base}.srt"
+
+    staging_path = Path(staging_mp4)
+    if staging_path.exists():
+        staging_path.rename(final_mp4)
+
+    with open(final_srt, "w", encoding="utf-8") as f:
         for i, seg in enumerate(payload["segments"], 1):
             f.write(f"{i}\n")
             f.write(f"{_fmt_time(seg['start'])} --> {_fmt_time(seg['end'])}\n")
             f.write(f"{seg['text'].strip()}\n\n")
 
     job["status"] = "SUCCESS"
-    job["files"]["srt"] = f"{job_id}.srt"
+    job["basename"] = base
     job["updated_at"] = _now()
     upsert_job(job)
 

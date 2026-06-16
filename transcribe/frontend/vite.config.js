@@ -4,7 +4,6 @@ import react from '@vitejs/plugin-react'
 const backendUrl = process.env.BACKEND_URL || 'http://localhost:8000'
 const proxy = {
   '/api':    { target: backendUrl, changeOrigin: true },
-  '/player': { target: backendUrl, changeOrigin: true },
   '/health': { target: backendUrl, changeOrigin: true },
 }
 

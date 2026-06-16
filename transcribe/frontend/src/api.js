@@ -33,11 +33,3 @@ export async function annotateJob(id) {
   if (!r.ok) throw new Error('Annotate failed')
   return r.json()
 }
-
-export function downloadUrl(jobId, kind) {
-  return `${BASE}/api/download/${jobId}/${kind}`
-}
-
-export function playerUrl(jobId) {
-  return `${BASE}/player/${jobId}`
-}

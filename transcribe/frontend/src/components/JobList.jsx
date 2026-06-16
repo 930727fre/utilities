@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { listJobs, submitJob, retryJob, deleteJob, annotateJob, downloadUrl, playerUrl } from '../api'
+import { listJobs, submitJob, retryJob, deleteJob, annotateJob } from '../api'
 
 const STATUS_LABEL = {
   PENDING:      '○',
@@ -143,27 +143,13 @@ export default function JobList() {
               {isExpanded && (
                 <div style={styles.actionRow}>
                   <div style={{ ...styles.actionSlot, display: 'flex', gap: 16, alignItems: 'center' }}>
-                    {(job.status === 'SUCCESS' || job.status === 'ANNOTATING') && (
-                      <button style={{ ...styles.iconBtn, ...(job.status === 'ANNOTATING' ? styles.disabled : {}) }}
-                        title="Play" disabled={job.status === 'ANNOTATING'}
-                        onClick={e => { e.stopPropagation(); window.open(playerUrl(job.job_id), '_blank') }}>▸</button>
-                    )}
-                    {job.status === 'SUCCESS' && !job.annotated && job.files?.srt && (
+                    {job.status === 'SUCCESS' && !job.annotated && job.basename && (
                       <button style={styles.iconBtn} title="Annotate SRT with cultural context"
                         onClick={e => { e.stopPropagation(); handleAnnotate(job.job_id) }}>✨</button>
                     )}
                     {job.status === 'FAILED' && (
                       <button style={styles.iconBtn} title="Retry"
                         onClick={e => { e.stopPropagation(); handleRetry(job.job_id) }}>↻</button>
-                    )}
-                  </div>
-                  <div style={{ ...styles.actionSlot, textAlign: 'center' }}>
-                    {(job.status === 'SUCCESS' || job.status === 'ANNOTATING') && job.files?.srt && (
-                      job.status === 'ANNOTATING'
-                        ? <span style={{ ...styles.srtBtn, ...styles.disabled }}>ZIP</span>
-                        : <a href={downloadUrl(job.job_id, 'zip')} download style={styles.srtBtn}
-                            title="Download media + SRT as ZIP"
-                            onClick={e => e.stopPropagation()}>ZIP</a>
                     )}
                   </div>
                   <div style={{ ...styles.actionSlot, textAlign: 'right' }}>
@@ -228,10 +214,6 @@ const styles = {
     background: 'none', border: 'none', color: '#e8e3d9',
     fontSize: 24, fontWeight: 700, lineHeight: 1, cursor: 'pointer', padding: 0,
     fontFamily: MONO,
-  },
-  srtBtn: {
-    color: '#e8e3d9', fontSize: 14, fontWeight: 600, lineHeight: 1,
-    textDecoration: 'none', cursor: 'pointer',
   },
   deleteBtn: {
     background: 'none', border: 'none', color: '#636366',
