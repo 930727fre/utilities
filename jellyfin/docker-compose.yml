@@ -9,7 +9,7 @@ services:
     volumes:
       - ./data/config:/config
       - ./data/cache:/cache
-      - ../qbittorrent/data/downloads:/media:ro
+      - ../qbittorrent/data/downloads:/qb:ro
       - ../transcribe/data/downloads:/transcribed:ro
     ports:
       - "8096:8096"
