@@ -10,6 +10,7 @@ services:
       - ./data/config:/config
       - ./data/cache:/cache
       - ../qbittorrent/data/downloads:/media:ro
+      - ../transcribe/data/downloads:/transcribed:ro
     ports:
       - "8096:8096"
     restart: unless-stopped
