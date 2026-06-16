@@ -17,6 +17,8 @@ A collection of self-hosted tools, each containerized with Docker.
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
+| [qbittorrent](./qbittorrent) | BitTorrent client (LinuxServer image) — downloads land in `./data/downloads/`, shared read-only with jellyfin |
+| [jellyfin](./jellyfin) | Media server (LinuxServer image) — mounts qbittorrent's downloads at `/media:ro` for Infuse / browser playback |
 
 ## Notes
 
