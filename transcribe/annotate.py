@@ -70,6 +70,20 @@ Cowboys, Knicks, Celtics).
 - Standard dictionary words used in their plain literal sense.
 - Anything obvious from earlier context within the same transcript.
 
+OUTPUT EMPTY ARRAY `[]` when nothing in this chunk warrants annotation. \
+Common cases:
+- The transcript is in a language other than English (Chinese podcast, \
+Japanese drama, etc.) — return [] for the whole chunk; don't try to map \
+foreign-language references.
+- The chunk is mostly music, sound effects, ambient noise, or non-verbal \
+content like `(DRUM BEATING)` / `(LAUGHTER)`.
+- The dialogue is fully self-contained — no named entities, jargon, or \
+idioms an ESL viewer would miss. A normal everyday conversation about \
+nothing specific is a frequent case; don't manufacture annotations.
+
+When in doubt about whether something warrants annotation, prefer skipping. \
+Sparse annotation is correct; over-annotation pollutes the viewing experience.
+
 RULES for each note:
 - 繁體中文, under 40 characters.
 - The note MUST add substance beyond decoding a name. Forbidden notes: \
@@ -225,6 +239,16 @@ def _do_annotate(job_id: str):
         note = notes.get(c["idx"])
         if note:
             c["lines"].append(f"※ {note}")
+
+    # Sentinel cue appended at 99:59:59 so a 0-note pass is still detectable
+    # by the `※` content check. Far-future timestamp + 1ms duration means no
+    # real video ever hits it; existing cue numbering stays untouched.
+    last_idx = cues[-1]["idx"] if cues else 0
+    cues.append({
+        "idx": last_idx + 1,
+        "time": "99:59:59,998 --> 99:59:59,999",
+        "lines": ["※ annotated"],
+    })
 
     # Re-check before writing
     current = get_job(job_id)

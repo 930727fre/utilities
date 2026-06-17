@@ -255,11 +255,13 @@ class QbTranscribeRequest(BaseModel):
 
 
 def _is_annotated_srt(srt_path: Path) -> bool:
-    """Annotation appends `※ <note>` lines; presence in head ≈ already sparkled."""
+    """`※` anywhere in the SRT means annotation already ran. Includes the
+    99:59:59 sentinel cue appended even on 0-note passes, so this is a
+    complete check — no need for a jobs.json overlay."""
     try:
         with open(srt_path, "rb") as f:
-            head = f.read(4096)
-        return ANNOTATION_MARKER.encode("utf-8") in head
+            content = f.read()
+        return ANNOTATION_MARKER.encode("utf-8") in content
     except OSError:
         return False
 
@@ -328,19 +330,12 @@ async def qb():
     items = await asyncio.to_thread(_scan_qb)
     jobs = read_jobs()
     in_flight: dict[str, str] = {}
-    annotated_paths: set[str] = set()
     for j in jobs:
         if j.get("source") != "qb":
             continue
         if j["status"] in ("PENDING", "TRANSCRIBING", "ANNOTATING"):
             in_flight[j.get("source_path", "")] = j["job_id"]
-        # Authoritative "annotated" record — handles the case where annotation
-        # legitimately found zero notes to add and left the SRT without `※`.
-        if j["status"] == "SUCCESS" and j.get("annotated") and j.get("source_path"):
-            annotated_paths.add(j["source_path"])
     for item in items:
-        if item["path"] in annotated_paths:
-            item["has_annotation"] = True
         item["in_flight_job_id"] = in_flight.get(item["path"])
         ann_fails = _annotation_failures.get(item["path"], 0)
         item["annotation_failures"] = ann_fails
@@ -380,14 +375,11 @@ def _queue_pending_qb_work():
     items = _scan_qb()
     jobs = read_jobs()
     in_flight_paths = set()
-    annotated_paths = set()
     for j in jobs:
         if j.get("source") != "qb":
             continue
         if j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING"):
             in_flight_paths.add(j.get("source_path"))
-        if j["status"] == "SUCCESS" and j.get("annotated") and j.get("source_path"):
-            annotated_paths.add(j["source_path"])
 
     for item in items:
         if item["path"] in in_flight_paths:
@@ -425,7 +417,7 @@ def _queue_pending_qb_work():
             continue
 
         # Has SRT — check if annotation is needed.
-        if item["has_annotation"] or item["path"] in annotated_paths:
+        if item["has_annotation"]:
             continue
         if _annotation_failures.get(item["path"], 0) >= MAX_ANNOTATION_RETRIES:
             continue
