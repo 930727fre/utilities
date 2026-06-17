@@ -7,7 +7,7 @@ Two ways in:
 
 In both cases, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
-`data/downloads/` is mounted into [jellyfin](../jellyfin) as `/transcribed` (read-only); `/qb` is the same folder qBittorrent writes to, mounted by both services.
+`data/downloads/` holds the yt-tab output; `/qb` is the same folder qBittorrent writes to. Both are reached by [webdav](../webdav) for Infuse playback (read-only mount of `/qb`).
 
 ## Stack
 
@@ -37,7 +37,7 @@ data/downloads/                  ← YouTube output
   Show.S01E01.srt                ← written by qb transcribe, or torrent-bundled
 ```
 
-YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for filesystem (control chars and `<>:"/\|?*` replaced with `_`, capped at 180 chars). Jellyfin auto-loads any `.srt` as a sidecar.
+YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for filesystem (control chars and `<>:"/\|?*` replaced with `_`, capped at 180 chars). Infuse auto-loads any `.srt` sibling as a sidecar.
 
 ## Run
 
