@@ -1,6 +1,6 @@
 # webdav
 
-Read-only WebDAV server exposing the qBittorrent download folder for [Infuse](https://firecore.com/infuse) (or any other player that speaks WebDAV: VLC, Kodi, etc.).
+Read-only WebDAV server exposing [qBittorrent](../qbittorrent)'s download folder + [transcribe](../transcribe)'s YouTube output for [Infuse](https://firecore.com/infuse) (or any other player that speaks WebDAV: VLC, Kodi, etc.).
 
 Replaces Jellyfin in the playback layer for this stack — Infuse handles codec decoding (universal) and offers iCloud-backed progress sync across iPhone + Mac, which is all this user needs. No transcoding, no metadata catalog, no library scans. Just files.
 
@@ -11,7 +11,7 @@ Replaces Jellyfin in the playback layer for this stack — Infuse handles codec 
 | Server | [`hacdias/webdav`](https://github.com/hacdias/webdav) — single Go binary, YAML config |
 | Auth | None — Tailscale provides device-level access control upstream |
 | Access | Tailscale (host's tailnet IP on port 8081) |
-| Mount | `/qb` read-only — same folder qBittorrent writes to |
+| Mounts | `/media/qb` (qBittorrent downloads) + `/media/yt` (transcribe's YouTube output), both read-only |
 
 Read-only is deliberate: Infuse's "delete" gesture is one tap away from breaking a seeding torrent. File deletion stays on the qBittorrent side.
 

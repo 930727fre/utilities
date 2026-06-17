@@ -9,9 +9,13 @@ services:
       # Password lives inside this config (plaintext). config.yaml is
       # .gitignore'd; bootstrap by copying config.example.yaml and editing.
       - ./config.yaml:/config.yaml:ro
-      # Read-only mount: Infuse should only play files, never delete them
-      # (deleting from the qb folder breaks seeding + the transcribe pipeline).
-      - ../qbittorrent/data/downloads:/qb:ro
+      # Read-only mounts under a single /media scope: hacdias/webdav exposes
+      # one directory as the root, so we collect the two sources here. Infuse
+      # sees `qb/` and `yt/` as siblings. Read-only because (a) qb deletion
+      # breaks seeding + transcribe pipeline, (b) yt deletion loses work
+      # that already cost GPU time.
+      - ../qbittorrent/data/downloads:/media/qb:ro
+      - ../transcribe/data/downloads:/media/yt:ro
     networks:
       - my_network
 

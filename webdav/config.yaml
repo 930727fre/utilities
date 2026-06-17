@@ -7,7 +7,7 @@ port: 6065
 # manage a password we'd never actually rely on.
 auth: false
 
-# Read-only mount of the qBittorrent download folder — Infuse should only
-# play files, never delete them (would break seeding + transcribe pipeline).
+# Two read-only sources collected under /media (see docker-compose.yml).
+# Infuse sees `qb/` and `yt/` as siblings under the WebDAV root.
 permissions: R
-directory: /qb
+directory: /media
