@@ -4,8 +4,8 @@ Strict same-stem match misses bundled SRTs with language codes, release-group
 tags, or odd naming. When the background loop is about to queue whisper for a
 video that *might* already have a bundled subtitle, we ask Claude Haiku to look
 at the folder listing and pick one. If matched, the caller renames the SRT to
-match the video stem — restoring strict-match consistency for future scans and
-Jellyfin.
+match the video stem — restoring strict-match consistency for future scans
+and for media players that look for `<video stem>.srt` as the sidecar.
 """
 from pathlib import Path
 from typing import Optional

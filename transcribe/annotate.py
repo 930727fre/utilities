@@ -255,9 +255,9 @@ def _do_annotate(job_id: str):
     if not current or current["status"] == "DELETED":
         return
 
-    # Overwrite the SRT in place — Jellyfin picks up the annotated cues as the
-    # only sidecar. Re-annotation isn't supported; to get the plain transcript
-    # back the user re-runs the whole job.
+    # Overwrite the SRT in place — downstream players (Infuse via webdav)
+    # pick up the annotated cues as the only sidecar. Re-annotation isn't
+    # supported; to get the plain transcript back the user re-runs the job.
     srt_path.write_text(render_srt(cues), encoding="utf-8")
 
     job = get_job(job_id)

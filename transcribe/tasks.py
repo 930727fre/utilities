@@ -224,14 +224,15 @@ def _run_transcription(job_id: str, staging_mp4: str):
     if not job or job["status"] == "DELETED":
         return
 
-    # Promote staging mp4 + srt to title-based filenames Jellyfin can use.
+    # Promote staging mp4 + srt to title-based filenames so they're
+    # human-recognizable in Infuse / file listings.
     base = _unique_basename(_sanitize_title(job["title"]))
     final_mp4 = DOWNLOADS_DIR / f"{base}.mp4"
     final_srt = DOWNLOADS_DIR / f"{base}.srt"
 
-    # Rename SRT before mp4 so Jellyfin's inotify on the mp4 sees a sibling
-    # sidecar already in place — reduces the race where the subtitle track
-    # isn't auto-detected on first scan.
+    # Rename SRT before mp4 so the sidecar exists before any consumer scans
+    # for the freshly-named video — cheap insurance even though WebDAV +
+    # Infuse browse on demand (no inotify race).
     staging_path = Path(staging_mp4)
     staging_srt = staging_path.with_suffix(".srt")
     if staging_srt.exists():
