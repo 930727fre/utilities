@@ -12,7 +12,8 @@ A collection of self-hosted tools, each containerized with Docker.
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
 | [ollama](./ollama) | Local LLM runtime — kept around but no longer used by other tools (they moved to Gemini API); not started by `./all.sh` |
-| [gpu-broker](./gpu-broker) | Single-machine GPU mutex + queue dashboard — serializes GPU work across transcribe / xyt / keyboard / marker-pipeline |
+| [gpu-broker](./gpu-broker) | Single-machine GPU mutex + queue dashboard — coordinates whisper-callers (transcribe / xyt / keyboard) against marker-pipeline to prevent VRAM contention |
+| [whisper](./whisper) | Shared faster-whisper-server (`large-v3-turbo`) — HTTP API used by transcribe / xyt / keyboard |
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |

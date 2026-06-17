@@ -14,11 +14,10 @@ In both cases, Claude annotation runs automatically once a transcript exists. Th
 | Layer | Tech |
 |------|------|
 | Frontend | Vite + React — tab between yt (URL submit) and qb (file browser) |
-| Backend | FastAPI on port 8000 — API + in-process workers on a single GPU |
-| Worker | `ThreadPoolExecutor(max_workers=1)` — serializes whisper onto the GPU |
-| Whisper isolation | each transcription runs in a `multiprocessing.spawn` subprocess so VRAM is released between jobs |
+| Backend | FastAPI on port 8000 — API + in-process orchestrator |
+| Worker | `ThreadPoolExecutor(max_workers=1)` — serializes our per-job state mutations |
 | Downloader | `yt-dlp` (best mp4 ≤ 1080p) |
-| Transcriber | `openai-whisper` model `medium`, `device=cuda` |
+| Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
 | SRT matcher | Claude (haiku) via tool-use — rescues bundled `.srt` files that strict same-stem matching misses |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
@@ -40,18 +39,17 @@ YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for
 ## Run
 
 Prereqs:
-- NVIDIA Driver 525+ and `nvidia-container-toolkit` installed.
 - External Docker network `my_network`.
+- The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
 - Sibling `qbittorrent/` directory exists (the compose bind-mounts `../qbittorrent/data/downloads`).
 - qBittorrent's "Append .!qB extension to incomplete files" enabled (so the qb scan skips in-flight downloads).
 - `ANTHROPIC_API_KEY` exported in the shell — required for annotation. Compose's `${VAR:?err}` fails fast at parse time if missing.
 
 ```sh
 export ANTHROPIC_API_KEY=…
+(cd ../whisper && docker compose up -d)   # start shared whisper first
 docker compose up -d --build
 ```
-
-First transcription pulls the Whisper `medium` model. Subsequent runs reuse `data/models/`.
 
 ## API
 

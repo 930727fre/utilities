@@ -1,14 +1,12 @@
 import functools
-import json
-import multiprocessing
 import os
 import re
-import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
 import yt_dlp
 
 from annotate import annotate_executor, annotate_job
@@ -16,11 +14,14 @@ from gpu_lock import gpu_lock
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
+WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
 
-# Single GPU → serialize work to one job at a time.
+# Whisper serialization happens upstream (gpu_lock + whisper container's own
+# internal queue), but we keep our own single-threaded executor so this
+# process's per-job state (jobs.json updates, file renames) stays serial.
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="transcribe-worker")
 
 
@@ -140,55 +141,47 @@ def _unique_basename(base: str) -> str:
 
 
 def _run_whisper(job_id: str, media_path: Path, srt_path: Path):
-    """Run whisper on media_path, write SRT to srt_path. Raises on failure.
+    """POST media to the shared whisper service; write returned SRT to srt_path.
 
-    Holds the cross-container GPU lock for the whole transcription.
-    Cancellable: if the job flips to DELETED mid-run, terminates the worker
-    process and returns silently (caller treats as no-op).
+    Holds the cross-container GPU lock around the HTTP call so this consumer
+    doesn't race marker-pipeline for VRAM. faster-whisper-server has its own
+    internal queue for whisper-only contention.
+
+    Pre-flight DELETED check; raises on HTTP / server error.
     """
-    result_file = tempfile.mktemp(suffix=".json")
-    ctx = multiprocessing.get_context("spawn")
-    transcribe_started = _now()
+    current = get_job(job_id)
+    if not current or current["status"] == "DELETED":
+        return
 
     with gpu_lock("transcribe-app", f"whisper:{job_id}"):
-        proc = ctx.Process(target=_transcribe_worker, args=(str(media_path), result_file))
-        proc.start()
+        # Re-check after acquiring the lock (could have been deleted while we waited).
+        current = get_job(job_id)
+        if not current or current["status"] == "DELETED":
+            return
 
-        while True:
-            proc.join(timeout=2)
-            if not proc.is_alive():
-                break
+        try:
+            with open(media_path, "rb") as f:
+                resp = requests.post(
+                    f"{WHISPER_URL}/v1/audio/transcriptions",
+                    files={"file": (media_path.name, f, "application/octet-stream")},
+                    data={
+                        "model": "whisper-1",  # ignored by fedirz; uses WHISPER__MODEL
+                        "response_format": "srt",
+                        "temperature": "0",
+                    },
+                    timeout=(10, TRANSCRIBE_TIMEOUT),
+                )
+        except requests.RequestException as e:
+            raise RuntimeError(f"Whisper service call failed: {e}") from e
 
-            if _elapsed(transcribe_started) > TRANSCRIBE_TIMEOUT:
-                proc.terminate()
-                proc.join()
-                if os.path.exists(result_file):
-                    os.unlink(result_file)
-                raise RuntimeError("Transcription timed out (4 hour limit)")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Whisper service returned {resp.status_code}: {resp.text[:300]}")
 
-            current = get_job(job_id)
-            if not current or current["status"] == "DELETED":
-                proc.terminate()
-                proc.join()
-                if os.path.exists(result_file):
-                    os.unlink(result_file)
-                return  # cancelled — caller must check job state before continuing
+    srt_text = resp.text
+    if not srt_text.strip():
+        raise RuntimeError("Whisper service returned empty SRT")
 
-    if not os.path.exists(result_file):
-        raise RuntimeError("Transcription process exited unexpectedly")
-
-    with open(result_file, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    os.unlink(result_file)
-
-    if "error" in payload:
-        raise RuntimeError(payload["error"])
-
-    with open(srt_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(payload["segments"], 1):
-            f.write(f"{i}\n")
-            f.write(f"{_fmt_time(seg['start'])} --> {_fmt_time(seg['end'])}\n")
-            f.write(f"{seg['text'].strip()}\n\n")
+    srt_path.write_text(srt_text, encoding="utf-8")
 
 
 def _queue_annotation(job_id: str):
@@ -286,22 +279,6 @@ def process_qb_file(job_id: str):
     _queue_annotation(job_id)
 
 
-def _transcribe_worker(mp4_path: str, result_file: str):
-    import json
-    import torch
-    import whisper
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[transcribe] device={device}", flush=True)
-    try:
-        model = whisper.load_model("medium", device=device)
-        result = model.transcribe(mp4_path, beam_size=5, language=None, verbose=False)
-        with open(result_file, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False)
-    except Exception as e:
-        with open(result_file, "w", encoding="utf-8") as f:
-            json.dump({"error": str(e)}, f)
-
-
 def _fail(job_id: str, error: str):
     job = get_job(job_id)
     if not job:
@@ -310,11 +287,3 @@ def _fail(job_id: str, error: str):
     job["error"] = error
     job["updated_at"] = _now()
     upsert_job(job)
-
-
-def _fmt_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"

@@ -67,6 +67,16 @@ _corrections: dict[str, list[str]] = {}
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # Hard-fail fast if the shared whisper service isn't reachable.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{WHISPER_URL}/health")
+            r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(
+            f"whisper service at {WHISPER_URL} not reachable at startup: {e}"
+        ) from e
+
     load_corrections()
     try:
         yield

@@ -1,13 +1,11 @@
 import functools
-import json
-import multiprocessing
 import os
-import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pykakasi
+import requests
 import yt_dlp
 
 from gemini_client import generate_json
@@ -15,6 +13,7 @@ from gpu_lock import gpu_lock
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = "/app/data/downloads"
+WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
@@ -109,45 +108,37 @@ def process_video(job_id: str, url: str, transcribe: bool = True):
 
 
 def _run_transcription(job_id: str, audio_path: str):
-    result_file = tempfile.mktemp(suffix=".json")
-    ctx = multiprocessing.get_context("spawn")
-    transcribe_started = _now()
-
-    with gpu_lock("xyt-app", f"whisper:{job_id}"):
-        proc = ctx.Process(target=_transcribe_worker, args=(audio_path, result_file))
-        proc.start()
-
-        while True:
-            proc.join(timeout=2)
-            if not proc.is_alive():
-                break
-
-            if _elapsed(transcribe_started) > TRANSCRIBE_TIMEOUT:
-                proc.terminate()
-                proc.join()
-                if os.path.exists(result_file):
-                    os.unlink(result_file)
-                _fail(job_id, "Transcription timed out (4 hour limit)")
-                return
-
-            current = get_job(job_id)
-            if not current or current["status"] == "DELETED":
-                proc.terminate()
-                proc.join()
-                if os.path.exists(result_file):
-                    os.unlink(result_file)
-                return
-
-    if not os.path.exists(result_file):
-        _fail(job_id, "Transcription process exited unexpectedly")
+    """POST media to the shared whisper service; write returned SRT to disk."""
+    current = get_job(job_id)
+    if not current or current["status"] == "DELETED":
         return
 
-    with open(result_file, "r", encoding="utf-8") as f:
-        payload = json.load(f)
-    os.unlink(result_file)
+    with gpu_lock("xyt-app", f"whisper:{job_id}"):
+        current = get_job(job_id)
+        if not current or current["status"] == "DELETED":
+            return
 
-    if "error" in payload:
-        _fail(job_id, payload["error"])
+        try:
+            with open(audio_path, "rb") as f:
+                resp = requests.post(
+                    f"{WHISPER_URL}/v1/audio/transcriptions",
+                    files={"file": (os.path.basename(audio_path), f, "application/octet-stream")},
+                    data={
+                        "model": "whisper-1",  # ignored by fedirz; uses WHISPER__MODEL
+                        "response_format": "srt",
+                        "temperature": "0",
+                    },
+                    timeout=(10, TRANSCRIBE_TIMEOUT),
+                )
+        except requests.RequestException as e:
+            _fail(job_id, f"Whisper service call failed: {e}")
+            return
+
+    if resp.status_code != 200:
+        _fail(job_id, f"Whisper service returned {resp.status_code}: {resp.text[:300]}")
+        return
+    if not resp.text.strip():
+        _fail(job_id, "Whisper service returned empty SRT")
         return
 
     job = get_job(job_id)
@@ -157,10 +148,7 @@ def _run_transcription(job_id: str, audio_path: str):
     os.makedirs(DOWNLOADS_DIR, exist_ok=True)
     srt_path = os.path.join(DOWNLOADS_DIR, job_id + ".srt")
     with open(srt_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(payload["segments"], 1):
-            f.write(f"{i}\n")
-            f.write(f"{_fmt_time(seg['start'])} --> {_fmt_time(seg['end'])}\n")
-            f.write(f"{seg['text'].strip()}\n\n")
+        f.write(resp.text)
 
     job["files"]["srt"] = f"{job_id}.srt"
     job["status"] = "ENRICHING"
@@ -288,22 +276,6 @@ def _romanize(text: str) -> str:
     return " ".join(item["hepburn"] for item in items).strip()
 
 
-def _transcribe_worker(mp4_path: str, result_file: str):
-    import json
-    import torch
-    import whisper
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[transcribe] device={device}", flush=True)
-    try:
-        model = whisper.load_model("medium", device=device)
-        result = model.transcribe(mp4_path, beam_size=5, language=None, verbose=False)
-        with open(result_file, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False)
-    except Exception as e:
-        with open(result_file, "w", encoding="utf-8") as f:
-            json.dump({"error": str(e)}, f)
-
-
 def _fail(job_id: str, error: str):
     job = get_job(job_id)
     if not job:
@@ -314,9 +286,3 @@ def _fail(job_id: str, error: str):
     upsert_job(job)
 
 
-def _fmt_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds % 1) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"

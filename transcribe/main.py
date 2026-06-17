@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import traceback
 import uuid
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -15,6 +17,8 @@ from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from tasks import enumerate_playlist, executor, process_qb_file, process_video
+
+WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
 # qb mode scans only /qb. yt-tab files in DOWNLOADS_DIR show up in the yt
@@ -39,6 +43,17 @@ def _now() -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Hard-fail fast if the shared whisper service isn't reachable. Failing loudly
+    # at startup beats silently dropping every whisper request later.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{WHISPER_URL}/health")
+            r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(
+            f"whisper service at {WHISPER_URL} not reachable at startup: {e}"
+        ) from e
+
     ensure_jobs_file()
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 

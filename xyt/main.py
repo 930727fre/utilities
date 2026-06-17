@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 from pydantic import BaseModel
@@ -15,6 +16,7 @@ from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from tasks import executor, process_video
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
+WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
 
 def _now() -> str:
@@ -23,6 +25,16 @@ def _now() -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Hard-fail fast if the shared whisper service isn't reachable.
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{WHISPER_URL}/health")
+            r.raise_for_status()
+    except Exception as e:
+        raise RuntimeError(
+            f"whisper service at {WHISPER_URL} not reachable at startup: {e}"
+        ) from e
+
     ensure_jobs_file()
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
