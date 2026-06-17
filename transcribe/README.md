@@ -104,7 +104,7 @@ The qb tab and background annotation loop skip:
 - Files ending in `.!qB` (qBittorrent's incomplete-file marker)
 - Any path with an `incomplete/` component
 - Dotfiles
-- Files whose mtime is within the last 10 minutes (still settling; also lets [bazarr](../bazarr) drop bundled subs before we waste GPU on whisper)
+- Files whose mtime is within the last 60 seconds (still settling — covers post-rename windows, in-progress large copies)
 (yt staging files live in `/app/data/downloads`, not `/qb`, so they're not scanned in the first place.)
 
 Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.
@@ -112,5 +112,5 @@ Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.
 ## Known limitations
 
 - `jobs.json` is file-locked, not a real DB. Single-user is fine; for concurrent users move to SQLite.
-- Whisper model is hardcoded to `medium`. Larger = better accuracy + much longer GPU time.
+- Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
 - qb mode ignores embedded subtitle tracks (muxed into the video container) and non-standard sub layouts like `Subs/<episode>/2_English.srt` — only same-stem sidecar `.srt` files are recognized.
