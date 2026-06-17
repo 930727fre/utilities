@@ -4,7 +4,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app
 
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        gcc \
+        g++ \
+        python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

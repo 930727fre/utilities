@@ -16,6 +16,7 @@ quota is exhausted, or OpenSubtitles is unreachable.
 """
 import os
 import struct
+import subprocess
 import threading
 from pathlib import Path
 from typing import Optional
@@ -169,14 +170,22 @@ def find_subs(video: Path) -> Optional[Path]:
     if not data:
         return cache_miss()
 
-    # Pick first result — OpenSubtitles orders by hash match quality.
-    attrs = data[0].get("attributes") or {}
+    # Prefer results where the API confirmed an exact hash match — anything
+    # else can be sub for a different release of the same movie (slightly
+    # different intro logo / cut → sync drift of seconds). Fall back to the
+    # first result only if no strict matches exist.
+    hash_exact = [d for d in data if (d.get("attributes") or {}).get("moviehash_match")]
+    pick = hash_exact[0] if hash_exact else data[0]
+
+    attrs = pick.get("attributes") or {}
     files = attrs.get("files") or []
     if not files:
         return cache_miss()
     file_id = files[0].get("file_id")
     if not file_id:
         return cache_miss()
+    print(f"[subs-finder] picked release={attrs.get('release', '?')!r} "
+          f"hash_exact={bool(hash_exact)}", flush=True)
 
     try:
         download_url = _download_with_retry(file_id)
@@ -201,4 +210,30 @@ def find_subs(video: Path) -> Optional[Path]:
     out = video.with_suffix(".srt")
     out.write_text(srt_text, encoding="utf-8")
     print(f"[subs-finder] wrote {out.name!r} from OpenSubtitles", flush=True)
+
+    _resync_inplace(video, out)
     return out
+
+
+def _resync_inplace(video: Path, srt: Path) -> None:
+    """ffsubsync uses VAD on the video's audio + the SRT's cue rhythm to find
+    the right time offset, then writes the corrected SRT back in place.
+
+    Best-effort: any failure leaves the original (possibly mis-synced) SRT
+    intact and the pipeline continues. Capped at 5 min for a sane upper bound
+    on long movies.
+    """
+    try:
+        r = subprocess.run(
+            ["ffsubsync", str(video), "-i", str(srt), "-o", str(srt)],
+            capture_output=True,
+            timeout=300,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        print(f"[subs-finder] ffsubsync error for {srt.name!r}: {e}", flush=True)
+        return
+    if r.returncode != 0:
+        tail = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:]
+        print(f"[subs-finder] ffsubsync rc={r.returncode} for {srt.name!r}: {tail}", flush=True)
+        return
+    print(f"[subs-finder] resynced {srt.name!r} via ffsubsync", flush=True)
