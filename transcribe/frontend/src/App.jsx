@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import JobList from './components/JobList'
+import Library from './components/Library'
 
 function useBackendHealth() {
   const [down, setDown] = useState(false)
@@ -24,10 +25,19 @@ function useBackendHealth() {
 
 export default function App() {
   const backendDown = useBackendHealth()
+  const [tab, setTab] = useState('youtube')
 
   return (
     <>
-      <JobList />
+      <div style={styles.tabBar}>
+        <button
+          style={tab === 'youtube' ? styles.tabActive : styles.tab}
+          onClick={() => setTab('youtube')}>YouTube</button>
+        <button
+          style={tab === 'library' ? styles.tabActive : styles.tab}
+          onClick={() => setTab('library')}>Library</button>
+      </div>
+      {tab === 'youtube' ? <JobList /> : <Library />}
       {backendDown && (
         <div style={styles.snackbar}>
           ⚠ Backend is not accessible — retrying…
@@ -37,7 +47,23 @@ export default function App() {
   )
 }
 
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
+
 const styles = {
+  tabBar: {
+    maxWidth: 720, margin: '0 auto', padding: '24px 16px 0',
+    display: 'flex', gap: 24, borderBottom: '1px solid #3a3a3c', marginBottom: 24,
+  },
+  tab: {
+    background: 'none', border: 'none', cursor: 'pointer',
+    fontFamily: MONO, fontSize: 14, color: '#aeaeb2',
+    padding: '8px 0', borderBottom: '2px solid transparent', marginBottom: -1,
+  },
+  tabActive: {
+    background: 'none', border: 'none', cursor: 'pointer',
+    fontFamily: MONO, fontSize: 14, color: '#e8e3d9',
+    padding: '8px 0', borderBottom: '2px solid #c79968', marginBottom: -1,
+  },
   snackbar: {
     position: 'fixed', top: 20, left: '50%', transform: 'translateX(-50%)',
     background: '#3a3a3c', color: '#e8e3d9',

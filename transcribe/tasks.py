@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yt_dlp
 
+from annotate import annotate_executor, annotate_job
 from gpu_lock import gpu_lock
 from storage import get_job, upsert_job
 
@@ -138,13 +139,19 @@ def _unique_basename(base: str) -> str:
     return candidate
 
 
-def _run_transcription(job_id: str, staging_mp4: str):
+def _run_whisper(job_id: str, media_path: Path, srt_path: Path):
+    """Run whisper on media_path, write SRT to srt_path. Raises on failure.
+
+    Holds the cross-container GPU lock for the whole transcription.
+    Cancellable: if the job flips to DELETED mid-run, terminates the worker
+    process and returns silently (caller treats as no-op).
+    """
     result_file = tempfile.mktemp(suffix=".json")
     ctx = multiprocessing.get_context("spawn")
     transcribe_started = _now()
 
     with gpu_lock("transcribe-app", f"whisper:{job_id}"):
-        proc = ctx.Process(target=_transcribe_worker, args=(staging_mp4, result_file))
+        proc = ctx.Process(target=_transcribe_worker, args=(str(media_path), result_file))
         proc.start()
 
         while True:
@@ -157,8 +164,7 @@ def _run_transcription(job_id: str, staging_mp4: str):
                 proc.join()
                 if os.path.exists(result_file):
                     os.unlink(result_file)
-                _fail(job_id, "Transcription timed out (4 hour limit)")
-                return
+                raise RuntimeError("Transcription timed out (4 hour limit)")
 
             current = get_job(job_id)
             if not current or current["status"] == "DELETED":
@@ -166,25 +172,57 @@ def _run_transcription(job_id: str, staging_mp4: str):
                 proc.join()
                 if os.path.exists(result_file):
                     os.unlink(result_file)
-                return
+                return  # cancelled — caller must check job state before continuing
 
     if not os.path.exists(result_file):
-        _fail(job_id, "Transcription process exited unexpectedly")
-        return
+        raise RuntimeError("Transcription process exited unexpectedly")
 
     with open(result_file, "r", encoding="utf-8") as f:
         payload = json.load(f)
     os.unlink(result_file)
 
     if "error" in payload:
-        _fail(job_id, payload["error"])
+        raise RuntimeError(payload["error"])
+
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for i, seg in enumerate(payload["segments"], 1):
+            f.write(f"{i}\n")
+            f.write(f"{_fmt_time(seg['start'])} --> {_fmt_time(seg['end'])}\n")
+            f.write(f"{seg['text'].strip()}\n\n")
+
+
+def _queue_annotation(job_id: str):
+    """Flip a SUCCESS job to ANNOTATING and submit to the annotate executor.
+
+    Called automatically after every successful transcription (YouTube + Library).
+    """
+    job = get_job(job_id)
+    if not job or job["status"] != "SUCCESS":
+        return
+    job["status"] = "ANNOTATING"
+    job["annotation_error"] = None
+    job["updated_at"] = _now()
+    upsert_job(job)
+    annotate_executor.submit(annotate_job, job_id)
+
+
+def _run_transcription(job_id: str, staging_mp4: str):
+    """YouTube path: whisper a staging mp4, rename to title-based filename,
+    write SRT next to it, then auto-queue annotation."""
+    try:
+        # Whisper into a temp SRT next to the staging mp4; rename both after.
+        staging_path = Path(staging_mp4)
+        staging_srt = staging_path.with_suffix(".srt")
+        _run_whisper(job_id, staging_path, staging_srt)
+    except Exception as exc:
+        _fail(job_id, str(exc))
         return
 
     job = get_job(job_id)
     if not job or job["status"] == "DELETED":
         return
 
-    # Promote the staging mp4 to a title-based filename Jellyfin can use.
+    # Promote staging mp4 + srt to title-based filenames Jellyfin can use.
     base = _unique_basename(_sanitize_title(job["title"]))
     final_mp4 = DOWNLOADS_DIR / f"{base}.mp4"
     final_srt = DOWNLOADS_DIR / f"{base}.srt"
@@ -192,17 +230,57 @@ def _run_transcription(job_id: str, staging_mp4: str):
     staging_path = Path(staging_mp4)
     if staging_path.exists():
         staging_path.rename(final_mp4)
-
-    with open(final_srt, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(payload["segments"], 1):
-            f.write(f"{i}\n")
-            f.write(f"{_fmt_time(seg['start'])} --> {_fmt_time(seg['end'])}\n")
-            f.write(f"{seg['text'].strip()}\n\n")
+    staging_srt = staging_path.with_suffix(".srt")
+    if staging_srt.exists():
+        staging_srt.rename(final_srt)
 
     job["status"] = "SUCCESS"
     job["basename"] = base
     job["updated_at"] = _now()
     upsert_job(job)
+
+    _queue_annotation(job_id)
+
+
+@_catch_unhandled
+def process_library_file(job_id: str):
+    """Library path: whisper an existing file (e.g. /qb/show/ep01.mkv) in place
+    and write a sibling SRT. No download, no rename. Auto-queues annotation."""
+    job = get_job(job_id)
+    if not job or job["status"] in ("DELETED", "SUCCESS"):
+        return
+
+    source_path = job.get("source_path")
+    if not source_path:
+        _fail(job_id, "Library job missing source_path")
+        return
+
+    media_path = Path(source_path)
+    if not media_path.exists():
+        _fail(job_id, f"Source file missing: {source_path}")
+        return
+
+    srt_path = media_path.with_suffix(".srt")
+
+    job["status"] = "TRANSCRIBING"
+    job["updated_at"] = _now()
+    upsert_job(job)
+
+    try:
+        _run_whisper(job_id, media_path, srt_path)
+    except Exception as exc:
+        _fail(job_id, str(exc))
+        return
+
+    job = get_job(job_id)
+    if not job or job["status"] == "DELETED":
+        return
+
+    job["status"] = "SUCCESS"
+    job["updated_at"] = _now()
+    upsert_job(job)
+
+    _queue_annotation(job_id)
 
 
 def _transcribe_worker(mp4_path: str, result_file: str):

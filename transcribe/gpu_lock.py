@@ -8,6 +8,7 @@ broker outage degrades to "no coordination," not "everything hangs."
 """
 import contextlib
 import os
+import threading
 from typing import Optional
 
 BROKER_URL = os.getenv("GPU_BROKER_URL", "http://gpu-broker:8000")
@@ -16,6 +17,11 @@ BROKER_URL = os.getenv("GPU_BROKER_URL", "http://gpu-broker:8000")
 # Read timeout: None — the broker holds our request open until it's our turn,
 # which can be minutes for whisper-medium queues. Don't artificially time out.
 _TIMEOUT = (5, None)
+
+# Held tokens, so `release_all_held()` can run at shutdown and free leases the
+# broker would otherwise consider stuck (broker has no TTL / heartbeat).
+_active_tokens: set[str] = set()
+_tokens_lock = threading.Lock()
 
 
 def _acquire_sync(container: str, workload: str, eta: Optional[float]) -> Optional[str]:
@@ -27,7 +33,10 @@ def _acquire_sync(container: str, workload: str, eta: Optional[float]) -> Option
             timeout=_TIMEOUT,
         )
         r.raise_for_status()
-        return r.json()["token"]
+        token = r.json()["token"]
+        with _tokens_lock:
+            _active_tokens.add(token)
+        return token
     except Exception as e:
         print(f"[gpu-lock] broker unreachable, proceeding without lock: {e}", flush=True)
         return None
@@ -36,11 +45,33 @@ def _acquire_sync(container: str, workload: str, eta: Optional[float]) -> Option
 def _release_sync(token: Optional[str]):
     if not token:
         return
+    with _tokens_lock:
+        _active_tokens.discard(token)
     import requests
     try:
         requests.delete(f"{BROKER_URL}/lease/{token}", timeout=5)
     except Exception as e:
         print(f"[gpu-lock] release failed: {e}", flush=True)
+
+
+def release_all_held():
+    """Best-effort: DELETE every lease this process is currently holding.
+
+    Called at shutdown so SIGTERM from `docker compose down/up --build` doesn't
+    leave a phantom holder in the broker's memory.
+    """
+    with _tokens_lock:
+        tokens = list(_active_tokens)
+        _active_tokens.clear()
+    if not tokens:
+        return
+    import requests
+    for t in tokens:
+        try:
+            requests.delete(f"{BROKER_URL}/lease/{t}", timeout=2)
+            print(f"[gpu-lock] shutdown-released {t}", flush=True)
+        except Exception as e:
+            print(f"[gpu-lock] shutdown release failed for {t}: {e}", flush=True)
 
 
 @contextlib.contextmanager

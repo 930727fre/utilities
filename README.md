@@ -7,7 +7,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
 | [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
 | [marker-pipeline](./marker-pipeline) | Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
-| [transcribe](./transcribe) | YouTube → GPU-accelerated Whisper + Claude annotation, output mounted into jellyfin |
+| [transcribe](./transcribe) | YouTube URL **or** existing files in `/qb` — GPU-accelerated Whisper + auto Claude annotation, sidecar SRTs picked up by jellyfin |
 | [xyt](./xyt) | Fork of transcribe |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
@@ -18,7 +18,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 | [qbittorrent](./qbittorrent) | BitTorrent client (LinuxServer image) — downloads land in `./data/downloads/`, shared read-only with jellyfin |
-| [jellyfin](./jellyfin) | Media server (LinuxServer image) — mounts qbittorrent's downloads at `/media:ro` for Infuse / browser playback |
+| [jellyfin](./jellyfin) | Media server (LinuxServer image) — mounts qbittorrent's downloads as `/qb:ro` and transcribe's output as `/transcribed:ro` for Infuse / browser playback |
 
 ## Notes
 

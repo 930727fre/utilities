@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 from pydantic import BaseModel
 
+from gpu_lock import release_all_held
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from tasks import executor, process_video
 
@@ -43,6 +44,9 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
+        # Free any GPU leases still held — the broker has no TTL, so without
+        # this a SIGTERM mid-whisper leaves the next acquire blocked forever.
+        release_all_held()
 
 
 app = FastAPI(lifespan=lifespan)

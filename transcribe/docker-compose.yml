@@ -6,6 +6,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./data/models:/root/.cache/whisper
+      - ../qbittorrent/data/downloads:/qb
     environment:
       - JOBS_FILE=/app/data/jobs.json
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be exported before docker compose up}

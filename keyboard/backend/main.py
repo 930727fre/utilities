@@ -11,7 +11,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from gemini_client import generate_json_async
-from gpu_lock import gpu_lock_async
+from gpu_lock import gpu_lock_async, release_all_held
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 CORRECTIONS_PATH = Path(os.environ.get("CORRECTIONS_PATH", "/app/data/corrections.json"))
@@ -68,7 +68,12 @@ _corrections: dict[str, list[str]] = {}
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     load_corrections()
-    yield
+    try:
+        yield
+    finally:
+        # Free any GPU leases still held — the broker has no TTL, so without
+        # this a SIGTERM mid-whisper leaves the next acquire blocked forever.
+        release_all_held()
 
 
 app = FastAPI(lifespan=lifespan)

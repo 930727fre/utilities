@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { listJobs, submitJob, retryJob, deleteJob, annotateJob } from '../api'
+import { listJobs, submitJob, retryJob, deleteJob } from '../api'
 
 const STATUS_LABEL = {
   PENDING:      '○',
@@ -27,7 +27,7 @@ export default function JobList() {
 
   async function refresh() {
     try {
-      setJobs(await listJobs())
+      setJobs(await listJobs('youtube'))
     } catch (e) {
       console.error(e)
     }
@@ -68,15 +68,6 @@ export default function JobList() {
     await refresh()
   }
 
-  async function handleAnnotate(id) {
-    try {
-      await annotateJob(id)
-      await refresh()
-    } catch (err) {
-      alert('Annotate failed: ' + err.message)
-    }
-  }
-
   async function handleDelete(id) {
     if (!confirm('Delete this job and its files?')) return
     await deleteJob(id)
@@ -102,8 +93,6 @@ export default function JobList() {
         .url-input::placeholder { color: #636366; }
         button:focus, a:focus { outline: none; }
       `}</style>
-
-      <h1 style={styles.title}>transcribe</h1>
 
       <div style={styles.submitRow}>
         <input
@@ -143,10 +132,6 @@ export default function JobList() {
               {isExpanded && (
                 <div style={styles.actionRow}>
                   <div style={{ ...styles.actionSlot, display: 'flex', gap: 16, alignItems: 'center' }}>
-                    {job.status === 'SUCCESS' && !job.annotated && job.basename && (
-                      <button style={styles.iconBtn} title="Annotate SRT with cultural context"
-                        onClick={e => { e.stopPropagation(); handleAnnotate(job.job_id) }}>✨</button>
-                    )}
                     {job.status === 'FAILED' && (
                       <button style={styles.iconBtn} title="Retry"
                         onClick={e => { e.stopPropagation(); handleRetry(job.job_id) }}>↻</button>
@@ -176,8 +161,7 @@ export default function JobList() {
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
 
 const styles = {
-  page: { maxWidth: 720, margin: '0 auto', padding: '24px 16px' },
-  title: { fontSize: 24, fontWeight: 700, letterSpacing: -0.5, color: '#e8e3d9', fontFamily: MONO, marginBottom: 24 },
+  page: { maxWidth: 720, margin: '0 auto', padding: '0 16px 24px' },
   submitRow: { display: 'flex', gap: 12, marginBottom: 32 },
   urlInput: {
     flex: 1, background: '#2c2c2e', border: '1px solid #3a3a3c',

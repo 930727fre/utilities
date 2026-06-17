@@ -51,6 +51,11 @@ healthcare/insurance terms, local services).
 gameplay terms, political process terms, finance terms, tech-scene terms.
 - Slang, regional expressions, in-jokes, memes.
 - TV / film / music references that assume a domestic audience.
+- Idioms and phrasal verbs whose figurative meaning isn't obvious from the \
+literal words — even common ones (e.g. "didn't say jack" = didn't say anything; \
+"put a dent in" = make a noticeable improvement; "the bomb" = excellent; \
+"break into" = illegally enter). An intermediate ESL viewer with solid everyday \
+English may still miss these. When in doubt, annotate.
 
 DO NOT ANNOTATE — these are already known to the audience:
 - Globally famous companies (Apple, Google, Microsoft, Amazon, Netflix, \
@@ -62,7 +67,7 @@ Messi, Ronaldo).
 - Top-level sports entities: leagues (NBA, NFL, MLB, NHL, MLS), big trophies \
 (Super Bowl, World Series, Stanley Cup), marquee teams (Lakers, Yankees, \
 Cowboys, Knicks, Celtics).
-- Words in any standard English dictionary; ordinary English idioms.
+- Standard dictionary words used in their plain literal sense.
 - Anything obvious from earlier context within the same transcript.
 
 RULES for each note:
@@ -161,14 +166,25 @@ def _do_annotate(job_id: str):
     if not job or job["status"] != "ANNOTATING":
         return
 
-    basename = job.get("basename")
-    if not basename:
-        raise RuntimeError("Job has no basename — was it transcribed before the schema migration?")
-    srt_path = DOWNLOADS_DIR / f"{basename}.srt"
+    # Library jobs annotate the SRT sibling to the source video; YouTube jobs
+    # annotate the title-based SRT in DOWNLOADS_DIR.
+    if job.get("source") == "library" and job.get("source_path"):
+        srt_path = Path(job["source_path"]).with_suffix(".srt")
+    else:
+        basename = job.get("basename")
+        if not basename:
+            raise RuntimeError("Job has no basename — was it transcribed before the schema migration?")
+        srt_path = DOWNLOADS_DIR / f"{basename}.srt"
     if not srt_path.exists():
         raise RuntimeError(f"SRT file missing on disk: {srt_path}")
 
-    cues = parse_srt(srt_path.read_text(encoding="utf-8"))
+    try:
+        raw = srt_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        # Western-release SRTs are often cp1252 / Latin-1. Latin-1 single-byte
+        # decode never raises; result gets re-saved as UTF-8 below.
+        raw = srt_path.read_text(encoding="latin-1")
+    cues = parse_srt(raw)
     if not cues:
         raise RuntimeError("SRT contained no parseable cues")
 

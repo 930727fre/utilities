@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import storage
+from gpu_lock import release_all_held
 from routers import books
 
 DATA_DIR = storage.DATA_DIR
@@ -19,7 +20,12 @@ async def lifespan(app: FastAPI):
         if book.get("status") == "PARSING":
             storage.update_book(book["id"], status="FAILED")
             print(f"[startup] orphaned PARSING book {book['id']} -> FAILED")
-    yield
+    try:
+        yield
+    finally:
+        # Free any GPU leases still held — the broker has no TTL, so without
+        # this a SIGTERM mid-conversion leaves the next acquire blocked forever.
+        release_all_held()
 
 
 app = FastAPI(title="marker-pipeline", lifespan=lifespan)
