@@ -19,7 +19,8 @@ A collection of self-hosted tools, each containerized with Docker.
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 | [qbittorrent](./qbittorrent) | BitTorrent client (LinuxServer image) — downloads land in `./data/downloads/`, shared read-only with jellyfin |
-| [jellyfin](./jellyfin) | Media server (LinuxServer image) — mounts qbittorrent's downloads as `/qb:ro` and transcribe's output as `/transcribed:ro` for Infuse / browser playback |
+| [jellyfin](./jellyfin) | Media server (LinuxServer image) — mounts qbittorrent's downloads as `/qb:ro` and transcribe's output as `/transcribed:ro` for Infuse / browser playback. Being phased out in favor of [webdav](./webdav) + Infuse direct. |
+| [webdav](./webdav) | Read-only WebDAV server exposing qBittorrent's download folder — Infuse on iPhone / Mac connects here for playback (Infuse handles codec + iCloud progress sync, replacing Jellyfin's transcoding + library roles) |
 
 ## Notes
 

@@ -1,0 +1,20 @@
+services:
+  webdav:
+    image: hacdias/webdav:v5.8.0
+    container_name: webdav
+    restart: unless-stopped
+    ports:
+      - "8081:6065"
+    volumes:
+      # Password lives inside this config (plaintext). config.yaml is
+      # .gitignore'd; bootstrap by copying config.example.yaml and editing.
+      - ./config.yaml:/config.yaml:ro
+      # Read-only mount: Infuse should only play files, never delete them
+      # (deleting from the qb folder breaks seeding + the transcribe pipeline).
+      - ../qbittorrent/data/downloads:/qb:ro
+    networks:
+      - my_network
+
+networks:
+  my_network:
+    external: true

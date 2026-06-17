@@ -1,0 +1,13 @@
+address: 0.0.0.0
+port: 6065
+
+# No auth — only Tailscale-authenticated devices can reach port 8081 on the
+# host, so the network layer is already gating access. Adding WebDAV-level
+# Basic auth on top would be cosmetic security at the cost of having to
+# manage a password we'd never actually rely on.
+auth: false
+
+# Read-only mount of the qBittorrent download folder — Infuse should only
+# play files, never delete them (would break seeding + transcribe pipeline).
+permissions: R
+directory: /qb
