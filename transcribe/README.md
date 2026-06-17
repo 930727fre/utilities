@@ -20,6 +20,7 @@ In both cases, Claude annotation runs automatically once a transcript exists. Th
 | Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
 | SRT matcher | Claude (haiku) via tool-use — rescues bundled `.srt` files that strict same-stem matching misses |
+| Subs finder | OpenSubtitles REST API — queries by OSDb file hash for human-translated subs before falling back to whisper |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
 
 ## On-disk layout
@@ -43,10 +44,16 @@ Prereqs:
 - The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
 - Sibling `qbittorrent/` directory exists (the compose bind-mounts `../qbittorrent/data/downloads`).
 - qBittorrent's "Append .!qB extension to incomplete files" enabled (so the qb scan skips in-flight downloads).
-- `ANTHROPIC_API_KEY` exported in the shell — required for annotation. Compose's `${VAR:?err}` fails fast at parse time if missing.
+- `ANTHROPIC_API_KEY` exported in the shell — required for annotation.
+- `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
+
+All four use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
 
 ```sh
 export ANTHROPIC_API_KEY=…
+export OPENSUBTITLES_API_KEY=…
+export OPENSUBTITLES_USERNAME=…
+export OPENSUBTITLES_PASSWORD=…
 (cd ../whisper && docker compose up -d)   # start shared whisper first
 docker compose up -d --build
 ```
@@ -81,7 +88,12 @@ Claude scans the SRT for U.S.-cultural references a Taiwanese viewer might miss 
 
 A background loop scans `/qb` every 30s for both whisper work (video without SRT) and annotation work (SRT without `※`), and queues each through the appropriate executor. Per-path failure counters (whisper / annotation tracked separately) cap at 3 attempts each (in-memory; container restart resets them).
 
-**Before queuing whisper, an LLM rescue step kicks in**: if there's at least one `.srt` in the same folder that strict same-stem matching missed (e.g. release-bundled `Movie.2024.en.srt` next to `Movie.2024.mkv`), Claude Haiku looks at the folder listing and decides whether any sibling `.srt` is actually this video's subtitle. If so, the SRT gets renamed to match the video stem and annotation proceeds normally — saving 10-30 minutes of GPU per rescued file. If no match (or API fails), whisper runs as usual.
+**Before queuing whisper, two rescue steps fire** (in order, cheapest first):
+
+1. **LLM srt-matcher**: if there's at least one `.srt` in the same folder that strict same-stem matching missed (e.g. release-bundled `Movie.2024.en.srt`), Claude Haiku checks whether any sibling `.srt` is actually this video's subtitle. Match → rename to satisfy strict match → annotation proceeds.
+2. **OpenSubtitles by hash**: if no sibling `.srt` to rescue, compute the file's OSDb hash and query OpenSubtitles. Match → download the SRT to the strict-stem path → annotation. Misses are cached in-memory so we don't burn quota on the same file every 30s.
+
+Only if both steps miss does whisper run. For popular content (movies, mainstream TV) this means ~zero GPU is spent — OpenSubtitles' human-translated subs are higher quality than whisper output anyway.
 
 ## qb scan filters
 
@@ -90,7 +102,7 @@ The qb tab and background annotation loop skip:
 - Files ending in `.!qB` (qBittorrent's incomplete-file marker)
 - Any path with an `incomplete/` component
 - Dotfiles
-- Files whose mtime is within the last 60 seconds (still being written)
+- Files whose mtime is within the last 10 minutes (still settling; also lets [bazarr](../bazarr) drop bundled subs before we waste GPU on whisper)
 (yt staging files live in `/app/data/downloads`, not `/qb`, so they're not scanned in the first place.)
 
 Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.

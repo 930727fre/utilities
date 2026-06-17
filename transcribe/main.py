@@ -16,6 +16,7 @@ from annotate import annotate_executor, annotate_job
 from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
+from subs_finder import find_subs
 from tasks import enumerate_playlist, executor, process_qb_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
@@ -393,11 +394,10 @@ def _queue_pending_qb_work():
             continue
 
         if not item["has_srt"]:
-            # Strict-match missed. Before spending GPU on whisper, ask LLM if
-            # any sibling .srt is actually this video's subtitle (e.g. bundled
-            # `.en.srt` from a release). If so, rename it to satisfy strict
-            # match and let next loop tick run annotation normally.
             video = Path(item["path"])
+
+            # 1. Cheap: any sibling .srt the LLM matcher recognizes (release-
+            #    bundled `.en.srt` etc.) — rename to satisfy strict match.
             matched = find_matching_srt(video)
             if matched is not None:
                 target = video.with_suffix(".srt")
@@ -405,11 +405,17 @@ def _queue_pending_qb_work():
                     matched.rename(target)
                     print(f"[srt-matcher] {matched.name!r} → {target.name!r}", flush=True)
                 except OSError as e:
-                    print(f"[srt-matcher] rename failed ({e}); falling back to whisper", flush=True)
+                    print(f"[srt-matcher] rename failed ({e}); continuing", flush=True)
                 else:
-                    continue  # next scan will see has_srt=True and queue annotation
+                    continue
 
-            # No bundled SRT (or LLM said no, or rename failed). Whisper it.
+            # 2. Try OpenSubtitles by file hash — human-translated subs are
+            #    better than whisper output and free at the API layer (subject
+            #    to daily quota; misses are cached in-memory to avoid retries).
+            if find_subs(video) is not None:
+                continue
+
+            # 3. Fallback: GPU whisper.
             if _whisper_failures.get(item["path"], 0) >= MAX_WHISPER_RETRIES:
                 continue
             job_id = str(uuid.uuid4())
