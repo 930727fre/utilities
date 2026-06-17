@@ -127,6 +127,13 @@ def _run_transcription(job_id: str, audio_path: str):
                         "model": "whisper-1",  # ignored by fedirz; uses WHISPER__MODEL
                         "response_format": "srt",
                         "temperature": "0",
+                        # silero VAD strips silence/music sections before whisper
+                        # processes — kills the hallucination loops ("CastingWords",
+                        # "Thank you" etc.) that whisper falls into on long files
+                        # with extended non-speech audio (movies, podcasts with
+                        # instrumental segments). condition_on_previous_text isn't
+                        # exposed by fedirz, so VAD is the only knob we have.
+                        "vad_filter": "true",
                     },
                     timeout=(10, TRANSCRIBE_TIMEOUT),
                 )
