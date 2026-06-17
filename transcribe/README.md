@@ -21,6 +21,7 @@ In both cases, Claude annotation runs automatically once a transcript exists. Th
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
 | SRT matcher | Claude (haiku) via tool-use — rescues bundled `.srt` files that strict same-stem matching misses |
 | Subs finder | OpenSubtitles REST API — queries by OSDb file hash for human-translated subs before falling back to whisper |
+| Subs verifier | Claude (haiku) — confirms the OpenSubtitles candidate's release/title/year matches the local filename, guarding against mis-tagged uploads |
 | Subs sync | `ffsubsync` — VAD on the video's audio aligns the downloaded SRT's cue timing (handles release-mismatch drift) |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
 
@@ -92,7 +93,7 @@ A background loop scans `/qb` every 30s for both whisper work (video without SRT
 **Before queuing whisper, two rescue steps fire** (in order, cheapest first):
 
 1. **LLM srt-matcher**: if there's at least one `.srt` in the same folder that strict same-stem matching missed (e.g. release-bundled `Movie.2024.en.srt`), Claude Haiku checks whether any sibling `.srt` is actually this video's subtitle. Match → rename to satisfy strict match → annotation proceeds.
-2. **OpenSubtitles by hash**: if no sibling `.srt` to rescue, compute the file's OSDb hash and query OpenSubtitles. Match (preferring `moviehash_match=true` results) → download the SRT → run `ffsubsync` against the video's audio to correct any release-mismatch timing drift → annotation. Misses are cached in-memory so we don't burn quota on the same file every 30s.
+2. **OpenSubtitles by hash**: if no sibling `.srt` to rescue, compute the file's OSDb hash and query OpenSubtitles. Filter to `moviehash_match=true` results (uploader-claimed exact hash match), then ask Claude Haiku to confirm the candidate's release/title/year matches the local filename — `moviehash_match` is uploader-claimed, not server-verified, and mis-tagged uploads do exist (real case: Spider-Man subs returned for a Whiplash hash). On confirmed match: download the SRT → run `ffsubsync` against the video's audio to correct any release-mismatch timing drift → annotation. Misses are cached in-memory so we don't burn quota on the same file every 30s.
 
 Only if both steps miss does whisper run. For popular content (movies, mainstream TV) this means ~zero GPU is spent — OpenSubtitles' human-translated subs are higher quality than whisper output anyway.
 

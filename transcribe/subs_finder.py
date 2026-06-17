@@ -23,6 +23,8 @@ from typing import Optional
 
 import requests
 
+from subs_verifier import verify_candidate
+
 API_BASE = "https://api.opensubtitles.com/api/v1"
 # Compose enforces these are set at parse time (${VAR:?error}), so we can fail
 # loudly here too rather than silently no-op'ing later.
@@ -170,12 +172,19 @@ def find_subs(video: Path) -> Optional[Path]:
     if not data:
         return cache_miss()
 
-    # Prefer results where the API confirmed an exact hash match — anything
-    # else can be sub for a different release of the same movie (slightly
-    # different intro logo / cut → sync drift of seconds). Fall back to the
-    # first result only if no strict matches exist.
+    # Two-stage filter:
+    # 1. moviehash_match=True — API-confirmed hash match (not just nearby in DB)
+    # 2. Haiku verification of release/title/year vs filename — `moviehash_match`
+    #    is only an uploader claim, so mis-tagged uploads slip through (real
+    #    case: Spider-Man subs returned for a Whiplash hash).
     hash_exact = [d for d in data if (d.get("attributes") or {}).get("moviehash_match")]
-    pick = hash_exact[0] if hash_exact else data[0]
+    if not hash_exact:
+        print(f"[subs-finder] {len(data)} results, 0 hash-exact for "
+              f"{video.name!r} — falling through to whisper", flush=True)
+        return cache_miss()
+    pick = verify_candidate(video, hash_exact)
+    if pick is None:
+        return cache_miss()
 
     attrs = pick.get("attributes") or {}
     files = attrs.get("files") or []
@@ -184,8 +193,7 @@ def find_subs(video: Path) -> Optional[Path]:
     file_id = files[0].get("file_id")
     if not file_id:
         return cache_miss()
-    print(f"[subs-finder] picked release={attrs.get('release', '?')!r} "
-          f"hash_exact={bool(hash_exact)}", flush=True)
+    print(f"[subs-finder] picked release={attrs.get('release', '?')!r}", flush=True)
 
     try:
         download_url = _download_with_retry(file_id)
