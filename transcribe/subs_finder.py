@@ -6,6 +6,15 @@ translated sub with proper punctuation and clean cue boundaries — much better
 than whisper output, and free at the API layer (just 5-20 downloads/day on the
 free tier per registered consumer).
 
+Two-pass search:
+1. **hash search** — query by OSDb file hash, filter to `moviehash_match=True`,
+   verify via Haiku. Highest confidence — when it hits, the SRT is for this
+   exact release, no timing drift.
+2. **text search** — fall back to querying by title (+ year for movies,
+   + season/episode for TV episodes), verify via Haiku, run ffsubsync to fix
+   release-mismatch drift. Lower confidence — the SRT is for a different
+   release, so timing alignment relies on ffsubsync.
+
 Auth: `Api-Key` header for search; `Authorization: Bearer <token>` for download
 endpoints. Token obtained via /login (user/pass), cached in memory, refreshed
 on 401.
@@ -15,6 +24,7 @@ through to whisper. The pipeline degrades gracefully if env vars are unset,
 quota is exhausted, or OpenSubtitles is unreachable.
 """
 import os
+import re
 import struct
 import subprocess
 import threading
@@ -135,27 +145,59 @@ def _download_with_retry(file_id: int) -> str:
     return r.json()["link"]
 
 
-def find_subs(video: Path) -> Optional[Path]:
-    """Search OpenSubtitles for an English subtitle matching this video.
+# ── Filename parsing for text search ──────────────────────────────────────
 
-    Strategy: hash the file, search by moviehash for highest-confidence match.
-    If a result exists, download and write `<video stem>.srt`. Returns the
-    written path on success, None on any miss/error.
+_TV_PATTERN = re.compile(r"\bS(\d{1,2})E(\d{1,3})\b", re.IGNORECASE)
+_YEAR_PATTERN = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _parse_filename(video: Path) -> dict:
+    """Best-effort title / year / season / episode extraction.
+
+    Used to build OS text-search queries. Heuristic only; the Haiku verifier
+    filters bad matches downstream, so over-matching here is fine.
     """
-    with _failed_lock:
-        if str(video) in _failed:
-            return None
+    cleaned = re.sub(r"[._]", " ", video.stem)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    def cache_miss():
-        with _failed_lock:
-            _failed.add(str(video))
-        return None
+    season: Optional[int] = None
+    episode: Optional[int] = None
+    title_part = cleaned
 
+    m_tv = _TV_PATTERN.search(cleaned)
+    if m_tv:
+        season = int(m_tv.group(1))
+        episode = int(m_tv.group(2))
+        title_part = cleaned[:m_tv.start()].rstrip(" -")
+    else:
+        m_year = _YEAR_PATTERN.search(cleaned)
+        if m_year:
+            title_part = cleaned[:m_year.start()].rstrip(" -")
+
+    # Drop parenthetical (YYYY) inside title.
+    title_part = re.sub(r"\(\s*(?:19|20)\d{2}\s*\)", "", title_part)
+    title_part = re.sub(r"\s+", " ", title_part).strip(" -")
+
+    year_match = _YEAR_PATTERN.search(cleaned)
+    year = int(year_match.group()) if year_match else None
+
+    return {
+        "title": title_part,
+        "year": year,
+        "season": season,
+        "episode": episode,
+    }
+
+
+# ── Two search strategies ─────────────────────────────────────────────────
+
+def _search_by_hash(video: Path) -> Optional[dict]:
+    """Hash-based search. Returns the verified candidate or None."""
     try:
         h = _osdb_hash(video)
     except (OSError, ValueError) as e:
         print(f"[subs-finder] hash failed for {video.name!r}: {e}", flush=True)
-        return cache_miss()
+        return None
 
     try:
         r = requests.get(
@@ -167,34 +209,109 @@ def find_subs(video: Path) -> Optional[Path]:
         r.raise_for_status()
         data = r.json().get("data") or []
     except requests.RequestException as e:
-        print(f"[subs-finder] search failed for {video.name!r}: {e}", flush=True)
-        return cache_miss()
+        print(f"[subs-finder] hash search failed for {video.name!r}: {e}", flush=True)
+        return None
 
     if not data:
-        return cache_miss()
+        print(f"[subs-finder] hash 0 results for {video.name!r}", flush=True)
+        return None
 
-    # Two-stage filter:
-    # 1. moviehash_match=True — API-confirmed hash match (not just nearby in DB)
-    # 2. Haiku verification of release/title/year vs filename — `moviehash_match`
-    #    is only an uploader claim, so mis-tagged uploads slip through (real
-    #    case: Spider-Man subs returned for a Whiplash hash).
+    # `moviehash_match` is uploader-claimed (not server-verified); Haiku
+    # downstream catches the mis-tags that this filter alone misses.
     hash_exact = [d for d in data if (d.get("attributes") or {}).get("moviehash_match")]
     if not hash_exact:
-        print(f"[subs-finder] {len(data)} results, 0 hash-exact for "
-              f"{video.name!r} — falling through to whisper", flush=True)
-        return cache_miss()
-    pick = verify_candidate(video, hash_exact)
+        print(f"[subs-finder] hash {len(data)} results, 0 hash-exact for "
+              f"{video.name!r}", flush=True)
+        return None
+
+    return verify_candidate(video, hash_exact)
+
+
+def _search_by_text(video: Path) -> Optional[dict]:
+    """Text-based search using title + (year | season/episode). Returns the
+    verified candidate or None.
+
+    Useful when hash hits empty (sparse coverage for niche releases / TV).
+    The candidate's release won't match the local file, so ffsubsync is
+    needed downstream to fix timing drift.
+    """
+    info = _parse_filename(video)
+    if not info["title"]:
+        print(f"[subs-finder] text: could not extract title from {video.name!r}", flush=True)
+        return None
+
+    params: dict = {"query": info["title"], "languages": "en"}
+    if info["season"] is not None and info["episode"] is not None:
+        params["season_number"] = info["season"]
+        params["episode_number"] = info["episode"]
+    elif info["year"]:
+        # Year only helps narrow down for movies — for TV it's first-air year
+        # of the show, which may differ from episode air year and hurt recall.
+        params["year"] = info["year"]
+
+    try:
+        r = requests.get(
+            f"{API_BASE}/subtitles",
+            params=params,
+            headers=_headers(),
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json().get("data") or []
+    except requests.RequestException as e:
+        print(f"[subs-finder] text search failed for {video.name!r}: {e}", flush=True)
+        return None
+
+    if not data:
+        print(f"[subs-finder] text 0 results for {video.name!r} "
+              f"(query={info['title']!r} S={info['season']} E={info['episode']} y={info['year']})", flush=True)
+        return None
+
+    # Pass up to top 10 to the verifier — text search returns ordered by
+    # relevance, more than that just burns tokens without helping.
+    print(f"[subs-finder] text {len(data)} results for {video.name!r}", flush=True)
+    return verify_candidate(video, data[:10])
+
+
+# ── Entry point ───────────────────────────────────────────────────────────
+
+def find_subs(video: Path) -> Optional[Path]:
+    """Search OpenSubtitles for an English subtitle matching this video.
+
+    Try hash search first (zero timing drift when it hits), fall back to
+    text search (drift fixed by ffsubsync). Returns the written SRT path
+    on success, None on any miss/error.
+    """
+    with _failed_lock:
+        if str(video) in _failed:
+            return None
+
+    def cache_miss():
+        with _failed_lock:
+            _failed.add(str(video))
+        return None
+
+    pick = _search_by_hash(video)
+    source_tag = "opensubtitles-hash"
+
+    if pick is None:
+        pick = _search_by_text(video)
+        source_tag = "opensubtitles-text"
+
     if pick is None:
         return cache_miss()
 
     attrs = pick.get("attributes") or {}
     files = attrs.get("files") or []
     if not files:
+        print(f"[subs-finder] picked candidate has no files for {video.name!r}", flush=True)
         return cache_miss()
     file_id = files[0].get("file_id")
     if not file_id:
+        print(f"[subs-finder] picked candidate has no file_id for {video.name!r}", flush=True)
         return cache_miss()
-    print(f"[subs-finder] picked release={attrs.get('release', '?')!r}", flush=True)
+    print(f"[subs-finder] picked release={attrs.get('release', '?')!r} "
+          f"via {source_tag}", flush=True)
 
     try:
         download_url = _download_with_retry(file_id)
@@ -214,6 +331,7 @@ def find_subs(video: Path) -> Optional[Path]:
         return cache_miss()
 
     if not srt_text.strip():
+        print(f"[subs-finder] empty SRT body for {video.name!r}", flush=True)
         return cache_miss()
 
     out = video.with_suffix(".srt")
@@ -221,9 +339,10 @@ def find_subs(video: Path) -> Optional[Path]:
     print(f"[subs-finder] wrote {out.name!r} from OpenSubtitles", flush=True)
 
     # ffsubsync overwrites the SRT, so source-stamp AFTER it (whether it
-    # succeeded or fell through).
+    # succeeded or fell through). Tag distinguishes hash vs text origin —
+    # text-origin SRTs are more likely to need timing verification.
     _resync_inplace(video, out)
-    stamp_source(out, "opensubtitles")
+    stamp_source(out, source_tag)
     return out
 
 

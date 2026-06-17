@@ -30,27 +30,39 @@ _SCHEMA = {
 
 _PROMPT_TEMPLATE = """\
 You verify that an OpenSubtitles subtitle candidate actually corresponds to a \
-local video file. Mis-tagged uploads exist (the hash points to a sub for a \
-different work) — your job is to catch them.
+local video file. Candidates come from either hash search (mis-tagged uploads \
+exist — the hash points to a sub for a different work) or text search (search \
+hits may include the wrong season/episode or unrelated titles that share a \
+word). Your job is to reject the wrong ones.
 
 Local video filename:
 {video_name}
 
-Candidates (all share the file hash with the local video, but only the right \
-one is the same movie/show):
+Candidates:
 {candidate_list}
 
-Per candidate you see:
-- release: the uploader's subtitle filename (often a release name with noise \
+Per candidate fields:
+- release: uploader's subtitle filename (often a release name with noise \
 tokens like resolution, codec, group)
-- title: canonical movie/show title from OpenSubtitles' metadata
+- title: canonical title from OpenSubtitles' metadata. For TV this is the \
+EPISODE name (e.g. "Pilot"), NOT the show name — look at `show` for that.
 - year: release year (movie) or first-air year (TV)
+- show: parent series title (only present for TV episodes)
+- season/episode: SxxExx (only present for TV episodes)
 
-Decide which candidate (if any) is the same movie/show as the local video. \
+Decide which candidate (if any) is the same work as the local video.
+
+For TV: the local filename usually contains `SxxExx`. The candidate matches \
+only if its show + season + episode all align. A candidate with the right \
+show but wrong S/E is NOT a match.
+
+For movies: title and year should both align (allowing for translated/local \
+titles, noise tokens, and punctuation differences).
+
 Be lenient across language differences, transliterations, abbreviations, \
-punctuation, and noise tokens. Be strict about clearly different works — \
-e.g. "Spider-Man: Far from Home" candidate vs "Whiplash" local video is a \
-mismatch even if the hash claims otherwise.
+punctuation, and noise tokens. Be strict about clearly different works \
+(e.g. "Spider-Man: Far from Home" vs "Whiplash" local video) and wrong \
+episodes (e.g. S01E01 candidate vs S01E05 local).
 
 Respond with the matching candidate's id, or null if none match.
 
@@ -78,9 +90,21 @@ def verify_candidate(video: Path, candidates: list[dict]) -> Optional[dict]:
         release = attrs.get("release") or "?"
         title = details.get("title") or "?"
         year = details.get("year") or "?"
-        lines.append(
-            f"- id: {cand_id}\n  release: {release}\n  title: {title}\n  year: {year}"
-        )
+        parent = details.get("parent_title")
+        season = details.get("season_number")
+        episode = details.get("episode_number")
+
+        block = [
+            f"- id: {cand_id}",
+            f"  release: {release}",
+            f"  title: {title}",
+            f"  year: {year}",
+        ]
+        if parent:
+            block.append(f"  show: {parent}")
+        if season is not None and episode is not None:
+            block.append(f"  season/episode: S{int(season):02d}E{int(episode):02d}")
+        lines.append("\n".join(block))
 
     prompt = _PROMPT_TEMPLATE.format(
         video_name=video.name,
