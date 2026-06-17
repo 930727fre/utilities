@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from annotate import annotate_executor, annotate_job
 from gpu_lock import release_all_held
+from srt_matcher import find_matching_srt
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from tasks import enumerate_playlist, executor, process_qb_file, process_video
 
@@ -24,10 +25,12 @@ ANNOTATION_MARKER = "※"
 MTIME_GRACE_SECONDS = 60
 QB_SCAN_INTERVAL = 30
 MAX_ANNOTATION_RETRIES = 3
+MAX_WHISPER_RETRIES = 3
 
-# Per-path retry counter for the background annotation loop. In-memory:
-# container restart resets it, which is the natural "try again" signal.
+# Per-path retry counters for the background loop. In-memory: container
+# restart resets them, which is the natural "try again" signal.
 _annotation_failures: dict[str, int] = {}
+_whisper_failures: dict[str, int] = {}
 
 
 def _now() -> str:
@@ -71,7 +74,7 @@ async def lifespan(app: FastAPI):
     if changed:
         write_jobs(jobs)
 
-    annotation_loop_task = asyncio.create_task(_qb_annotation_loop())
+    annotation_loop_task = asyncio.create_task(_qb_work_loop())
 
     try:
         yield
@@ -323,9 +326,12 @@ async def qb():
         if item["path"] in annotated_paths:
             item["has_annotation"] = True
         item["in_flight_job_id"] = in_flight.get(item["path"])
-        failures = _annotation_failures.get(item["path"], 0)
-        item["annotation_failures"] = failures
-        item["annotation_blocked"] = failures >= MAX_ANNOTATION_RETRIES
+        ann_fails = _annotation_failures.get(item["path"], 0)
+        item["annotation_failures"] = ann_fails
+        item["annotation_blocked"] = ann_fails >= MAX_ANNOTATION_RETRIES
+        whisper_fails = _whisper_failures.get(item["path"], 0)
+        item["whisper_failures"] = whisper_fails
+        item["whisper_blocked"] = whisper_fails >= MAX_WHISPER_RETRIES
     return items
 
 
@@ -351,10 +357,9 @@ async def transcribe_qb_file(req: QbTranscribeRequest):
 
 # ── Background annotation loop ────────────────────────────────────────────
 
-def _queue_pending_qb_annotations():
-    """Scan qb roots; for every SRT without ※, enqueue an annotation job.
-
-    Skips files already in flight and files that have hit the per-path retry cap.
+def _queue_pending_qb_work():
+    """For every qb video without SRT, enqueue whisper; for every SRT without ※,
+    enqueue annotation. Skips files already in flight and ones at the retry cap.
     """
     items = _scan_qb()
     jobs = read_jobs()
@@ -363,16 +368,43 @@ def _queue_pending_qb_annotations():
     for j in jobs:
         if j.get("source") != "qb":
             continue
-        if j["status"] in ("PENDING", "TRANSCRIBING", "ANNOTATING"):
+        if j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING"):
             in_flight_paths.add(j.get("source_path"))
         if j["status"] == "SUCCESS" and j.get("annotated") and j.get("source_path"):
             annotated_paths.add(j["source_path"])
+
     for item in items:
-        if not item["has_srt"]:
-            continue
-        if item["has_annotation"] or item["path"] in annotated_paths:
-            continue
         if item["path"] in in_flight_paths:
+            continue
+
+        if not item["has_srt"]:
+            # Strict-match missed. Before spending GPU on whisper, ask LLM if
+            # any sibling .srt is actually this video's subtitle (e.g. bundled
+            # `.en.srt` from a release). If so, rename it to satisfy strict
+            # match and let next loop tick run annotation normally.
+            video = Path(item["path"])
+            matched = find_matching_srt(video)
+            if matched is not None:
+                target = video.with_suffix(".srt")
+                try:
+                    matched.rename(target)
+                    print(f"[srt-matcher] {matched.name!r} → {target.name!r}", flush=True)
+                except OSError as e:
+                    print(f"[srt-matcher] rename failed ({e}); falling back to whisper", flush=True)
+                else:
+                    continue  # next scan will see has_srt=True and queue annotation
+
+            # No bundled SRT (or LLM said no, or rename failed). Whisper it.
+            if _whisper_failures.get(item["path"], 0) >= MAX_WHISPER_RETRIES:
+                continue
+            job_id = str(uuid.uuid4())
+            job = _new_qb_job(job_id, item["path"])
+            upsert_job(job)
+            executor.submit(_track_whisper_outcome, job_id, item["path"])
+            continue
+
+        # Has SRT — check if annotation is needed.
+        if item["has_annotation"] or item["path"] in annotated_paths:
             continue
         if _annotation_failures.get(item["path"], 0) >= MAX_ANNOTATION_RETRIES:
             continue
@@ -396,11 +428,21 @@ def _track_annotation_outcome(job_id: str, source_path: str):
         _annotation_failures.pop(source_path, None)
 
 
-async def _qb_annotation_loop():
-    """Periodically scan for unannotated SRTs and queue them."""
+def _track_whisper_outcome(job_id: str, source_path: str):
+    """Run whisper (and chained annotation); bump counter if whisper ends FAILED."""
+    process_qb_file(job_id)  # @_catch_unhandled in tasks.py absorbs exceptions
+    job = get_job(job_id)
+    if job and job.get("status") == "FAILED":
+        _whisper_failures[source_path] = _whisper_failures.get(source_path, 0) + 1
+    else:
+        _whisper_failures.pop(source_path, None)
+
+
+async def _qb_work_loop():
+    """Periodically scan /qb for files needing whisper or annotation, and queue them."""
     while True:
         try:
-            await asyncio.to_thread(_queue_pending_qb_annotations)
+            await asyncio.to_thread(_queue_pending_qb_work)
         except Exception:
             traceback.print_exc()
         await asyncio.sleep(QB_SCAN_INTERVAL)

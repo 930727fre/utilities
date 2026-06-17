@@ -3,9 +3,9 @@
 Two ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
-- **qb tab** — see every video sitting in qBittorrent's downloads (`/qb`); click `▸` on a file with no SRT to run Whisper in place.
+- **qb tab** — view-only: every video in qBittorrent's downloads (`/qb`). No buttons; a background loop handles everything automatically — videos without SRT get Whisper'd, SRTs without `※` get annotated.
 
-In both cases, Claude annotation (`✨ sparkle`) runs automatically once a transcript exists. A background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops) and annotates them too. Cost per ~1-hour SRT is around $0.05.
+In both cases, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
 `data/downloads/` is mounted into [jellyfin](../jellyfin) as `/transcribed` (read-only); `/qb` is the same folder qBittorrent writes to, mounted by both services.
 
@@ -20,6 +20,7 @@ In both cases, Claude annotation (`✨ sparkle`) runs automatically once a trans
 | Downloader | `yt-dlp` (best mp4 ≤ 1080p) |
 | Transcriber | `openai-whisper` model `medium`, `device=cuda` |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
+| SRT matcher | Claude (haiku) via tool-use — rescues bundled `.srt` files that strict same-stem matching misses |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
 
 ## On-disk layout
@@ -63,7 +64,7 @@ First transcription pulls the Whisper `medium` model. Subsequent runs reuse `dat
 | `POST` | `/api/jobs/{id}/retry` | Re-queue a failed job |
 | `DELETE` | `/api/jobs/{id}` | Mark deleted; yt jobs also remove their mp4 + srt |
 | `GET`  | `/api/qb` | Scan `/qb`; return file + annotation state |
-| `POST` | `/api/qb/transcribe` | `{path}`: run Whisper on a qb file; auto-chains annotation |
+| `POST` | `/api/qb/transcribe` | `{path}`: manually trigger whisper on a qb file (background loop already handles this; useful for power/curl override) |
 
 ## Job states
 
@@ -80,7 +81,9 @@ Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` jobs flip to `FAILED` on star
 
 Claude scans the SRT for U.S.-cultural references a Taiwanese viewer might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues. The annotated SRT overwrites the original; the `※` marker is the persistent on-disk signal that a file has been annotated.
 
-A background loop scans `/qb` every 30s for SRTs without `※` and queues them. Per-path failure counter caps at 3 attempts (in-memory; container restart resets it).
+A background loop scans `/qb` every 30s for both whisper work (video without SRT) and annotation work (SRT without `※`), and queues each through the appropriate executor. Per-path failure counters (whisper / annotation tracked separately) cap at 3 attempts each (in-memory; container restart resets them).
+
+**Before queuing whisper, an LLM rescue step kicks in**: if there's at least one `.srt` in the same folder that strict same-stem matching missed (e.g. release-bundled `Movie.2024.en.srt` next to `Movie.2024.mkv`), Claude Haiku looks at the folder listing and decides whether any sibling `.srt` is actually this video's subtitle. If so, the SRT gets renamed to match the video stem and annotation proceeds normally — saving 10-30 minutes of GPU per rescued file. If no match (or API fails), whisper runs as usual.
 
 ## qb scan filters
 

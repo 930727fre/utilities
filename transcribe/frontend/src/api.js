@@ -33,13 +33,3 @@ export async function listQb() {
   if (!r.ok) throw new Error('Failed to list qb')
   return r.json()
 }
-
-export async function transcribeFile(path) {
-  const r = await fetch(`${BASE}/api/qb/transcribe`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path }),
-  })
-  if (!r.ok) throw new Error('Transcribe failed')
-  return r.json()
-}

@@ -227,12 +227,15 @@ def _run_transcription(job_id: str, staging_mp4: str):
     final_mp4 = DOWNLOADS_DIR / f"{base}.mp4"
     final_srt = DOWNLOADS_DIR / f"{base}.srt"
 
+    # Rename SRT before mp4 so Jellyfin's inotify on the mp4 sees a sibling
+    # sidecar already in place — reduces the race where the subtitle track
+    # isn't auto-detected on first scan.
     staging_path = Path(staging_mp4)
-    if staging_path.exists():
-        staging_path.rename(final_mp4)
     staging_srt = staging_path.with_suffix(".srt")
     if staging_srt.exists():
         staging_srt.rename(final_srt)
+    if staging_path.exists():
+        staging_path.rename(final_mp4)
 
     job["status"] = "SUCCESS"
     job["basename"] = base

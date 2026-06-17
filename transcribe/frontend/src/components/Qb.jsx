@@ -1,9 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
-import { listQb, transcribeFile } from '../api'
+import { useState, useEffect } from 'react'
+import { listQb } from '../api'
 
 export default function Qb() {
   const [items, setItems] = useState([])
-  const submittingRef = useRef(new Set())
 
   async function refresh() {
     try {
@@ -18,19 +17,6 @@ export default function Qb() {
     const id = setInterval(refresh, 2000)
     return () => clearInterval(id)
   }, [])
-
-  async function handleTranscribe(path) {
-    if (submittingRef.current.has(path)) return
-    submittingRef.current.add(path)
-    try {
-      await transcribeFile(path)
-      await refresh()
-    } catch (err) {
-      alert('Transcribe failed: ' + err.message)
-    } finally {
-      submittingRef.current.delete(path)
-    }
-  }
 
   // qBittorrent typically makes one folder per torrent / season — group by it.
   // Loose files at /qb root land under an empty group with no header.
@@ -48,7 +34,6 @@ export default function Qb() {
         .status-pulse { animation: statusPulse 1.4s ease-in-out infinite; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
         .fade-in { animation: fadeIn 0.3s ease; }
-        button:focus { outline: none; }
       `}</style>
 
       {items.length === 0 && (
@@ -58,36 +43,29 @@ export default function Qb() {
       {[...groups.entries()].map(([groupKey, rows]) => (
         <div key={groupKey || '__root__'} style={styles.group}>
           {groupKey && <div style={styles.groupHeader}>{groupKey}</div>}
-          {rows.map(item => (
-            <RowItem
-              key={item.path}
-              item={item}
-              onTranscribe={() => handleTranscribe(item.path)}
-            />
-          ))}
+          {rows.map(item => <RowItem key={item.path} item={item} />)}
         </div>
       ))}
     </div>
   )
 }
 
-function RowItem({ item, onTranscribe }) {
+function RowItem({ item }) {
   const state = deriveState(item)
   return (
     <div className="fade-in" style={styles.row}>
       <div style={styles.name}>{item.name}</div>
       <div style={styles.slot}>
-        {state === 'transcribe' && (
-          <button style={styles.actionBtn} title="Transcribe with Whisper, then auto-annotate"
-            onClick={onTranscribe}>▸</button>
-        )}
         {state === 'working' && (
-          <span className="status-pulse" style={styles.glyph} title="Working">○</span>
+          <span className="status-pulse" style={styles.glyph} title="Working / queued">○</span>
         )}
         {state === 'done' && (
           <span style={{ ...styles.glyph, color: '#636366' }} title="Annotated">✓</span>
         )}
-        {state === 'blocked' && (
+        {state === 'whisper_blocked' && (
+          <span style={styles.glyph} title="Whisper failed 3 times — restart container to retry">!</span>
+        )}
+        {state === 'annotation_blocked' && (
           <span style={styles.glyph} title="Annotation failed 3 times — restart container to retry">!</span>
         )}
       </div>
@@ -98,9 +76,10 @@ function RowItem({ item, onTranscribe }) {
 function deriveState(item) {
   if (item.in_flight_job_id) return 'working'
   if (item.has_annotation) return 'done'
-  if (item.has_srt && item.annotation_blocked) return 'blocked'
-  if (item.has_srt) return 'working'  // background loop will pick it up soon
-  return 'transcribe'
+  if (!item.has_srt && item.whisper_blocked) return 'whisper_blocked'
+  if (item.has_srt && item.annotation_blocked) return 'annotation_blocked'
+  // Pending whisper or annotation — background loop will pick it up within 30s.
+  return 'working'
 }
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
@@ -127,10 +106,5 @@ const styles = {
   glyph: {
     color: '#aeaeb2', fontSize: 18, fontWeight: 700, lineHeight: 1,
     cursor: 'default', fontFamily: MONO,
-  },
-  actionBtn: {
-    background: 'none', border: 'none', color: '#c79968',
-    fontSize: 24, fontWeight: 700, lineHeight: 1, cursor: 'pointer', padding: 0,
-    fontFamily: MONO,
   },
 }
