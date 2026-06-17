@@ -1,6 +1,6 @@
 const BASE = import.meta.env.VITE_API_URL || ''
 
-export async function listJobs(source = 'youtube') {
+export async function listJobs(source = 'yt') {
   const r = await fetch(`${BASE}/api/jobs?source=${source}`)
   if (!r.ok) throw new Error('Failed to list jobs')
   return r.json()
@@ -28,14 +28,14 @@ export async function deleteJob(id) {
   return r.json()
 }
 
-export async function listLibrary() {
-  const r = await fetch(`${BASE}/api/library`)
-  if (!r.ok) throw new Error('Failed to list library')
+export async function listQb() {
+  const r = await fetch(`${BASE}/api/qb`)
+  if (!r.ok) throw new Error('Failed to list qb')
   return r.json()
 }
 
 export async function transcribeFile(path) {
-  const r = await fetch(`${BASE}/api/library/transcribe`, {
+  const r = await fetch(`${BASE}/api/qb/transcribe`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),

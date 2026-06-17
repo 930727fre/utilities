@@ -194,7 +194,7 @@ def _run_whisper(job_id: str, media_path: Path, srt_path: Path):
 def _queue_annotation(job_id: str):
     """Flip a SUCCESS job to ANNOTATING and submit to the annotate executor.
 
-    Called automatically after every successful transcription (YouTube + Library).
+    Called automatically after every successful transcription (yt + qb).
     """
     job = get_job(job_id)
     if not job or job["status"] != "SUCCESS":
@@ -207,7 +207,7 @@ def _queue_annotation(job_id: str):
 
 
 def _run_transcription(job_id: str, staging_mp4: str):
-    """YouTube path: whisper a staging mp4, rename to title-based filename,
+    """yt path: whisper a staging mp4, rename to title-based filename,
     write SRT next to it, then auto-queue annotation."""
     try:
         # Whisper into a temp SRT next to the staging mp4; rename both after.
@@ -243,8 +243,8 @@ def _run_transcription(job_id: str, staging_mp4: str):
 
 
 @_catch_unhandled
-def process_library_file(job_id: str):
-    """Library path: whisper an existing file (e.g. /qb/show/ep01.mkv) in place
+def process_qb_file(job_id: str):
+    """qb path: whisper an existing file (e.g. /qb/show/ep01.mkv) in place
     and write a sibling SRT. No download, no rename. Auto-queues annotation."""
     job = get_job(job_id)
     if not job or job["status"] in ("DELETED", "SUCCESS"):
@@ -252,7 +252,7 @@ def process_library_file(job_id: str):
 
     source_path = job.get("source_path")
     if not source_path:
-        _fail(job_id, "Library job missing source_path")
+        _fail(job_id, "qb job missing source_path")
         return
 
     media_path = Path(source_path)

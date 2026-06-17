@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import JobList from './components/JobList'
-import Library from './components/Library'
+import Qb from './components/Qb'
 
 function useBackendHealth() {
   const [down, setDown] = useState(false)
@@ -25,19 +25,19 @@ function useBackendHealth() {
 
 export default function App() {
   const backendDown = useBackendHealth()
-  const [tab, setTab] = useState('youtube')
+  const [tab, setTab] = useState('yt')
 
   return (
     <>
       <div style={styles.tabBar}>
         <button
-          style={tab === 'youtube' ? styles.tabActive : styles.tab}
-          onClick={() => setTab('youtube')}>YouTube</button>
+          style={tab === 'yt' ? styles.tabActive : styles.tab}
+          onClick={() => setTab('yt')}>yt</button>
         <button
-          style={tab === 'library' ? styles.tabActive : styles.tab}
-          onClick={() => setTab('library')}>Library</button>
+          style={tab === 'qb' ? styles.tabActive : styles.tab}
+          onClick={() => setTab('qb')}>qb</button>
       </div>
-      {tab === 'youtube' ? <JobList /> : <Library />}
+      {tab === 'yt' ? <JobList /> : <Qb />}
       {backendDown && (
         <div style={styles.snackbar}>
           ⚠ Backend is not accessible — retrying…

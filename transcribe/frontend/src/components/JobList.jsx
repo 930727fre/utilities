@@ -27,7 +27,7 @@ export default function JobList() {
 
   async function refresh() {
     try {
-      setJobs(await listJobs('youtube'))
+      setJobs(await listJobs('yt'))
     } catch (e) {
       console.error(e)
     }

@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef } from 'react'
-import { listLibrary, transcribeFile } from '../api'
+import { listQb, transcribeFile } from '../api'
 
-export default function Library() {
+export default function Qb() {
   const [items, setItems] = useState([])
   const submittingRef = useRef(new Set())
 
   async function refresh() {
     try {
-      setItems(await listLibrary())
+      setItems(await listQb())
     } catch (e) {
       console.error(e)
     }
@@ -32,10 +32,11 @@ export default function Library() {
     }
   }
 
-  // Group by (root, parent) — qb downloads typically nest one folder per torrent.
+  // qBittorrent typically makes one folder per torrent / season — group by it.
+  // Loose files at /qb root land under an empty group with no header.
   const groups = new Map()
   for (const item of items) {
-    const key = item.parent ? `${rootLabel(item.root)} / ${item.parent}` : rootLabel(item.root)
+    const key = item.parent || ''
     if (!groups.has(key)) groups.set(key, [])
     groups.get(key).push(item)
   }
@@ -51,12 +52,12 @@ export default function Library() {
       `}</style>
 
       {items.length === 0 && (
-        <p style={styles.empty}>No video files in /qb or /transcribed yet.</p>
+        <p style={styles.empty}>No video files in /qb yet.</p>
       )}
 
       {[...groups.entries()].map(([groupKey, rows]) => (
-        <div key={groupKey} style={styles.group}>
-          <div style={styles.groupHeader}>{groupKey}</div>
+        <div key={groupKey || '__root__'} style={styles.group}>
+          {groupKey && <div style={styles.groupHeader}>{groupKey}</div>}
           {rows.map(item => (
             <RowItem
               key={item.path}
@@ -100,12 +101,6 @@ function deriveState(item) {
   if (item.has_srt && item.annotation_blocked) return 'blocked'
   if (item.has_srt) return 'working'  // background loop will pick it up soon
   return 'transcribe'
-}
-
-function rootLabel(root) {
-  if (root === '/qb') return 'qb'
-  if (root === '/app/data/downloads') return 'transcribed'
-  return root
 }
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'

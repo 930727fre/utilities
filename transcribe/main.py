@@ -13,14 +13,16 @@ from pydantic import BaseModel
 from annotate import annotate_executor, annotate_job
 from gpu_lock import release_all_held
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
-from tasks import enumerate_playlist, executor, process_library_file, process_video
+from tasks import enumerate_playlist, executor, process_qb_file, process_video
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
-LIBRARY_ROOTS = [Path("/qb"), DOWNLOADS_DIR]
+# qb mode scans only /qb. yt-tab files in DOWNLOADS_DIR show up in the yt
+# tab's job list — no reason to also list them under qb.
+QB_ROOTS = [Path("/qb")]
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 ANNOTATION_MARKER = "※"
 MTIME_GRACE_SECONDS = 60
-LIBRARY_SCAN_INTERVAL = 30
+QB_SCAN_INTERVAL = 30
 MAX_ANNOTATION_RETRIES = 3
 
 # Per-path retry counter for the background annotation loop. In-memory:
@@ -42,6 +44,14 @@ async def lifespan(app: FastAPI):
     jobs = read_jobs()
     changed = False
     for job in jobs:
+        # Schema migration: source labels were renamed youtube→yt, library→qb.
+        src = job.get("source")
+        if src == "youtube":
+            job["source"] = "yt"
+            changed = True
+        elif src == "library":
+            job["source"] = "qb"
+            changed = True
         if job["status"] in ("DOWNLOADING", "TRANSCRIBING", "PENDING"):
             job["status"] = "FAILED"
             job["error"] = "Interrupted by restart"
@@ -51,8 +61,8 @@ async def lifespan(app: FastAPI):
         elif job["status"] == "ANNOTATING":
             # Annotation is optional; if it crashed mid-way, flip back to SUCCESS.
             # The .srt may be partially overwritten — the background loop will
-            # pick it up again if it's a library job, or the YouTube user re-runs
-            # the whole job.
+            # pick it up again if it's a qb job, or the yt user re-runs the
+            # whole job.
             job["status"] = "SUCCESS"
             job["annotation_error"] = "Interrupted by restart"
             job["updated_at"] = _now()
@@ -61,7 +71,7 @@ async def lifespan(app: FastAPI):
     if changed:
         write_jobs(jobs)
 
-    annotation_loop_task = asyncio.create_task(_library_annotation_loop())
+    annotation_loop_task = asyncio.create_task(_qb_annotation_loop())
 
     try:
         yield
@@ -85,7 +95,7 @@ async def health():
 def _new_job(job_id: str, url: str) -> dict:
     return {
         "job_id": job_id,
-        "source": "youtube",
+        "source": "yt",
         "url": url,
         "title": url,
         "status": "PENDING",
@@ -98,10 +108,10 @@ def _new_job(job_id: str, url: str) -> dict:
     }
 
 
-def _new_library_job(job_id: str, source_path: str) -> dict:
+def _new_qb_job(job_id: str, source_path: str) -> dict:
     return {
         "job_id": job_id,
-        "source": "library",
+        "source": "qb",
         "source_path": source_path,
         "title": Path(source_path).name,
         "status": "PENDING",
@@ -113,7 +123,7 @@ def _new_library_job(job_id: str, source_path: str) -> dict:
     }
 
 
-# ── YouTube API ────────────────────────────────────────────────────────────
+# ── yt API ─────────────────────────────────────────────────────────────────
 
 class SubmitRequest(BaseModel):
     url: str
@@ -164,10 +174,10 @@ async def submit_job(req: SubmitRequest):
 
 
 @app.get("/api/jobs")
-async def list_jobs(source: str = "youtube"):
+async def list_jobs(source: str = "yt"):
     return [
         j for j in read_jobs()
-        if j["status"] != "DELETED" and j.get("source", "youtube") == source
+        if j["status"] != "DELETED" and j.get("source", "yt") == source
     ]
 
 
@@ -188,8 +198,8 @@ async def retry_job(job_id: str):
     job["error"] = None
     job["updated_at"] = _now()
     upsert_job(job)
-    if job.get("source") == "library":
-        executor.submit(process_library_file, job_id)
+    if job.get("source") == "qb":
+        executor.submit(process_qb_file, job_id)
     else:
         executor.submit(process_video, job_id, job["url"])
     return {"ok": True}
@@ -201,9 +211,9 @@ async def delete_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
 
-    # YouTube jobs: clean up the files we created. Library jobs reference
-    # files we don't own — just drop the job entry, leave files alone.
-    if job.get("source", "youtube") == "youtube":
+    # yt jobs: clean up the files we created. qb jobs reference files we
+    # don't own — just drop the job entry, leave files alone.
+    if job.get("source", "yt") == "yt":
         base = job.get("basename")
         if base:
             for ext in ("mp4", "srt"):
@@ -219,9 +229,9 @@ async def delete_job(job_id: str):
     return {"ok": True}
 
 
-# ── Library API ────────────────────────────────────────────────────────────
+# ── qb API ─────────────────────────────────────────────────────────────────
 
-class LibraryTranscribeRequest(BaseModel):
+class QbTranscribeRequest(BaseModel):
     path: str
 
 
@@ -235,21 +245,11 @@ def _is_annotated_srt(srt_path: Path) -> bool:
         return False
 
 
-def _youtube_staging_stems() -> set[str]:
-    """Stems of UUID-named files still in flight as YouTube jobs — hide from Library."""
-    return {
-        j["job_id"] for j in read_jobs()
-        if j.get("source", "youtube") == "youtube"
-        and j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING")
-    }
-
-
-def _scan_library(skip_stems: set[str] | None = None) -> list[dict]:
-    """Walk LIBRARY_ROOTS, return one entry per video file. Filesystem only."""
-    skip = skip_stems or set()
+def _scan_qb() -> list[dict]:
+    """Walk QB_ROOTS, return one entry per video file. Filesystem only."""
     out = []
     now = time.time()
-    for root in LIBRARY_ROOTS:
+    for root in QB_ROOTS:
         if not root.exists():
             continue
         for video in root.rglob("*"):
@@ -264,9 +264,6 @@ def _scan_library(skip_stems: set[str] | None = None) -> list[dict]:
             if "incomplete" in [p.lower() for p in video.parts]:
                 continue
             if video.name.startswith("."):
-                continue
-            # In-flight YouTube staging file (still UUID-named pre-rename)
-            if video.stem in skip:
                 continue
             # File still being written? (e.g. just-finished rename)
             try:
@@ -295,27 +292,26 @@ def _scan_library(skip_stems: set[str] | None = None) -> list[dict]:
     return out
 
 
-def _validate_library_path(path_str: str) -> Path:
-    """Reject paths outside the library roots. Defense in depth."""
+def _validate_qb_path(path_str: str) -> Path:
+    """Reject paths outside the qb roots. Defense in depth."""
     path = Path(path_str).resolve()
-    for root in LIBRARY_ROOTS:
+    for root in QB_ROOTS:
         try:
             path.relative_to(root.resolve())
             return path
         except ValueError:
             continue
-    raise HTTPException(status_code=400, detail=f"Path not under a library root: {path_str}")
+    raise HTTPException(status_code=400, detail=f"Path not under a qb root: {path_str}")
 
 
-@app.get("/api/library")
-async def library():
-    skip = _youtube_staging_stems()
-    items = await asyncio.to_thread(_scan_library, skip)
+@app.get("/api/qb")
+async def qb():
+    items = await asyncio.to_thread(_scan_qb)
     jobs = read_jobs()
     in_flight: dict[str, str] = {}
     annotated_paths: set[str] = set()
     for j in jobs:
-        if j.get("source") != "library":
+        if j.get("source") != "qb":
             continue
         if j["status"] in ("PENDING", "TRANSCRIBING", "ANNOTATING"):
             in_flight[j.get("source_path", "")] = j["job_id"]
@@ -333,39 +329,39 @@ async def library():
     return items
 
 
-@app.post("/api/library/transcribe", status_code=201)
-async def transcribe_library_file(req: LibraryTranscribeRequest):
-    path = _validate_library_path(req.path)
+@app.post("/api/qb/transcribe", status_code=201)
+async def transcribe_qb_file(req: QbTranscribeRequest):
+    path = _validate_qb_path(req.path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
     # Reject duplicate in-flight requests for the same path.
     for j in read_jobs():
-        if (j.get("source") == "library"
+        if (j.get("source") == "qb"
                 and j.get("source_path") == str(path)
                 and j["status"] in ("PENDING", "TRANSCRIBING", "ANNOTATING")):
             raise HTTPException(status_code=409, detail="Already in flight")
 
     job_id = str(uuid.uuid4())
-    job = _new_library_job(job_id, str(path))
+    job = _new_qb_job(job_id, str(path))
     upsert_job(job)
-    executor.submit(process_library_file, job_id)
+    executor.submit(process_qb_file, job_id)
     return {"job_id": job_id, "status": "PENDING"}
 
 
 # ── Background annotation loop ────────────────────────────────────────────
 
-def _queue_pending_library_annotations():
-    """Scan library roots; for every SRT without ※, enqueue an annotation job.
+def _queue_pending_qb_annotations():
+    """Scan qb roots; for every SRT without ※, enqueue an annotation job.
 
     Skips files already in flight and files that have hit the per-path retry cap.
     """
-    items = _scan_library(_youtube_staging_stems())
+    items = _scan_qb()
     jobs = read_jobs()
     in_flight_paths = set()
     annotated_paths = set()
     for j in jobs:
-        if j.get("source") != "library":
+        if j.get("source") != "qb":
             continue
         if j["status"] in ("PENDING", "TRANSCRIBING", "ANNOTATING"):
             in_flight_paths.add(j.get("source_path"))
@@ -381,7 +377,7 @@ def _queue_pending_library_annotations():
         if _annotation_failures.get(item["path"], 0) >= MAX_ANNOTATION_RETRIES:
             continue
         job_id = str(uuid.uuid4())
-        job = _new_library_job(job_id, item["path"])
+        job = _new_qb_job(job_id, item["path"])
         job["status"] = "ANNOTATING"
         upsert_job(job)
         annotate_executor.submit(_track_annotation_outcome, job_id, item["path"])
@@ -400,11 +396,11 @@ def _track_annotation_outcome(job_id: str, source_path: str):
         _annotation_failures.pop(source_path, None)
 
 
-async def _library_annotation_loop():
+async def _qb_annotation_loop():
     """Periodically scan for unannotated SRTs and queue them."""
     while True:
         try:
-            await asyncio.to_thread(_queue_pending_library_annotations)
+            await asyncio.to_thread(_queue_pending_qb_annotations)
         except Exception:
             traceback.print_exc()
-        await asyncio.sleep(LIBRARY_SCAN_INTERVAL)
+        await asyncio.sleep(QB_SCAN_INTERVAL)
