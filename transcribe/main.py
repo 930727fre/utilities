@@ -26,7 +26,7 @@ DOWNLOADS_DIR = Path("/app/data/downloads")
 # tab's job list — no reason to also list them under qb.
 QB_ROOTS = [Path("/qb")]
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
-ANNOTATION_MARKER = "※"
+ANNOTATION_MARKER = "※ annotated"
 MTIME_GRACE_SECONDS = 60
 QB_SCAN_INTERVAL = 30
 MAX_ANNOTATION_RETRIES = 3
@@ -255,9 +255,10 @@ class QbTranscribeRequest(BaseModel):
 
 
 def _is_annotated_srt(srt_path: Path) -> bool:
-    """`※` anywhere in the SRT means annotation already ran. Includes the
-    99:59:59 sentinel cue appended even on 0-note passes, so this is a
-    complete check — no need for a jobs.json overlay."""
+    """`※ annotated` anywhere in the SRT means annotation already ran.
+    Includes the 99:59:59 sentinel cue appended even on 0-note passes, so
+    this is a complete check — no need for a jobs.json overlay. (Producer
+    source sentinels use `※ source: …` which won't false-trigger this.)"""
     try:
         with open(srt_path, "rb") as f:
             content = f.read()

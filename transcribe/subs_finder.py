@@ -23,6 +23,7 @@ from typing import Optional
 
 import requests
 
+from srt_source import stamp_source
 from subs_verifier import verify_candidate
 
 API_BASE = "https://api.opensubtitles.com/api/v1"
@@ -219,7 +220,10 @@ def find_subs(video: Path) -> Optional[Path]:
     out.write_text(srt_text, encoding="utf-8")
     print(f"[subs-finder] wrote {out.name!r} from OpenSubtitles", flush=True)
 
+    # ffsubsync overwrites the SRT, so source-stamp AFTER it (whether it
+    # succeeded or fell through).
     _resync_inplace(video, out)
+    stamp_source(out, "opensubtitles")
     return out
 
 

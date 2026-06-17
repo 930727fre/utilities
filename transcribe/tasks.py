@@ -11,6 +11,7 @@ import yt_dlp
 
 from annotate import annotate_executor, annotate_job
 from gpu_lock import gpu_lock
+from srt_source import stamp_source
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
@@ -189,6 +190,7 @@ def _run_whisper(job_id: str, media_path: Path, srt_path: Path):
         raise RuntimeError("Whisper service returned empty SRT")
 
     srt_path.write_text(srt_text, encoding="utf-8")
+    stamp_source(srt_path, "whisper")
 
 
 def _queue_annotation(job_id: str):

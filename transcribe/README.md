@@ -3,7 +3,7 @@
 Two ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
-- **qb tab** — view-only: every video in qBittorrent's downloads (`/qb`). No buttons; a background loop handles everything automatically — videos without SRT get Whisper'd, SRTs without `※` get annotated.
+- **qb tab** — view-only: every video in qBittorrent's downloads (`/qb`). No buttons; a background loop handles everything automatically — videos without SRT get Whisper'd, SRTs without `※ annotated` get annotated.
 
 In both cases, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
@@ -86,9 +86,9 @@ Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` jobs flip to `FAILED` on star
 
 ## Annotation
 
-Claude scans the SRT for U.S.-cultural references a Taiwanese viewer might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues. The annotated SRT overwrites the original; the `※` marker is the persistent on-disk signal that a file has been annotated.
+Claude scans the SRT for U.S.-cultural references a Taiwanese viewer might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues. After annotation, two far-future sentinel cues (at 99:59:58 / 99:59:59, never displayed during playback) sit at the end of every processed SRT: `※ source: <whisper|opensubtitles>` recording which pipeline step produced the SRT (only if we produced it; bundled / manually-dropped SRTs carry no source tag), and `※ annotated` marking the annotation pass complete. The presence of `※ annotated` on disk is the only annotation-state signal — no jobs.json overlay.
 
-A background loop scans `/qb` every 30s for both whisper work (video without SRT) and annotation work (SRT without `※`), and queues each through the appropriate executor. Per-path failure counters (whisper / annotation tracked separately) cap at 3 attempts each (in-memory; container restart resets them).
+A background loop scans `/qb` every 30s for both whisper work (video without SRT) and annotation work (SRT without `※ annotated`), and queues each through the appropriate executor. Per-path failure counters (whisper / annotation tracked separately) cap at 3 attempts each (in-memory; container restart resets them).
 
 **Before queuing whisper, two rescue steps fire** (in order, cheapest first):
 
