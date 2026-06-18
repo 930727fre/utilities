@@ -5,10 +5,10 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./data:/app/data
-      # /qb is the annotation library. transcribe spawns aria2c subprocesses
-      # straight into here when the user submits a magnet via the qb tab —
-      # no external qBittorrent service in the picture. Single source of
-      # truth, no cp loop, no UI clicks to remember on a fresh machine.
+      # /qb is the annotation library. Each magnet submitted via the qb tab
+      # gets its own aria2c subprocess that writes a per-torrent wrapper
+      # folder in here; transcribe's annotation loop then reads videos out
+      # for whisper + Claude. Single bind mount, single source of truth.
       - ./data/library:/qb
     environment:
       - JOBS_FILE=/app/data/jobs.json

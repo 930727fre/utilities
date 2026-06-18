@@ -46,3 +46,15 @@ export async function submitMagnet(magnet) {
   }
   return r.json()
 }
+
+export async function listTorrents() {
+  const r = await fetch(`${BASE}/api/qb/torrents`)
+  if (!r.ok) throw new Error('Failed to list torrents')
+  return r.json()
+}
+
+export async function deleteTorrent(wrapper) {
+  const r = await fetch(`${BASE}/api/qb/torrents/${encodeURIComponent(wrapper)}`, { method: 'DELETE' })
+  if (!r.ok) throw new Error('Delete failed')
+  return r.json()
+}

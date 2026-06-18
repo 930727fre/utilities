@@ -1,0 +1,212 @@
+"""One-shot aria2c subprocess per magnet.
+
+Design contract:
+  * No daemon, no RPC, no shared session state. Every magnet submission
+    is a fresh `aria2c` subprocess that lives just long enough to download
+    + seed under our limits, then exits.
+  * State is read from two places only — the filesystem under `/qb` (the
+    per-torrent wrapper folders + aria2c's `.aria2` control file) and an
+    in-memory dict of running subprocesses. Container restart clears the
+    in-memory dict and kills the subprocesses; users notice via UI rather
+    than state corruption.
+  * Each torrent lands in its own per-torrent wrapper folder under `/qb`
+    regardless of single- vs multi-file, derived from the magnet's `dn=`
+    parameter. DELETE always rmtree's the wrapper.
+
+Why no `.sh` on-bt-download-complete hook this time: aria2c writes a
+`<file>.aria2` control file while a download is in flight and deletes it
+the moment all pieces are verified. That's a clean filesystem-level
+"download done" signal we can read directly — no callback plumbing.
+"""
+import re
+import shutil
+import subprocess
+import threading
+from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlparse
+
+QB_LIBRARY = Path("/qb")
+
+# Seed limits applied to every torrent. aria2c exits when either limit is
+# hit. Numbers match the qBittorrent setup we used before the rewrite.
+SEED_TIME_MIN = 1440
+SEED_RATIO = 1.0
+
+_UNSAFE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# wrapper folder name → live Popen handle. Used by `list_torrents` to know
+# which wrappers still have a running aria2c, and by `delete_torrent` to
+# kill it. Restart wipes this map (and kills the subprocesses with the
+# parent container, since they're our children).
+_procs: dict[str, subprocess.Popen] = {}
+_procs_lock = threading.Lock()
+
+
+# ── Wrapper folder naming ──────────────────────────────────────────────────
+
+def _magnet_display_name(magnet: str) -> str | None:
+    """Pull the `dn=` parameter from a magnet URI, URL-decoded."""
+    try:
+        u = urlparse(magnet)
+        dn = parse_qs(u.query).get("dn", [None])[0]
+        if dn:
+            return unquote(dn)
+    except Exception:
+        pass
+    return None
+
+
+def _safe_folder(name: str) -> str:
+    safe = _UNSAFE_NAME.sub("_", name).strip(" .\t\n")
+    return safe[:180] or "torrent"
+
+
+def _pick_wrapper_dir(magnet: str) -> Path:
+    """Pick a free per-torrent wrapper folder under /qb for this magnet.
+
+    Always puts the download inside its own folder so single-file torrents
+    don't dump their .mkv + sidecar SRT loose at /qb root. Disambiguates
+    against an existing folder with the same dn= by appending ` (2)`,
+    ` (3)`, ... in case the user re-submits the same magnet or two
+    different torrents share a dn=.
+    """
+    base = _safe_folder(_magnet_display_name(magnet) or "torrent")
+    candidate = QB_LIBRARY / base
+    i = 2
+    while candidate.exists():
+        candidate = QB_LIBRARY / f"{base} ({i})"
+        i += 1
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+# ── Submit / list / delete ─────────────────────────────────────────────────
+
+def submit(magnet: str) -> str:
+    """Spawn an aria2c subprocess for this magnet. Returns wrapper name."""
+    wrapper = _pick_wrapper_dir(magnet)
+    cmd = [
+        "aria2c",
+        f"--dir={wrapper}",
+        f"--seed-time={SEED_TIME_MIN}",
+        f"--seed-ratio={SEED_RATIO}",
+        "--bt-save-metadata=true",
+        "--enable-color=false",
+        "--console-log-level=warn",
+        "--summary-interval=0",
+        magnet,
+    ]
+    print(f"[aria2c] launching for {wrapper.name}", flush=True)
+    proc = subprocess.Popen(
+        cmd,
+        # stdout: aria2c's progress spam isn't worth surfacing in our logs.
+        stdout=subprocess.DEVNULL,
+        # stderr: aria2c writes real errors (dead trackers, hash mismatches,
+        # "no peers" complaints) here. Pipe through a drain thread into
+        # transcribe-app's own log so a stuck / failed torrent is at least
+        # visible to `docker logs`.
+        stderr=subprocess.PIPE,
+        # Detach from our stdin so a SIGHUP / pipe-close to the parent
+        # doesn't propagate. Children still die on container SIGTERM
+        # (default).
+        stdin=subprocess.DEVNULL,
+    )
+    with _procs_lock:
+        _procs[wrapper.name] = proc
+
+    short = wrapper.name[:30]
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        for raw in proc.stderr:
+            text = raw.decode("utf-8", errors="replace").rstrip()
+            if text:
+                print(f"[aria2c {short}] {text}", flush=True)
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    return wrapper.name
+
+
+def _phase(wrapper: Path, proc: subprocess.Popen | None) -> str:
+    """Derive `downloading` / `seeding` / `done` / `orphaned` from disk + proc state.
+
+    The `.aria2` control file is aria2c's own download-in-progress marker,
+    written next to each output file and deleted when all pieces verify.
+    So its presence/absence is the canonical "are we still downloading"
+    signal — no hook script or RPC needed to read it.
+    """
+    if proc is None:
+        # No subprocess registered (post-restart, or never had one).
+        # The torrent's files are still on disk but nobody's seeding.
+        return "orphaned"
+    if proc.poll() is not None:
+        # aria2c exited — seed limit met, or download failed early.
+        return "done"
+    if any(wrapper.rglob("*.aria2")):
+        return "downloading"
+    return "seeding"
+
+
+def list_torrents() -> list[dict]:
+    """One entry per wrapper folder under /qb."""
+    out = []
+    if not QB_LIBRARY.exists():
+        return out
+    with _procs_lock:
+        procs_snapshot = dict(_procs)
+        # Drop entries whose subprocess has exited AND whose wrapper no
+        # longer exists — keeps the dict from growing forever.
+        for name, proc in list(_procs.items()):
+            if proc.poll() is not None and not (QB_LIBRARY / name).exists():
+                _procs.pop(name, None)
+
+    for wrapper in sorted(QB_LIBRARY.iterdir()):
+        if not wrapper.is_dir():
+            continue
+        proc = procs_snapshot.get(wrapper.name)
+        phase = _phase(wrapper, proc)
+        out.append({
+            "name": wrapper.name,
+            "phase": phase,
+        })
+    return out
+
+
+def delete(wrapper_name: str) -> None:
+    """Kill the subprocess (if running) and rmtree the wrapper folder."""
+    with _procs_lock:
+        proc = _procs.pop(wrapper_name, None)
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    wrapper = (QB_LIBRARY / wrapper_name).resolve()
+    # Safety: never touch anything outside /qb.
+    try:
+        wrapper.relative_to(QB_LIBRARY.resolve())
+    except ValueError:
+        return
+    if wrapper.exists() and wrapper.is_dir():
+        shutil.rmtree(wrapper, ignore_errors=True)
+
+
+def shutdown() -> None:
+    """Kill every still-running aria2c on lifespan teardown.
+
+    Docker's SIGTERM would do this anyway via the process tree, but doing
+    it explicitly lets us reap the children and surface log lines if any
+    refused to die.
+    """
+    with _procs_lock:
+        for name, proc in _procs.items():
+            if proc.poll() is None:
+                proc.terminate()
+        for name, proc in _procs.items():
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        _procs.clear()

@@ -3,11 +3,11 @@
 Two ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
-- **qb tab** — paste a magnet link, aria2c downloads into `data/library/` and seeds for 24 h. The library list shows every video found there, including any torrent-bundled SRT siblings.
+- **qb tab** — paste a magnet link. We spawn a one-shot `aria2c` subprocess that writes into `data/library/<per-torrent-wrapper>/` and keeps seeding until its limit (1440 min or ratio 1.0). The qb tab lists every wrapper folder; phase comes from filesystem inspection — `.aria2` control file present means downloading, gone means seeding, subprocess exit means done.
 
 In both cases, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
-`data/downloads/` holds the yt-tab output; `data/library/` holds aria2c's BT downloads — mounted at `/qb` inside the container. [webdav](../webdav) reads both for Infuse playback (read-only).
+`data/downloads/` holds the yt-tab output; `data/library/` holds the BT downloads — mounted at `/qb` inside the container. [webdav](../webdav) reads both for Infuse playback (read-only). The qb-side pipeline never writes to `jobs.json` — every torrent is a directory under `/qb` plus (while live) an in-memory `subprocess.Popen` handle.
 
 ## Stack
 
@@ -16,7 +16,7 @@ In both cases, Claude annotation runs automatically once a transcript exists. Th
 | Frontend | Vite + React — tab between yt (URL submit) and qb (magnet submit + library browser) |
 | Backend | FastAPI on port 8000 — API + in-process orchestrator |
 | Worker | `ThreadPoolExecutor(max_workers=1)` — serializes our per-job state mutations |
-| Downloader | `yt-dlp` (yt) + `aria2c` (qb magnet, with 1440 min / ratio 1.0 seed limits) |
+| Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (qb, 1440 min / ratio 1.0 seed limits) |
 | Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
 | SRT matcher | Claude (haiku) via tool-use — rescues bundled `.srt` files that strict same-stem matching misses |
@@ -32,9 +32,12 @@ data/downloads/                  ← YouTube output
   <sanitized title>.mp4
   <sanitized title>.srt          ← annotated in place
 
-data/library/<torrent-folder>/   ← aria2c's BT downloads (mounted as /qb inside container)
-  Show.S01E01.mkv
+data/library/<wrapper>/          ← per-torrent wrapper; aria2 service writes
+  Show.S01E01.mkv                  in here, transcribe reads via /qb mount
   Show.S01E01.srt                ← written by qb transcribe, or torrent-bundled
+
+  (for multi-file torrents, aria2 adds another nested folder named after
+   the torrent's metadata "name" field inside <wrapper>; harmless, predictable)
 ```
 
 YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for filesystem (control chars and `<>:"/\|?*` replaced with `_`, capped at 180 chars). Infuse auto-loads any `.srt` sibling as a sidecar.
@@ -69,7 +72,9 @@ docker compose up -d --build
 | `POST` | `/api/jobs/{id}/retry` | Re-queue a failed job |
 | `DELETE` | `/api/jobs/{id}` | Mark deleted; yt jobs also remove their mp4 + srt |
 | `GET`  | `/api/qb` | Scan `/qb`; return file + annotation state |
-| `POST` | `/api/qb/magnet` | `{magnet}`: spawn aria2c to download a magnet into `/qb`; job goes SUCCESS when the first file lands |
+| `POST` | `/api/qb/magnet` | `{magnet}`: spawn an `aria2c` subprocess; returns `{wrapper}` (the per-torrent folder name under `/qb`) |
+| `GET`  | `/api/qb/torrents` | One entry per wrapper folder + its phase (`downloading` / `seeding` / `done` / `orphaned`) |
+| `DELETE` | `/api/qb/torrents/{wrapper}` | Kill the subprocess (if running) + rmtree the wrapper folder |
 | `POST` | `/api/qb/transcribe` | `{path}`: manually trigger whisper on a qb file (background loop already handles this; useful for power/curl override) |
 
 ## Job states
@@ -77,13 +82,11 @@ docker compose up -d --build
 ```
 yt:        PENDING → DOWNLOADING → TRANSCRIBING → ANNOTATING → SUCCESS
                                                  ↘ FAILED
-qb magnet: PENDING → DOWNLOADING → SUCCESS                   (aria2c keeps seeding in bg)
-                                  ↘ FAILED
 qb manual: PENDING → TRANSCRIBING → ANNOTATING → SUCCESS     (legacy /api/qb/transcribe path)
                                    ↘ FAILED
 ```
 
-qb magnet jobs flip to SUCCESS as soon as the first file lands — they only represent the aria2c download phase. Whisper + annotation for each video file in the torrent then happen via the background `_qb_work_loop`, which scans `/qb` every 30 s and queues anything that needs work.
+Magnet submissions don't enter `jobs.json` at all. The qb-tab UI shows two live views: the aria2 service's torrent list (downloading + seeding state, from `/api/qb/torrents`) and the filesystem scan (annotation state, from `/api/qb`). Whisper + annotation per video are queued by the background `_qb_work_loop` once files land in `/qb`.
 
 Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` jobs flip to `FAILED` on startup. `ANNOTATING` crashes flip to `SUCCESS` with `annotation_error` set; for qb jobs the background loop will retry.
 

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import time
 import traceback
 import uuid
@@ -12,12 +13,13 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+import qb_torrents
 from annotate import annotate_executor, annotate_job
 from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from subs_finder import find_subs
-from tasks import enumerate_playlist, executor, process_qb_file, process_qb_magnet, process_video
+from tasks import enumerate_playlist, executor, process_qb_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
@@ -98,6 +100,7 @@ async def lifespan(app: FastAPI):
         annotation_loop_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         annotate_executor.shutdown(wait=False, cancel_futures=True)
+        qb_torrents.shutdown()
         # Free any GPU leases still held — the broker has no TTL, so without
         # this a SIGTERM mid-whisper leaves the next acquire blocked forever.
         release_all_held()
@@ -140,37 +143,6 @@ def _new_qb_job(job_id: str, source_path: str) -> dict:
         "created_at": _now(),
         "updated_at": _now(),
     }
-
-
-def _new_qb_magnet_job(job_id: str, magnet: str) -> dict:
-    return {
-        "job_id": job_id,
-        "source": "qb",
-        "magnet": magnet,
-        # Title backfills from the magnet's `dn=` param (display name) so the
-        # UI has something readable to show before aria2c learns the real
-        # filename via metadata exchange.
-        "title": _magnet_display_name(magnet) or "(fetching metadata…)",
-        "status": "PENDING",
-        "annotated": False,
-        "error": None,
-        "annotation_error": None,
-        "created_at": _now(),
-        "updated_at": _now(),
-    }
-
-
-def _magnet_display_name(magnet: str) -> str | None:
-    try:
-        u = urlparse(magnet)
-        params = parse_qs(u.query)
-        dn = params.get("dn", [None])[0]
-        if dn:
-            from urllib.parse import unquote
-            return unquote(dn)
-    except Exception:
-        pass
-    return None
 
 
 # ── yt API ─────────────────────────────────────────────────────────────────
@@ -249,10 +221,7 @@ async def retry_job(job_id: str):
     job["updated_at"] = _now()
     upsert_job(job)
     if job.get("source") == "qb":
-        if job.get("magnet"):
-            executor.submit(process_qb_magnet, job_id, job["magnet"])
-        else:
-            executor.submit(process_qb_file, job_id)
+        executor.submit(process_qb_file, job_id)
     else:
         executor.submit(process_video, job_id, job["url"])
     return {"ok": True}
@@ -264,17 +233,20 @@ async def delete_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Not found")
 
-    # yt jobs: clean up the files we created. qb jobs reference files we
-    # don't own — just drop the job entry, leave files alone.
     if job.get("source", "yt") == "yt":
+        # Clean up the mp4 + srt we put under data/downloads/.
         base = job.get("basename")
         if base:
             for ext in ("mp4", "srt"):
                 (DOWNLOADS_DIR / f"{base}.{ext}").unlink(missing_ok=True)
-        # In case the job died after download but before rename, also clean up
-        # the staging UUID-named file.
+        # And the staging UUID-named files in case the job died mid-rename.
         (DOWNLOADS_DIR / f"{job_id}.mp4").unlink(missing_ok=True)
         (DOWNLOADS_DIR / f"{job_id}.srt").unlink(missing_ok=True)
+
+    # qb jobs reference files transcribe doesn't own through jobs.json (the
+    # legacy /api/qb/transcribe path) or are stale magnet-era entries from
+    # earlier schema versions. Either way: just drop the entry, leave the
+    # filesystem alone. Torrents are managed via /api/qb/torrent/{wrapper}.
 
     job["status"] = "DELETED"
     job["updated_at"] = _now()
@@ -387,23 +359,30 @@ class QbMagnetRequest(BaseModel):
 
 @app.post("/api/qb/magnet", status_code=201)
 async def submit_magnet(req: QbMagnetRequest):
+    """Spawn a one-shot aria2c subprocess for this magnet. The torrent
+    lives entirely in the subprocess's lifetime + the per-torrent wrapper
+    folder under /qb; nothing is persisted in jobs.json."""
     if not req.magnet.startswith("magnet:"):
         raise HTTPException(status_code=400, detail="must be a magnet: URI")
+    try:
+        wrapper = qb_torrents.submit(req.magnet)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"aria2c launch failed: {exc}")
+    return {"wrapper": wrapper}
 
-    # Reject duplicate submissions of the same magnet that's already in
-    # flight. We compare the raw URI rather than the infohash because we
-    # don't want to drag a bencode parser in just for this check.
-    for j in read_jobs():
-        if (j.get("source") == "qb"
-                and j.get("magnet") == req.magnet
-                and j["status"] in ("PENDING", "DOWNLOADING")):
-            raise HTTPException(status_code=409, detail="Already in flight")
 
-    job_id = str(uuid.uuid4())
-    job = _new_qb_magnet_job(job_id, req.magnet)
-    upsert_job(job)
-    executor.submit(process_qb_magnet, job_id, req.magnet)
-    return {"job_id": job_id, "status": "PENDING"}
+@app.get("/api/qb/torrents")
+async def list_torrents():
+    """One entry per wrapper folder under /qb, phase derived live from
+    aria2c's `.aria2` control file + the subprocess registry."""
+    return qb_torrents.list_torrents()
+
+
+@app.delete("/api/qb/torrents/{wrapper}")
+async def delete_torrent(wrapper: str):
+    """Kill the subprocess (if running) + rmtree the wrapper folder."""
+    qb_torrents.delete(wrapper)
+    return {"ok": True}
 
 
 @app.post("/api/qb/transcribe", status_code=201)

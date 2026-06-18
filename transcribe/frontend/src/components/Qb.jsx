@@ -1,39 +1,37 @@
 import { useState, useEffect, useRef } from 'react'
-import { listQb, listJobs, submitMagnet, retryJob, deleteJob } from '../api'
+import { listQb, listTorrents, submitMagnet, deleteTorrent } from '../api'
 
-// qb tab now has two regions: the magnet submission form + active downloads
-// at top (symmetric to the yt tab), and the library listing below. Once a
-// magnet's first file lands the download job flips to SUCCESS — whisper +
-// annotation are tracked per-file in the library list below, not on the job.
+// qb tab has two regions: the magnet form + active-torrent list at the
+// top (each row = one wrapper folder, phase derived from filesystem + an
+// in-memory subprocess registry on the backend), and the library list
+// below (filesystem scan, annotation state). No qb-side persistence in
+// jobs.json — the wrapper folder name IS the identifier.
 
-const STATUS_LABEL = {
-  PENDING:     '○',
-  DOWNLOADING: '○',
-  SUCCESS:     '',
-  FAILED:      '!',
+const PHASE_LABEL = {
+  downloading: '○',
+  seeding:     '↑',
+  done:        '✓',
+  orphaned:    '–',
 }
-const STATUS_TITLE = {
-  PENDING:     'Pending',
-  DOWNLOADING: 'Downloading',
-  SUCCESS:     'Landed',
-  FAILED:      'Failed',
+const PHASE_TITLE = {
+  downloading: 'Downloading',
+  seeding:     'Seeding',
+  done:        'Seed limit reached',
+  orphaned:    'Subprocess gone (container was restarted); files on disk are still usable',
 }
-const isWorking = (s) => s === 'PENDING' || s === 'DOWNLOADING'
 
 export default function Qb() {
   const [items, setItems] = useState([])
-  const [jobs, setJobs] = useState([])
+  const [torrents, setTorrents] = useState([])
   const [magnet, setMagnet] = useState('')
-  const [expandedIds, setExpandedIds] = useState(() => new Set())
+  const [expanded, setExpanded] = useState(() => new Set())
   const submittingRef = useRef(false)
 
   async function refresh() {
     try {
-      const [i, j] = await Promise.all([listQb(), listJobs('qb')])
-      setItems(i)
-      // Only show magnet-initiated jobs; the legacy `/api/qb/transcribe`
-      // entry doesn't carry a magnet field and is for manual re-runs only.
-      setJobs(j.filter(x => x.magnet))
+      const [lib, t] = await Promise.all([listQb(), listTorrents()])
+      setItems(lib)
+      setTorrents(t)
     } catch (e) {
       console.error(e)
     }
@@ -45,11 +43,11 @@ export default function Qb() {
     return () => clearInterval(id)
   }, [])
 
-  function toggleExpand(id) {
-    setExpandedIds(prev => {
+  function toggleExpand(key) {
+    setExpanded(prev => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
   }
@@ -69,23 +67,18 @@ export default function Qb() {
     }
   }
 
-  async function handleRetry(id) {
-    await retryJob(id)
-    await refresh()
-  }
-
-  async function handleDelete(id) {
-    if (!confirm('Delete this job? (downloaded files stay on disk)')) return
-    await deleteJob(id)
-    setExpandedIds(prev => {
+  async function handleDelete(wrapper) {
+    if (!confirm('Delete this torrent and its files?')) return
+    await deleteTorrent(wrapper)
+    setExpanded(prev => {
       const next = new Set(prev)
-      next.delete(id)
+      next.delete(wrapper)
       return next
     })
     await refresh()
   }
 
-  const sortedJobs = [...jobs].sort((a, b) => b.created_at.localeCompare(a.created_at))
+  const sortedTorrents = [...torrents].sort((a, b) => a.name.localeCompare(b.name))
 
   // qBittorrent typically makes one folder per torrent / season — group by it.
   // Loose files at /qb root land under an empty group with no header.
@@ -124,39 +117,29 @@ export default function Qb() {
         </button>
       </div>
 
-      {sortedJobs.length > 0 && (
-        <div style={styles.jobsGrid}>
-          {sortedJobs.map(job => {
-            const isExpanded = expandedIds.has(job.job_id)
-            const label = STATUS_LABEL[job.status] ?? ''
+      {sortedTorrents.length > 0 && (
+        <div style={styles.torrentsGrid}>
+          {sortedTorrents.map(t => {
+            const isExpanded = expanded.has(t.name)
+            const label = PHASE_LABEL[t.phase] ?? ''
             return (
-              <div key={`${job.job_id}-${isExpanded}`} className="fade-in" style={styles.card} onClick={() => toggleExpand(job.job_id)}>
+              <div key={`${t.name}-${isExpanded}`} className="fade-in" style={styles.card} onClick={() => toggleExpand(t.name)}>
                 <div style={styles.topRow}>
                   <div style={styles.info}>
-                    <div style={styles.jobTitle}>{job.title}</div>
+                    <div style={styles.cardTitle}>{t.name}</div>
                   </div>
                   <div style={styles.statusSlot}>
                     {label && (
-                      <span className={isWorking(job.status) ? 'status-pulse' : ''} style={styles.statusGlyph} title={STATUS_TITLE[job.status] || job.status}>{label}</span>
+                      <span className={t.phase === 'downloading' ? 'status-pulse' : ''} style={styles.statusGlyph} title={PHASE_TITLE[t.phase] || t.phase}>{label}</span>
                     )}
                   </div>
                 </div>
                 {isExpanded && (
                   <div style={styles.actionRow}>
-                    <div style={{ ...styles.actionSlot, display: 'flex', gap: 16, alignItems: 'center' }}>
-                      {job.status === 'FAILED' && (
-                        <button style={styles.iconBtn} title="Retry"
-                          onClick={e => { e.stopPropagation(); handleRetry(job.job_id) }}>↻</button>
-                      )}
-                    </div>
-                    <div style={{ ...styles.actionSlot, textAlign: 'right' }}>
-                      <button style={styles.deleteBtn} title="Delete job entry (downloaded files stay)"
-                        onClick={e => { e.stopPropagation(); handleDelete(job.job_id) }}>✕</button>
-                    </div>
+                    <div style={{ flex: 1 }} />
+                    <button style={styles.deleteBtn} title="Delete torrent + files"
+                      onClick={e => { e.stopPropagation(); handleDelete(t.name) }}>✕</button>
                   </div>
-                )}
-                {isExpanded && job.status === 'FAILED' && job.error && (
-                  <p style={styles.errorText}>{job.error}</p>
                 )}
               </div>
             )
@@ -164,7 +147,7 @@ export default function Qb() {
         </div>
       )}
 
-      {items.length === 0 && sortedJobs.length === 0 && (
+      {items.length === 0 && sortedTorrents.length === 0 && (
         <p style={styles.empty}>No torrents yet. Paste a magnet link to start.</p>
       )}
 
@@ -206,7 +189,6 @@ function deriveState(item) {
   if (item.has_annotation) return 'done'
   if (!item.has_srt && item.whisper_blocked) return 'whisper_blocked'
   if (item.has_srt && item.annotation_blocked) return 'annotation_blocked'
-  // Pending whisper or annotation — background loop will pick it up within 30s.
   return 'working'
 }
 
@@ -227,7 +209,7 @@ const styles = {
     lineHeight: 1,
   },
 
-  jobsGrid: { display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24 },
+  torrentsGrid: { display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24 },
   card: {
     background: '#2c2c2e', borderRadius: 12,
     border: '1px solid #3a3a3c',
@@ -238,24 +220,17 @@ const styles = {
   },
   topRow: { display: 'flex', alignItems: 'center', gap: 12 },
   info: { flex: 1, minWidth: 0 },
-  jobTitle: { fontSize: 14, color: '#e8e3d9', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  cardTitle: { fontSize: 14, color: '#e8e3d9', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   statusSlot: { display: 'flex', alignItems: 'center', flexShrink: 0 },
   statusGlyph: {
     color: '#aeaeb2', fontSize: 18, fontWeight: 700, lineHeight: 1,
     cursor: 'default', fontFamily: MONO,
   },
   actionRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 },
-  actionSlot: { minWidth: 24 },
-  iconBtn: {
-    background: 'none', border: 'none', color: '#e8e3d9',
-    fontSize: 24, fontWeight: 700, lineHeight: 1, cursor: 'pointer', padding: 0,
-    fontFamily: MONO,
-  },
   deleteBtn: {
     background: 'none', border: 'none', color: '#636366',
     fontSize: 18, padding: 0, cursor: 'pointer', lineHeight: 1,
   },
-  errorText: { fontSize: 12, color: '#aeaeb2', marginTop: 8, wordBreak: 'break-all' },
 
   empty: { color: '#636366', textAlign: 'center', marginTop: 60, fontSize: 14 },
 

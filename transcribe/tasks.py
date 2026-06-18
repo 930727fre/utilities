@@ -1,9 +1,6 @@
 import functools
 import os
 import re
-import subprocess
-import threading
-import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -18,19 +15,10 @@ from srt_source import stamp_source
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
-QB_LIBRARY = Path("/qb")
-ARIA2_HOOK_DIR = Path("/app/data/aria2-hooks")
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
-
-# aria2c seed limits. Match qBittorrent's old "seed 24h then stop" behavior.
-# aria2c exits naturally after either limit is reached; we don't track or
-# manage that — the subprocess just lingers as a child of transcribe-app
-# and goes down with the container if not yet done.
-ARIA2_SEED_TIME_MIN = 1440
-ARIA2_SEED_RATIO = 1.0
 
 # Whisper serialization happens upstream (gpu_lock + whisper container's own
 # internal queue), but we keep our own single-threaded executor so this
@@ -258,141 +246,6 @@ def _run_transcription(job_id: str, staging_mp4: str):
     upsert_job(job)
 
     _queue_annotation(job_id)
-
-
-@_catch_unhandled
-def process_qb_magnet(job_id: str, magnet: str):
-    """qb path (download): aria2c a magnet into /qb library, then mark SUCCESS.
-
-    Whisper + annotation happen via the background _qb_work_loop in main.py
-    once the downloaded files appear in /qb — we don't run them inline here
-    because multi-file torrents (TV seasons) produce N video files and forcing
-    them through this single job's lifecycle would either serialize them
-    badly or require splitting into sub-jobs.
-
-    aria2c keeps running after download to seed (see ARIA2_SEED_TIME_MIN); we
-    detect download completion via `--on-download-complete=<script>` writing
-    a marker file, and return without waiting for the seed phase to finish.
-    The aria2c subprocess is a child of transcribe-app's PID 1, so it's
-    cleaned up by docker stop.
-    """
-    job = get_job(job_id)
-    if not job or job["status"] in ("DELETED", "SUCCESS", "DOWNLOADING"):
-        return
-
-    QB_LIBRARY.mkdir(parents=True, exist_ok=True)
-    ARIA2_HOOK_DIR.mkdir(parents=True, exist_ok=True)
-
-    job["status"] = "DOWNLOADING"
-    job["updated_at"] = _now()
-    upsert_job(job)
-
-    # aria2c invokes the hook with $1=gid, $2=file-count, $3=path-of-the-file.
-    # We just record $3 to a marker file the parent polls.
-    #
-    # Hook flag pitfall: `--on-download-complete` in BT mode fires *twice*
-    # — once for the metadata fetch (when --bt-save-metadata writes the
-    # .torrent) with $3 empty, and once for actual seeding-done (which is
-    # 24 h away here). Neither is what we want. `--on-bt-download-complete`
-    # is the BT-specific "all pieces downloaded, about to switch to seed-
-    # only mode" hook, which is exactly the signal we want.
-    marker = ARIA2_HOOK_DIR / f"{job_id}.done"
-    marker.unlink(missing_ok=True)
-    hook = ARIA2_HOOK_DIR / f"{job_id}.sh"
-    hook.write_text(f'#!/bin/sh\necho "$3" > "{marker}"\n')
-    hook.chmod(0o755)
-
-    cmd = [
-        "aria2c",
-        f"--dir={QB_LIBRARY}",
-        f"--seed-time={ARIA2_SEED_TIME_MIN}",
-        f"--seed-ratio={ARIA2_SEED_RATIO}",
-        f"--on-bt-download-complete={hook}",
-        "--bt-save-metadata=true",
-        # No --check-integrity / --allow-overwrite: those only matter if
-        # someone re-submits a magnet whose files already exist on disk.
-        # In normal flow they don't — resume-mid-download is handled by
-        # the .aria2 control file (untouched by us), and annotation only
-        # ever fires AFTER aria2c finishes downloading (and has already
-        # auto-deleted the .aria2). By the time annotation modifies an
-        # SRT, aria2c is in seed-only mode and won't re-download anyway.
-        "--summary-interval=30",
-        "--enable-color=false",
-        "--console-log-level=warn",
-        magnet,
-    ]
-
-    print(f"[aria2c {job_id[:8]}] starting", flush=True)
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError:
-        _fail(job_id, "aria2c not installed in container")
-        return
-
-    # Drain aria2c's stdout to our own logs so we can see what it's doing
-    # (and so Popen.stdout's pipe buffer doesn't fill and deadlock the child).
-    def _drain():
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line:
-                print(f"[aria2c {job_id[:8]}] {line}", flush=True)
-    threading.Thread(target=_drain, daemon=True).start()
-
-    # Wait for first download-complete signal (marker file appears) OR for
-    # aria2c to die (error case) OR job DELETED.
-    poll_interval = 5
-    while not marker.exists():
-        current = get_job(job_id)
-        if not current or current["status"] == "DELETED":
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-            hook.unlink(missing_ok=True)
-            return
-        if proc.poll() is not None:
-            _fail(job_id, f"aria2c exited rc={proc.returncode} before any download completed")
-            hook.unlink(missing_ok=True)
-            return
-        time.sleep(poll_interval)
-
-    completed_path = marker.read_text().strip()
-    print(f"[aria2c {job_id[:8]}] first file complete: {completed_path}", flush=True)
-
-    # Mark job SUCCESS. Note we don't wait for ALL files in a multi-file torrent
-    # to finish — the background _qb_work_loop will pick up each video file as
-    # it lands and run whisper + annotation independently. The job here only
-    # represents "the magnet was accepted and at least one file landed."
-    job = get_job(job_id)
-    if not job or job["status"] == "DELETED":
-        return
-
-    job["status"] = "SUCCESS"
-    # Stash the path so the UI can show "the torrent went here" instead of
-    # the bare magnet hash. Defensive: don't overwrite the dn-derived
-    # placeholder title with "" if the hook somehow fired with an empty
-    # arg (saved us once during the --on-download-complete vs
-    # --on-bt-download-complete confusion).
-    try:
-        name = Path(completed_path).name
-        if name:
-            job["title"] = name
-    except Exception:
-        pass
-    job["updated_at"] = _now()
-    upsert_job(job)
-
-    # Best-effort cleanup of the hook script; leave the marker file behind
-    # so a curious operator can see what landed.
-    hook.unlink(missing_ok=True)
 
 
 @_catch_unhandled

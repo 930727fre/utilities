@@ -7,7 +7,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
 | [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
 | [marker-pipeline](./marker-pipeline) | Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
-| [transcribe](./transcribe) | YouTube URL **or** magnet link → mp4 + Whisper SRT + Claude `※` annotation; sidecar SRTs picked up by [webdav](./webdav) / Infuse. Built-in aria2c handles BT (no external qBittorrent service) |
+| [transcribe](./transcribe) | YouTube URL **or** magnet link → mp4 + Whisper SRT + Claude `※` annotation; sidecar SRTs picked up by [webdav](./webdav) / Infuse. Magnets are dispatched as one-shot `aria2c` subprocesses per torrent (1440 min / ratio 1.0 seed limits) |
 | [xyt](./xyt) | Fork of transcribe |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
