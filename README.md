@@ -7,7 +7,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
 | [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
 | [marker-pipeline](./marker-pipeline) | Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
-| [transcribe](./transcribe) | YouTube URL **or** existing files in `/qb` — GPU-accelerated Whisper + auto Claude annotation, sidecar SRTs picked up by [webdav](./webdav) / Infuse |
+| [transcribe](./transcribe) | YouTube URL **or** magnet link → mp4 + Whisper SRT + Claude `※` annotation; sidecar SRTs picked up by [webdav](./webdav) / Infuse. Built-in aria2c handles BT (no external qBittorrent service) |
 | [xyt](./xyt) | Fork of transcribe |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
@@ -18,8 +18,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
-| [qbittorrent](./qbittorrent) | BitTorrent client (LinuxServer image) — downloads land in `./data/downloads/`, shared read-only with [webdav](./webdav) and [transcribe](./transcribe) |
-| [webdav](./webdav) | Read-only WebDAV server exposing qBittorrent's download folder — Infuse on iPhone / Mac connects here for playback, handles codec + iCloud progress sync |
+| [webdav](./webdav) | Read-only WebDAV server exposing transcribe's library — Infuse on iPhone / Mac connects here for playback, handles codec + iCloud progress sync |
 
 ## Notes
 

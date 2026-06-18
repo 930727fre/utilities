@@ -17,7 +17,7 @@ from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from subs_finder import find_subs
-from tasks import enumerate_playlist, executor, process_qb_file, process_video
+from tasks import enumerate_playlist, executor, process_qb_file, process_qb_magnet, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
@@ -142,6 +142,37 @@ def _new_qb_job(job_id: str, source_path: str) -> dict:
     }
 
 
+def _new_qb_magnet_job(job_id: str, magnet: str) -> dict:
+    return {
+        "job_id": job_id,
+        "source": "qb",
+        "magnet": magnet,
+        # Title backfills from the magnet's `dn=` param (display name) so the
+        # UI has something readable to show before aria2c learns the real
+        # filename via metadata exchange.
+        "title": _magnet_display_name(magnet) or "(fetching metadata…)",
+        "status": "PENDING",
+        "annotated": False,
+        "error": None,
+        "annotation_error": None,
+        "created_at": _now(),
+        "updated_at": _now(),
+    }
+
+
+def _magnet_display_name(magnet: str) -> str | None:
+    try:
+        u = urlparse(magnet)
+        params = parse_qs(u.query)
+        dn = params.get("dn", [None])[0]
+        if dn:
+            from urllib.parse import unquote
+            return unquote(dn)
+    except Exception:
+        pass
+    return None
+
+
 # ── yt API ─────────────────────────────────────────────────────────────────
 
 class SubmitRequest(BaseModel):
@@ -218,7 +249,10 @@ async def retry_job(job_id: str):
     job["updated_at"] = _now()
     upsert_job(job)
     if job.get("source") == "qb":
-        executor.submit(process_qb_file, job_id)
+        if job.get("magnet"):
+            executor.submit(process_qb_magnet, job_id, job["magnet"])
+        else:
+            executor.submit(process_qb_file, job_id)
     else:
         executor.submit(process_video, job_id, job["url"])
     return {"ok": True}
@@ -345,6 +379,31 @@ async def qb():
         item["whisper_failures"] = whisper_fails
         item["whisper_blocked"] = whisper_fails >= MAX_WHISPER_RETRIES
     return items
+
+
+class QbMagnetRequest(BaseModel):
+    magnet: str
+
+
+@app.post("/api/qb/magnet", status_code=201)
+async def submit_magnet(req: QbMagnetRequest):
+    if not req.magnet.startswith("magnet:"):
+        raise HTTPException(status_code=400, detail="must be a magnet: URI")
+
+    # Reject duplicate submissions of the same magnet that's already in
+    # flight. We compare the raw URI rather than the infohash because we
+    # don't want to drag a bencode parser in just for this check.
+    for j in read_jobs():
+        if (j.get("source") == "qb"
+                and j.get("magnet") == req.magnet
+                and j["status"] in ("PENDING", "DOWNLOADING")):
+            raise HTTPException(status_code=409, detail="Already in flight")
+
+    job_id = str(uuid.uuid4())
+    job = _new_qb_magnet_job(job_id, req.magnet)
+    upsert_job(job)
+    executor.submit(process_qb_magnet, job_id, req.magnet)
+    return {"job_id": job_id, "status": "PENDING"}
 
 
 @app.post("/api/qb/transcribe", status_code=201)

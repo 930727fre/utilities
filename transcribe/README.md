@@ -3,20 +3,20 @@
 Two ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
-- **qb tab** — view-only: every video in qBittorrent's downloads (`/qb`). No buttons; a background loop handles everything automatically — videos without SRT get Whisper'd, SRTs without `※ annotated` get annotated.
+- **qb tab** — paste a magnet link, aria2c downloads into `data/library/` and seeds for 24 h. The library list shows every video found there, including any torrent-bundled SRT siblings.
 
 In both cases, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
-`data/downloads/` holds the yt-tab output; `/qb` is the same folder qBittorrent writes to. Both are reached by [webdav](../webdav) for Infuse playback (read-only mount of `/qb`).
+`data/downloads/` holds the yt-tab output; `data/library/` holds aria2c's BT downloads — mounted at `/qb` inside the container. [webdav](../webdav) reads both for Infuse playback (read-only).
 
 ## Stack
 
 | Layer | Tech |
 |------|------|
-| Frontend | Vite + React — tab between yt (URL submit) and qb (file browser) |
+| Frontend | Vite + React — tab between yt (URL submit) and qb (magnet submit + library browser) |
 | Backend | FastAPI on port 8000 — API + in-process orchestrator |
 | Worker | `ThreadPoolExecutor(max_workers=1)` — serializes our per-job state mutations |
-| Downloader | `yt-dlp` (best mp4 ≤ 1080p) |
+| Downloader | `yt-dlp` (yt) + `aria2c` (qb magnet, with 1440 min / ratio 1.0 seed limits) |
 | Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
 | SRT matcher | Claude (haiku) via tool-use — rescues bundled `.srt` files that strict same-stem matching misses |
@@ -32,7 +32,7 @@ data/downloads/                  ← YouTube output
   <sanitized title>.mp4
   <sanitized title>.srt          ← annotated in place
 
-/qb/<torrent-folder>/            ← qBittorrent downloads (host bind)
+data/library/<torrent-folder>/   ← aria2c's BT downloads (mounted as /qb inside container)
   Show.S01E01.mkv
   Show.S01E01.srt                ← written by qb transcribe, or torrent-bundled
 ```
@@ -44,8 +44,6 @@ YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for
 Prereqs:
 - External Docker network `my_network`.
 - The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
-- Sibling `qbittorrent/` directory exists (the compose bind-mounts `../qbittorrent/data/downloads`).
-- qBittorrent's "Append .!qB extension to incomplete files" enabled (so the qb scan skips in-flight downloads).
 - `ANTHROPIC_API_KEY` exported in the shell — required for annotation.
 - `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
 
@@ -71,16 +69,21 @@ docker compose up -d --build
 | `POST` | `/api/jobs/{id}/retry` | Re-queue a failed job |
 | `DELETE` | `/api/jobs/{id}` | Mark deleted; yt jobs also remove their mp4 + srt |
 | `GET`  | `/api/qb` | Scan `/qb`; return file + annotation state |
+| `POST` | `/api/qb/magnet` | `{magnet}`: spawn aria2c to download a magnet into `/qb`; job goes SUCCESS when the first file lands |
 | `POST` | `/api/qb/transcribe` | `{path}`: manually trigger whisper on a qb file (background loop already handles this; useful for power/curl override) |
 
 ## Job states
 
 ```
-yt:  PENDING → DOWNLOADING → TRANSCRIBING → ANNOTATING → SUCCESS
-                                           ↘ FAILED
-qb:  PENDING → TRANSCRIBING → ANNOTATING → SUCCESS
-                             ↘ FAILED      (annotation-only jobs skip TRANSCRIBING)
+yt:        PENDING → DOWNLOADING → TRANSCRIBING → ANNOTATING → SUCCESS
+                                                 ↘ FAILED
+qb magnet: PENDING → DOWNLOADING → SUCCESS                   (aria2c keeps seeding in bg)
+                                  ↘ FAILED
+qb manual: PENDING → TRANSCRIBING → ANNOTATING → SUCCESS     (legacy /api/qb/transcribe path)
+                                   ↘ FAILED
 ```
+
+qb magnet jobs flip to SUCCESS as soon as the first file lands — they only represent the aria2c download phase. Whisper + annotation for each video file in the torrent then happen via the background `_qb_work_loop`, which scans `/qb` every 30 s and queues anything that needs work.
 
 Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` jobs flip to `FAILED` on startup. `ANNOTATING` crashes flip to `SUCCESS` with `annotation_error` set; for qb jobs the background loop will retry.
 

@@ -11,10 +11,10 @@ services:
       - ./config.yaml:/config.yaml:ro
       # Read-only mounts under a single /media scope: hacdias/webdav exposes
       # one directory as the root, so we collect the two sources here. Infuse
-      # sees `qb/` and `yt/` as siblings. Read-only because (a) qb deletion
-      # breaks seeding + transcribe pipeline, (b) yt deletion loses work
-      # that already cost GPU time.
-      - ../qbittorrent/data/downloads:/media/qb:ro
+      # sees `qb/` and `yt/` as siblings. Read-only — Infuse is for browsing
+      # and playback, not library management; deletes happen via qBittorrent
+      # (seed-limit auto-cleanup) or shell.
+      - ../transcribe/data/library:/media/qb:ro
       - ../transcribe/data/downloads:/media/yt:ro
     networks:
       - my_network

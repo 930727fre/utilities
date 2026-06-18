@@ -33,3 +33,16 @@ export async function listQb() {
   if (!r.ok) throw new Error('Failed to list qb')
   return r.json()
 }
+
+export async function submitMagnet(magnet) {
+  const r = await fetch(`${BASE}/api/qb/magnet`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ magnet }),
+  })
+  if (!r.ok) {
+    const detail = await r.json().catch(() => null)
+    throw new Error(detail?.detail || 'Submit failed')
+  }
+  return r.json()
+}
