@@ -161,6 +161,16 @@ def render_chunk_for_prompt(chunk: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _is_sentinel_cue(cue: dict) -> bool:
+    """A cue whose visible text is just our ※ markers (e.g. `※ source: …`,
+    `※ annotated`, the failure stamps). Filtered out of chunks sent to the
+    LLM so Claude doesn't waste tokens / hallucinate annotations on our
+    own status overlay, but kept in the cues list so the final re-render
+    preserves them on disk."""
+    visible = [ln.strip() for ln in cue.get("lines", []) if ln.strip()]
+    return bool(visible) and all(ln.startswith("※") for ln in visible)
+
+
 # ── Worker ────────────────────────────────────────────────────────────────
 
 def annotate_job(job_id: str):
@@ -223,17 +233,25 @@ def _do_annotate(job_id: str):
     if not cues:
         raise RuntimeError("SRT contained no parseable cues")
 
+    # Exclude our own sentinel cues from what Claude sees — they sit at
+    # 00:00:00–05 with `※ source: …` / `※ whisper failed: …` text and
+    # would confuse the model into either annotating them or skipping
+    # neighbouring real cues. Re-render at the end still includes them.
+    annotatable_cues = [c for c in cues if not _is_sentinel_cue(c)]
+    if not annotatable_cues:
+        raise RuntimeError("SRT had only sentinel cues, no dialogue to annotate")
+
     notes: dict[int, str] = {}
     seen_entities: set[str] = set()
 
-    for start in range(0, len(cues), CHUNK_SIZE):
+    for start in range(0, len(annotatable_cues), CHUNK_SIZE):
         # Check for cancellation between chunks — keeps annotation responsive
         # to a Delete (frontend disables it, but other callers can DELETE).
         current = get_job(job_id)
         if not current or current["status"] == "DELETED":
             return
 
-        chunk = cues[start:start + CHUNK_SIZE]
+        chunk = annotatable_cues[start:start + CHUNK_SIZE]
         chunk_text = render_chunk_for_prompt(chunk)
         already = ", ".join(sorted(seen_entities)) if seen_entities else "(none yet)"
         prompt = PROMPT_TEMPLATE % (already, chunk_text)
@@ -261,13 +279,13 @@ def _do_annotate(job_id: str):
         if note:
             c["lines"].append(f"※ {note}")
 
-    # Sentinel cue appended at 99:59:59 so a 0-note pass is still detectable
-    # by the `※` content check. Far-future timestamp + 1ms duration means no
-    # real video ever hits it; existing cue numbering stays untouched.
-    last_idx = cues[-1]["idx"] if cues else 0
-    cues.append({
-        "idx": last_idx + 1,
-        "time": "99:59:59,998 --> 99:59:59,999",
+    # Sentinel cue inserted at the start (00:00:02 → 00:00:04, just after
+    # the source sentinel's 0–2 s slot) so the user gets a 2-second
+    # "※ annotated" confirmation flash at playback start. Cue index 99999
+    # is well above any plausible real-content cue count.
+    cues.insert(0, {
+        "idx": 99999,
+        "time": "00:00:02,000 --> 00:00:04,000",
         "lines": ["※ annotated"],
     })
 
