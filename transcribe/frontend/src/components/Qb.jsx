@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { listQb, listTorrents, submitMagnet, deleteTorrent } from '../api'
+import { listQb, listTorrents, submitMagnet, deleteTorrent, retryQbFile } from '../api'
 
 // qb tab has two regions: the magnet form + active-torrent list at the
 // top (each row = one wrapper folder, phase derived from filesystem + an
@@ -78,6 +78,15 @@ export default function Qb() {
     await refresh()
   }
 
+  async function handleRetry(path) {
+    try {
+      await retryQbFile(path)
+      await refresh()
+    } catch (err) {
+      alert('Retry failed: ' + err.message)
+    }
+  }
+
   const sortedTorrents = [...torrents].sort((a, b) => a.name.localeCompare(b.name))
 
   // qBittorrent typically makes one folder per torrent / season — group by it.
@@ -154,15 +163,16 @@ export default function Qb() {
       {[...groups.entries()].map(([groupKey, rows]) => (
         <div key={groupKey || '__root__'} style={styles.group}>
           {groupKey && <div style={styles.groupHeader}>{groupKey}</div>}
-          {rows.map(item => <RowItem key={item.path} item={item} />)}
+          {rows.map(item => <RowItem key={item.path} item={item} onRetry={handleRetry} />)}
         </div>
       ))}
     </div>
   )
 }
 
-function RowItem({ item }) {
+function RowItem({ item, onRetry }) {
   const state = deriveState(item)
+  const errMsg = item.whisper_error || item.annotate_error || ''
   return (
     <div className="fade-in" style={styles.row}>
       <div style={styles.name}>{item.name}</div>
@@ -173,11 +183,12 @@ function RowItem({ item }) {
         {state === 'done' && (
           <span style={{ ...styles.glyph, color: '#636366' }} title="Annotated">✓</span>
         )}
-        {state === 'whisper_blocked' && (
-          <span style={styles.glyph} title="Whisper failed 3 times — restart container to retry">!</span>
-        )}
-        {state === 'annotation_blocked' && (
-          <span style={styles.glyph} title="Annotation failed 3 times — restart container to retry">!</span>
+        {state === 'failed' && (
+          <>
+            <span style={styles.glyph} title={errMsg}>!</span>
+            <button style={styles.retryBtn} title="Retry (deletes the SRT and re-runs the pipeline)"
+              onClick={() => onRetry(item.path)}>↻</button>
+          </>
         )}
       </div>
     </div>
@@ -187,8 +198,7 @@ function RowItem({ item }) {
 function deriveState(item) {
   if (item.in_flight_job_id) return 'working'
   if (item.has_annotation) return 'done'
-  if (!item.has_srt && item.whisper_blocked) return 'whisper_blocked'
-  if (item.has_srt && item.annotation_blocked) return 'annotation_blocked'
+  if (item.whisper_error || item.annotate_error) return 'failed'
   return 'working'
 }
 
@@ -249,9 +259,14 @@ const styles = {
     flex: 1, minWidth: 0, fontSize: 14, color: '#e8e3d9',
     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
   },
-  slot: { display: 'flex', alignItems: 'center', minWidth: 28, justifyContent: 'flex-end' },
+  slot: { display: 'flex', alignItems: 'center', gap: 12, minWidth: 28, justifyContent: 'flex-end' },
   glyph: {
     color: '#aeaeb2', fontSize: 18, fontWeight: 700, lineHeight: 1,
     cursor: 'default', fontFamily: MONO,
+  },
+  retryBtn: {
+    background: 'none', border: 'none', color: '#c79968',
+    fontSize: 18, fontWeight: 700, lineHeight: 1, padding: 0, cursor: 'pointer',
+    fontFamily: MONO,
   },
 }

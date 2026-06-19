@@ -58,3 +58,16 @@ export async function deleteTorrent(wrapper) {
   if (!r.ok) throw new Error('Delete failed')
   return r.json()
 }
+
+export async function retryQbFile(path) {
+  const r = await fetch(`${BASE}/api/qb/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) {
+    const detail = await r.json().catch(() => null)
+    throw new Error(detail?.detail || 'Retry failed')
+  }
+  return r.json()
+}

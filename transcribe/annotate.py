@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from claude_client import generate_json
+from srt_source import stamp_annotate_failed
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
@@ -168,11 +169,31 @@ def annotate_job(job_id: str):
     except Exception as exc:
         traceback.print_exc()
         job = get_job(job_id)
+        # Drop a failure sentinel into the SRT itself so the background
+        # scan loop stops re-firing annotation for this file. The user
+        # clears it (and triggers a fresh annotate run) by pressing ↻ in
+        # the UI, which deletes the SRT and lets the whole pipeline rerun.
+        if job:
+            srt_path = _srt_path_for(job)
+            if srt_path is not None and srt_path.exists():
+                try:
+                    stamp_annotate_failed(srt_path, str(exc))
+                except OSError:
+                    pass
         if job and job["status"] == "ANNOTATING":
             job["status"] = "SUCCESS"
             job["annotation_error"] = f"Annotation failed: {exc}"
             job["updated_at"] = _now()
             upsert_job(job)
+
+
+def _srt_path_for(job: dict) -> Path | None:
+    if job.get("source") == "qb" and job.get("source_path"):
+        return Path(job["source_path"]).with_suffix(".srt")
+    base = job.get("basename")
+    if base:
+        return DOWNLOADS_DIR / f"{base}.srt"
+    return None
 
 
 def _do_annotate(job_id: str):

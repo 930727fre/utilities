@@ -11,7 +11,7 @@ import yt_dlp
 
 from annotate import annotate_executor, annotate_job
 from gpu_lock import gpu_lock
-from srt_source import stamp_source
+from srt_source import stamp_source, stamp_whisper_failed
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
@@ -275,6 +275,13 @@ def process_qb_file(job_id: str):
     try:
         _run_whisper(job_id, media_path, srt_path)
     except Exception as exc:
+        # Stamp the failure onto disk so the background scan loop stops
+        # retrying whisper for this file. User clears via the UI ↻ (which
+        # deletes the SRT entirely).
+        try:
+            stamp_whisper_failed(srt_path, str(exc))
+        except OSError:
+            pass
         _fail(job_id, str(exc))
         return
 

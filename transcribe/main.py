@@ -29,15 +29,16 @@ DOWNLOADS_DIR = Path("/app/data/downloads")
 QB_ROOTS = [Path("/qb")]
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 ANNOTATION_MARKER = "※ annotated"
+WHISPER_FAILED_MARKER = "※ whisper failed:"
+ANNOTATE_FAILED_MARKER = "※ annotate failed:"
 MTIME_GRACE_SECONDS = 60
 QB_SCAN_INTERVAL = 30
-MAX_ANNOTATION_RETRIES = 3
-MAX_WHISPER_RETRIES = 3
 
-# Per-path retry counters for the background loop. In-memory: container
-# restart resets them, which is the natural "try again" signal.
-_annotation_failures: dict[str, int] = {}
-_whisper_failures: dict[str, int] = {}
+# No in-memory failure counters: "we tried this once" is recorded as a
+# sentinel cue inside the SRT itself (see srt_source.stamp_*), so the
+# scan loop reads it back on every tick and survives container restarts.
+# Auto-retry is gone; the UI ↻ button is the only path back into the
+# pipeline for a failed file.
 
 
 def _now() -> str:
@@ -273,6 +274,20 @@ def _is_annotated_srt(srt_path: Path) -> bool:
         return False
 
 
+def _read_srt_marker(srt_path: Path, marker: str) -> str | None:
+    """If the SRT contains a sentinel cue starting with `marker`, return the
+    text that follows (the error message). Returns None if not present."""
+    try:
+        content = srt_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in content.splitlines():
+        idx = line.find(marker)
+        if idx >= 0:
+            return line[idx + len(marker):].strip() or "(no message)"
+    return None
+
+
 def _scan_qb() -> list[dict]:
     """Walk QB_ROOTS, return one entry per video file. Filesystem only."""
     out = []
@@ -301,7 +316,13 @@ def _scan_qb() -> list[dict]:
                 continue
             srt = video.with_suffix(".srt")
             has_srt = srt.exists()
-            has_annotation = has_srt and _is_annotated_srt(srt)
+            whisper_error = _read_srt_marker(srt, WHISPER_FAILED_MARKER) if has_srt else None
+            annotate_error = _read_srt_marker(srt, ANNOTATE_FAILED_MARKER) if has_srt else None
+            # An SRT carrying only the whisper-failed sentinel isn't a real
+            # transcript — for everything downstream of whisper we treat it
+            # as "no SRT yet, but don't retry."
+            has_real_srt = has_srt and whisper_error is None
+            has_annotation = has_real_srt and _is_annotated_srt(srt)
             try:
                 parent_rel = str(video.parent.relative_to(root))
             except ValueError:
@@ -313,8 +334,10 @@ def _scan_qb() -> list[dict]:
                 "name": video.name,
                 "parent": parent_rel,
                 "root": str(root),
-                "has_srt": has_srt,
+                "has_srt": has_real_srt,
                 "has_annotation": has_annotation,
+                "whisper_error": whisper_error,
+                "annotate_error": annotate_error,
             })
     out.sort(key=lambda x: (x["root"], x["parent"], x["name"].lower()))
     return out
@@ -344,12 +367,6 @@ async def qb():
             in_flight[j.get("source_path", "")] = j["job_id"]
     for item in items:
         item["in_flight_job_id"] = in_flight.get(item["path"])
-        ann_fails = _annotation_failures.get(item["path"], 0)
-        item["annotation_failures"] = ann_fails
-        item["annotation_blocked"] = ann_fails >= MAX_ANNOTATION_RETRIES
-        whisper_fails = _whisper_failures.get(item["path"], 0)
-        item["whisper_failures"] = whisper_fails
-        item["whisper_blocked"] = whisper_fails >= MAX_WHISPER_RETRIES
     return items
 
 
@@ -385,6 +402,30 @@ async def delete_torrent(wrapper: str):
     return {"ok": True}
 
 
+class QbRetryRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/qb/retry", status_code=200)
+async def qb_retry(req: QbRetryRequest):
+    """Clear a failure sentinel so the scan loop picks the file up again.
+
+    Implementation: delete the SRT entirely. Yes that throws away a
+    successfully-transcribed transcript if the failure was only on the
+    annotation stage — but that's the trade-off for not having three
+    different retry buttons. Whisper's the expensive bit, and even then
+    it's <10 min on the GPU; cheaper than building partial-retry UI.
+    """
+    path = _validate_qb_path(req.path)
+    srt = path.with_suffix(".srt")
+    if srt.exists():
+        try:
+            srt.unlink()
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"unlink failed: {e}")
+    return {"ok": True}
+
+
 @app.post("/api/qb/transcribe", status_code=201)
 async def transcribe_qb_file(req: QbTranscribeRequest):
     path = _validate_qb_path(req.path)
@@ -409,7 +450,10 @@ async def transcribe_qb_file(req: QbTranscribeRequest):
 
 def _queue_pending_qb_work():
     """For every qb video without SRT, enqueue whisper; for every SRT without ※,
-    enqueue annotation. Skips files already in flight and ones at the retry cap.
+    enqueue annotation. Files carrying a `※ whisper failed:` or
+    `※ annotate failed:` sentinel in their SRT are skipped — the worker
+    that hit the error wrote the sentinel itself, and the user clears it
+    via the UI ↻ button (which deletes the SRT).
     """
     items = _scan_qb()
     jobs = read_jobs()
@@ -422,6 +466,11 @@ def _queue_pending_qb_work():
 
     for item in items:
         if item["path"] in in_flight_paths:
+            continue
+
+        # whisper-failed SRTs read as `has_srt=False` from _scan_qb, but the
+        # sentinel is still present on disk — skip so we don't re-fire.
+        if item["whisper_error"]:
             continue
 
         if not item["has_srt"]:
@@ -446,48 +495,26 @@ def _queue_pending_qb_work():
             if find_subs(video) is not None:
                 continue
 
-            # 3. Fallback: GPU whisper.
-            if _whisper_failures.get(item["path"], 0) >= MAX_WHISPER_RETRIES:
-                continue
+            # 3. Fallback: GPU whisper. If it fails, tasks.py stamps the
+            #    failure sentinel onto the SRT itself — we'll see it on the
+            #    next tick and skip via the `whisper_error` branch above.
             job_id = str(uuid.uuid4())
             job = _new_qb_job(job_id, item["path"])
             upsert_job(job)
-            executor.submit(_track_whisper_outcome, job_id, item["path"])
+            executor.submit(process_qb_file, job_id)
             continue
 
-        # Has SRT — check if annotation is needed.
+        # Has SRT — check if annotation is needed. Skip annotated-once-
+        # failed cases via the sentinel.
         if item["has_annotation"]:
             continue
-        if _annotation_failures.get(item["path"], 0) >= MAX_ANNOTATION_RETRIES:
+        if item["annotate_error"]:
             continue
         job_id = str(uuid.uuid4())
         job = _new_qb_job(job_id, item["path"])
         job["status"] = "ANNOTATING"
         upsert_job(job)
-        annotate_executor.submit(_track_annotation_outcome, job_id, item["path"])
-
-
-def _track_annotation_outcome(job_id: str, source_path: str):
-    """Run annotation; bump in-memory failure counter on error."""
-    try:
-        annotate_job(job_id)
-    except Exception:
-        traceback.print_exc()
-    job = get_job(job_id)
-    if job and job.get("annotation_error"):
-        _annotation_failures[source_path] = _annotation_failures.get(source_path, 0) + 1
-    else:
-        _annotation_failures.pop(source_path, None)
-
-
-def _track_whisper_outcome(job_id: str, source_path: str):
-    """Run whisper (and chained annotation); bump counter if whisper ends FAILED."""
-    process_qb_file(job_id)  # @_catch_unhandled in tasks.py absorbs exceptions
-    job = get_job(job_id)
-    if job and job.get("status") == "FAILED":
-        _whisper_failures[source_path] = _whisper_failures.get(source_path, 0) + 1
-    else:
-        _whisper_failures.pop(source_path, None)
+        annotate_executor.submit(annotate_job, job_id)
 
 
 async def _qb_work_loop():
