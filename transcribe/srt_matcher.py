@@ -1,24 +1,18 @@
 """LLM-assisted SRT-to-video matching.
 
-Two strategies, cheapest first:
+Single strategy: a tool-use Haiku agent that browses the video's folder
+tree via `list_dir` + `read_lines`, peeks into candidate .srt files to
+verify the cue text is English (not SDH, not forced-signs, not the wrong
+language), and returns the relative path of its pick. Handles flat-folder
+bundles (`Show.S01E01.en.srt` next to `Show.S01E01.mkv`), nested layouts
+(RARBG's `Subs/<episode-stem>/N_English.srt`), and anything in between
+the same way — the agent just lists what's around and decides.
 
-1. **Same-folder match** (`_match_in_same_folder`): the original strict-same-
-   stem misses bundled SRTs with language codes or release-group tags.
-   Ask Haiku to pick from a flat directory listing. Covers the common case of
-   `Show.S01E01.en.srt` next to `Show.S01E01.mkv`.
-
-2. **Tool-use agent walk** (`_find_via_agent`): when (1) misses, give Haiku
-   `list_dir` + `read_lines` tools so it can browse subfolders (e.g. RARBG's
-   `Subs/<episode-stem>/<n>_English.srt` layout, where the official subtitle
-   is buried in a nested per-episode folder we don't otherwise scan). Reads
-   a few lines to verify the candidate is English dialogue (not SDH, not
-   forced-signs, not the wrong language). Sandboxed to the video's parent
-   directory, capped at 12 tool calls.
-
-`find_matching_srt(video)` runs (1) then (2). Caller copies (not moves) the
-returned SRT to the canonical `<video-stem>.srt` location so the torrent's
-own layout stays intact — important for releases that ship multiple language
-tracks in the same Subs/ folder.
+Sandboxed to the video's parent directory (no path escape), capped at 12
+tool calls. Caller copies (not moves) the returned SRT to the canonical
+`<video-stem>.srt` location so the torrent's own layout stays intact —
+important for releases that ship multiple language tracks in the same
+Subs/ folder.
 """
 import os
 from pathlib import Path
@@ -32,8 +26,8 @@ from claude_client import (
     _api_key,
 )
 
-# Haiku is plenty smart for stem-matching + tool-use folder browsing, and an
-# order of magnitude cheaper than Sonnet. Override via ANTHROPIC_MATCH_MODEL.
+# Haiku is plenty smart for this and an order of magnitude cheaper than
+# Sonnet. Override via ANTHROPIC_MATCH_MODEL.
 _MATCH_MODEL = os.environ.get("ANTHROPIC_MATCH_MODEL", "claude-haiku-4-5-20251001")
 
 # Agent caps — keep cost + latency bounded.
@@ -41,78 +35,6 @@ _MAX_TOOL_CALLS = 12          # absolute step budget per video
 _MAX_READ_LINES = 80          # max lines returned per read_lines call
 _MAX_READ_CHARS = 6000        # belt-and-suspenders for very long lines
 
-
-# ── Strategy 1: same-folder flat match ─────────────────────────────────────
-
-_FLAT_SCHEMA = {
-    "type": "object",
-    "properties": {"match": {"type": ["string", "null"]}},
-    "required": ["match"],
-}
-
-_FLAT_PROMPT_TEMPLATE = """\
-You match a video file to its subtitle (.srt) sidecar in the same folder.
-
-Video filename:
-{video_name}
-
-Candidate .srt files in the same folder:
-{srt_list}
-
-If one of the .srt files is the subtitle track for this video — same show + \
-episode (or same movie title), ignoring differences in language code suffix \
-(`.en.srt`, `.eng.srt`), release-group tags, resolution tags, version numbers, \
-or whitespace/punctuation variations — respond with that filename verbatim.
-
-If none of them corresponds, respond with null. Be strict: only match when \
-you're confident it's the same video.
-
-Output JSON: {{"match": "<exact filename from the list>" | null}}
-"""
-
-
-def _match_in_same_folder(video: Path) -> Optional[Path]:
-    from claude_client import generate_json
-
-    folder = video.parent
-    try:
-        siblings = sorted(
-            p for p in folder.iterdir()
-            if p.is_file() and p.suffix.lower() == ".srt"
-        )
-    except OSError:
-        return None
-    if not siblings:
-        return None
-
-    sibling_names = [s.name for s in siblings]
-    prompt = _FLAT_PROMPT_TEMPLATE.format(
-        video_name=video.name,
-        srt_list="\n".join(f"- {n}" for n in sibling_names),
-    )
-
-    try:
-        result = generate_json(
-            prompt, _FLAT_SCHEMA,
-            model=_MATCH_MODEL,
-            temperature=0.0,
-            max_tokens=200,
-        )
-    except Exception as e:
-        print(f"[srt-matcher/flat] API error for {video.name!r}: {e}", flush=True)
-        return None
-
-    matched_name = result.get("match")
-    if not matched_name:
-        return None
-    # Anti-hallucination: must be a real entry in the listing we showed it.
-    if matched_name not in sibling_names:
-        print(f"[srt-matcher/flat] LLM returned {matched_name!r}, not in folder; ignoring", flush=True)
-        return None
-    return folder / matched_name
-
-
-# ── Strategy 2: tool-use agent walk ────────────────────────────────────────
 
 _AGENT_TOOLS = [
     {
@@ -177,15 +99,18 @@ Video filename: {video_name}
 Folder root: `.` (the video's own folder — all relative paths are inside it)
 
 Typical layouts you'll see:
-- Flat: `<stem>.srt` next to the video → already handled before you were called, so don't expect this.
-- RARBG / scene packs: `Subs/<video-stem>/N_English.srt`, possibly alongside `N_English-SDH.srt`, `N_Spanish.srt`, etc.
+- Flat: `<stem>.srt` or `<stem>.en.srt` next to the video.
+- RARBG / scene packs: `Subs/<video-stem>/N_English.srt`, possibly alongside \
+`N_English-SDH.srt`, `N_Spanish.srt`, etc.
 - Some packs: `subs/eng.srt`, `Subtitles/<EpisodeName>.srt`, single language only.
 
 Strategy:
 1. `list_dir(".")` to see what's around — look for a Subs / subs / Subtitles \
 folder or stray .srt files.
-2. Drill into the most likely subfolder. For multi-episode packs, find the \
-subfolder whose name matches THIS video's stem (S01E03 → folder ending in S01E03).
+2. If you see candidate .srt files directly in `.`, you can `read_lines` one \
+to verify and `respond`. If you only see subfolders, drill in. For multi-episode \
+packs, find the subfolder whose name matches THIS video's stem (S01E03 → folder \
+ending in S01E03).
 3. When you've found candidate .srt files, `read_lines` on the top 1-2 to \
 verify the dialogue is English (real English sentences, not Spanish / Chinese / \
 empty / only `[MUSIC]` tags).
@@ -193,7 +118,8 @@ empty / only `[MUSIC]` tags).
 `[MUSIC]` / `[DOOR SLAMS]` cues mixed in) or Forced (only foreign-language \
 signs translated, mostly empty otherwise). SDH is acceptable as a fallback.
 5. Call `respond` with the relative path of your pick (e.g. \
-`Subs/Show.S01E03.RELEASE/2_English.srt`), or null if nothing usable exists.
+`Subs/Show.S01E03.RELEASE/2_English.srt` or `Show.S01E01.en.srt`), or null \
+if nothing usable exists.
 
 Be efficient — you have a small step budget (~10 tool calls). List once, peek \
 into the most likely candidates, decide.
@@ -249,7 +175,18 @@ def _tool_read_lines(sandbox: Path, args: dict) -> str:
     return "\n".join(lines)
 
 
-def _find_via_agent(video: Path) -> Optional[Path]:
+def find_matching_srt(video: Path) -> Optional[tuple[Path, str]]:
+    """Find an English subtitle for `video` via tool-use Haiku agent.
+    Returns `(source_path, "bundled")` on success or None on miss.
+
+    The "bundled" stage tag matches the `※ source: …` convention used by
+    the rest of the pipeline — caller passes it to `stamp_source` after
+    copying the matched SRT into place.
+
+    Caller should COPY (not move) the returned file to `<video-stem>.srt`
+    so the original layout (especially nested torrent Subs/ folders)
+    stays intact for fallback / other language tracks.
+    """
     sandbox = video.parent.resolve()
     prompt = _AGENT_PROMPT_TEMPLATE.format(video_name=video.name)
     messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
@@ -273,7 +210,7 @@ def _find_via_agent(video: Path) -> Optional[Path]:
             r.raise_for_status()
             resp = r.json()
         except requests.RequestException as e:
-            print(f"[srt-matcher/agent] API error step {step}: {e}", flush=True)
+            print(f"[srt-matcher] API error step {step}: {e}", flush=True)
             return None
 
         # Append the assistant turn verbatim so subsequent tool_result blocks
@@ -307,48 +244,20 @@ def _find_via_agent(video: Path) -> Optional[Path]:
         if respond_call is not None:
             match_rel = respond_call.get("match")
             if not match_rel:
-                print(f"[srt-matcher/agent] no English sub found for {video.name!r}", flush=True)
+                print(f"[srt-matcher] no English sub found for {video.name!r}", flush=True)
                 return None
             target = _resolve_in_sandbox(sandbox, match_rel)
             if target is None or not target.is_file() or target.suffix.lower() != ".srt":
-                print(f"[srt-matcher/agent] invalid match returned: {match_rel!r}", flush=True)
+                print(f"[srt-matcher] invalid match returned: {match_rel!r}", flush=True)
                 return None
-            print(f"[srt-matcher/agent] picked {match_rel!r} for {video.name!r}", flush=True)
-            return target
+            print(f"[srt-matcher] picked {match_rel!r} for {video.name!r}", flush=True)
+            return target, "bundled"
 
         if not tool_results:
             # Model returned text-only (no tool_use) — protocol violation; bail.
-            print(f"[srt-matcher/agent] no tool calls at step {step} for {video.name!r}", flush=True)
+            print(f"[srt-matcher] no tool calls at step {step} for {video.name!r}", flush=True)
             return None
         messages.append({"role": "user", "content": tool_results})
 
-    print(f"[srt-matcher/agent] hit step budget for {video.name!r}", flush=True)
-    return None
-
-
-# ── Entry point ───────────────────────────────────────────────────────────
-
-def find_matching_srt(video: Path) -> Optional[tuple[Path, str]]:
-    """Find an English subtitle for `video` via LLM. Returns `(source_path,
-    stage_tag)` on success or None on miss. `stage_tag` is "bundled-flat"
-    when stage 1 picked it (same-folder Haiku) or "bundled-agent" when
-    stage 2 (tool-use folder walk) did — the caller passes this to
-    `stamp_source` so the SRT records WHICH path produced it, matching
-    the `※ source: whisper / opensubtitles-hash / opensubtitles-text`
-    convention used elsewhere in the pipeline.
-
-    Caller should COPY (not move) the returned file to `<video-stem>.srt`
-    so the original layout (especially nested torrent Subs/ folders)
-    stays intact for fallback / other language tracks.
-
-    Two-stage strategy:
-      1. Same-folder flat match (cheap, single Haiku call).
-      2. Tool-use folder walk (expensive, ~5-12 Haiku calls + tools).
-    """
-    matched = _match_in_same_folder(video)
-    if matched is not None:
-        return matched, "bundled-flat"
-    matched = _find_via_agent(video)
-    if matched is not None:
-        return matched, "bundled-agent"
+    print(f"[srt-matcher] hit step budget for {video.name!r}", flush=True)
     return None
