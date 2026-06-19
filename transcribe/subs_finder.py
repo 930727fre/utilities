@@ -28,6 +28,7 @@ import re
 import struct
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -51,10 +52,22 @@ HASH_CHUNK = 65536  # 64 KB for OSDb hash
 _token: Optional[str] = None
 _token_lock = threading.Lock()
 
-# Negative cache: paths where lookup found nothing. Reset on container restart.
-# Without this we'd waste an API call every 30s loop iteration on the same miss.
-_failed: set[str] = set()
+# Negative cache: { video_path: expiry_unix_timestamp }.
+#
+# Without it the 30 s scan loop would burn an OS API call (and a Claude haiku
+# verify, which costs real money) every tick on the same video.
+#
+# Permanent entries (`float("inf")`) are for outcomes that the next API call
+# would deterministically reproduce — no candidate found, all candidates
+# rejected by the verifier, candidate has no file_id. Time-limited entries
+# are for "transient-looking" failures, almost always OpenSubtitles' daily
+# download quota cap (HTTP 406): the quota refreshes at the next UTC day
+# boundary, so we expire those after 24 h and let whichever scan tick lands
+# first try the API again.
+_failed: dict[str, float] = {}
 _failed_lock = threading.Lock()
+
+_TRANSIENT_RETRY_SECONDS = 24 * 3600
 
 
 def _osdb_hash(path: Path) -> str:
@@ -282,13 +295,23 @@ def find_subs(video: Path) -> Optional[Path]:
     text search (drift fixed by ffsubsync). Returns the written SRT path
     on success, None on any miss/error.
     """
+    now = time.time()
     with _failed_lock:
-        if str(video) in _failed:
-            return None
+        expiry = _failed.get(str(video))
+        if expiry is not None:
+            if expiry > now:
+                return None
+            # Expired — drop the entry so we don't keep checking expiry.
+            _failed.pop(str(video), None)
 
-    def cache_miss():
+    def cache_permanent():
         with _failed_lock:
-            _failed.add(str(video))
+            _failed[str(video)] = float("inf")
+        return None
+
+    def cache_transient():
+        with _failed_lock:
+            _failed[str(video)] = time.time() + _TRANSIENT_RETRY_SECONDS
         return None
 
     pick = _search_by_hash(video)
@@ -299,25 +322,28 @@ def find_subs(video: Path) -> Optional[Path]:
         source_tag = "opensubtitles-text"
 
     if pick is None:
-        return cache_miss()
+        return cache_permanent()
 
     attrs = pick.get("attributes") or {}
     files = attrs.get("files") or []
     if not files:
         print(f"[subs-finder] picked candidate has no files for {video.name!r}", flush=True)
-        return cache_miss()
+        return cache_permanent()
     file_id = files[0].get("file_id")
     if not file_id:
         print(f"[subs-finder] picked candidate has no file_id for {video.name!r}", flush=True)
-        return cache_miss()
+        return cache_permanent()
     print(f"[subs-finder] picked release={attrs.get('release', '?')!r} "
           f"via {source_tag}", flush=True)
 
     try:
         download_url = _download_with_retry(file_id)
     except (requests.RequestException, KeyError) as e:
+        # Almost always HTTP 406 = daily quota exhausted, sometimes a real
+        # network blip. Either way, "tomorrow / soon" is the right retry
+        # window, not "permanent" or "every 30 s."
         print(f"[subs-finder] download API failed for {video.name!r}: {e}", flush=True)
-        return cache_miss()
+        return cache_transient()
 
     try:
         r = requests.get(download_url, timeout=60)
@@ -327,12 +353,15 @@ def find_subs(video: Path) -> Optional[Path]:
         # with a latin-1 fallback if needed).
         srt_text = r.text
     except requests.RequestException as e:
+        # CDN hiccup — also transient.
         print(f"[subs-finder] SRT fetch failed for {video.name!r}: {e}", flush=True)
-        return cache_miss()
+        return cache_transient()
 
     if not srt_text.strip():
+        # Genuinely missing content on OpenSubtitles' side — no point
+        # retrying tomorrow.
         print(f"[subs-finder] empty SRT body for {video.name!r}", flush=True)
-        return cache_miss()
+        return cache_permanent()
 
     out = video.with_suffix(".srt")
     out.write_text(srt_text, encoding="utf-8")

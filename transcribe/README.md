@@ -107,10 +107,9 @@ Only if both steps miss does whisper run. For popular content (movies, mainstrea
 
 The qb tab and background annotation loop skip:
 
-- Files ending in `.!qB` (qBittorrent's incomplete-file marker)
-- Any path with an `incomplete/` component
 - Dotfiles
-- Files whose mtime is within the last 60 seconds (still settling — covers post-rename windows, in-progress large copies)
+- Any video that still has a sibling `.aria2` control file (aria2c hasn't finished downloading it)
+- Files whose mtime is within the last 60 seconds (belt-and-suspenders for non-aria2c writers — manual drops, webdav copies, rsync)
 (yt staging files live in `/app/data/downloads`, not `/qb`, so they're not scanned in the first place.)
 
 Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.

@@ -93,6 +93,10 @@ async def lifespan(app: FastAPI):
     if changed:
         write_jobs(jobs)
 
+    # Re-spawn aria2c for any wrapper that has a half-finished download
+    # (a `.aria2` control file present from before the container restart).
+    qb_torrents.resume_all()
+
     annotation_loop_task = asyncio.create_task(_qb_work_loop())
 
     try:
@@ -300,15 +304,18 @@ def _scan_qb() -> list[dict]:
                 continue
             if video.suffix.lower() not in VIDEO_EXTS:
                 continue
-            # qBittorrent marks downloads-in-progress with .!qB
-            if video.name.endswith(".!qB"):
-                continue
-            # Optional qB layout: separate "incomplete" folder
-            if "incomplete" in [p.lower() for p in video.parts]:
-                continue
             if video.name.startswith("."):
                 continue
-            # File still being written? (e.g. just-finished rename)
+            # aria2c writes a sibling `<name>.aria2` control file while a
+            # download is in flight and deletes it the moment all pieces
+            # verify. Its presence is the authoritative "still downloading"
+            # signal — far more reliable than the mtime check below for
+            # stalled-peer cases where writes can pause for minutes.
+            if (video.parent / (video.name + ".aria2")).exists():
+                continue
+            # Belt-and-suspenders for non-aria2c writers (manual drops,
+            # webdav copies, rsync mid-flight): files whose mtime hasn't
+            # settled for 60 s aren't ready yet.
             try:
                 if now - video.stat().st_mtime < MTIME_GRACE_SECONDS:
                     continue

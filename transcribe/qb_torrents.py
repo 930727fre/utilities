@@ -27,8 +27,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 QB_LIBRARY = Path("/qb")
 
-# Seed limits applied to every torrent. aria2c exits when either limit is
-# hit. Numbers match the qBittorrent setup we used before the rewrite.
+# Seed limits applied to every torrent. aria2c exits when either limit is hit.
 SEED_TIME_MIN = 1440
 SEED_RATIO = 1.0
 
@@ -82,9 +81,10 @@ def _pick_wrapper_dir(magnet: str) -> Path:
 
 # ── Submit / list / delete ─────────────────────────────────────────────────
 
-def submit(magnet: str) -> str:
-    """Spawn an aria2c subprocess for this magnet. Returns wrapper name."""
-    wrapper = _pick_wrapper_dir(magnet)
+def _spawn(wrapper: Path, source: str) -> None:
+    """Spawn an aria2c subprocess into `wrapper` for `source` (a magnet URI
+    or a path to a .torrent file). Shared by submit (magnet) and
+    resume_all (saved .torrent)."""
     cmd = [
         "aria2c",
         f"--dir={wrapper}",
@@ -94,9 +94,8 @@ def submit(magnet: str) -> str:
         "--enable-color=false",
         "--console-log-level=warn",
         "--summary-interval=0",
-        magnet,
+        source,
     ]
-    print(f"[aria2c] launching for {wrapper.name}", flush=True)
     proc = subprocess.Popen(
         cmd,
         # stdout: aria2c's progress spam isn't worth surfacing in our logs.
@@ -124,7 +123,48 @@ def submit(magnet: str) -> str:
                 print(f"[aria2c {short}] {text}", flush=True)
 
     threading.Thread(target=_drain_stderr, daemon=True).start()
+
+
+def submit(magnet: str) -> str:
+    """Spawn an aria2c subprocess for this magnet. Returns wrapper name."""
+    wrapper = _pick_wrapper_dir(magnet)
+    print(f"[aria2c] launching for {wrapper.name}", flush=True)
+    _spawn(wrapper, magnet)
     return wrapper.name
+
+
+def resume_all() -> None:
+    """Restart aria2c for every wrapper that has an in-flight `.aria2`
+    control file but no live subprocess.
+
+    Called during transcribe-app's startup lifespan. Container restart
+    killed the previous subprocesses (PID 1 of the container died, kernel
+    cleaned up the namespace), but aria2c left two things behind: the
+    partial output files + `<file>.aria2` control file (its own resume
+    metadata) and a `<infohash>.torrent` from --bt-save-metadata=true.
+    Together those let aria2c pick up exactly where it left off when we
+    re-spawn it with the saved .torrent.
+
+    Best-effort: a wrapper whose .torrent never finished writing (rare —
+    metadata fetch is one of the first things aria2c does) is logged as
+    skipped, no further action.
+    """
+    if not QB_LIBRARY.exists():
+        return
+    for wrapper in QB_LIBRARY.iterdir():
+        if not wrapper.is_dir():
+            continue
+        if not any(wrapper.rglob("*.aria2")):
+            continue  # nothing in flight in this wrapper
+        with _procs_lock:
+            if wrapper.name in _procs and _procs[wrapper.name].poll() is None:
+                continue  # already have a live subprocess (shouldn't happen at boot)
+        torrent_file = next(wrapper.glob("*.torrent"), None)
+        if torrent_file is None:
+            print(f"[aria2c] cannot resume {wrapper.name}: no .torrent metadata on disk", flush=True)
+            continue
+        print(f"[aria2c] resuming {wrapper.name} from {torrent_file.name}", flush=True)
+        _spawn(wrapper, str(torrent_file))
 
 
 def _phase(wrapper: Path, proc: subprocess.Popen | None) -> str:

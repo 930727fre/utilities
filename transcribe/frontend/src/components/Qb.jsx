@@ -89,7 +89,7 @@ export default function Qb() {
 
   const sortedTorrents = [...torrents].sort((a, b) => a.name.localeCompare(b.name))
 
-  // qBittorrent typically makes one folder per torrent / season — group by it.
+  // Each torrent lives in its own per-torrent wrapper folder — group by it.
   // Loose files at /qb root land under an empty group with no header.
   const groups = new Map()
   for (const item of items) {
