@@ -20,7 +20,7 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (bt, 1440 min / ratio 1.0 seed limits) |
 | Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
-| SRT matcher | Claude (haiku) via tool-use — rescues bundled `.srt` files that strict same-stem matching misses |
+| SRT matcher | Claude (haiku) — two stages: (1) flat-folder filename pick from same-dir `.srt` siblings, (2) `list_dir` + `read_lines` tool-use agent that walks the torrent's tree (RARBG's `Subs/<stem>/N_English.srt`, etc.) and reads cue text to verify language. Sandboxed to the video's folder, capped at 12 tool calls |
 | Subs finder | OpenSubtitles REST API — queries by OSDb file hash for human-translated subs before falling back to whisper |
 | Subs verifier | Claude (haiku) — confirms the OpenSubtitles candidate's release/title/year matches the local filename, guarding against mis-tagged uploads |
 | Subs sync | `ffsubsync` — VAD on the video's audio aligns the downloaded SRT's cue timing (handles release-mismatch drift) |
@@ -107,7 +107,7 @@ A background loop scans `/bt` every 30s for both whisper work (video without SRT
 
 **Before queuing whisper, two rescue steps fire** (in order, cheapest first):
 
-1. **LLM srt-matcher**: if there's at least one `.srt` in the same folder that strict same-stem matching missed (e.g. release-bundled `Movie.2024.en.srt`), Claude Haiku checks whether any sibling `.srt` is actually this video's subtitle. Match → rename to satisfy strict match → annotation proceeds.
+1. **LLM srt-matcher**: two stages, cheap before expensive. Stage 1: if there's at least one `.srt` in the same folder, Claude Haiku reads the flat listing and picks the one belonging to this video (handles release-bundled `Movie.2024.en.srt`-style cases). Stage 2 (only when stage 1 finds nothing): Haiku gets `list_dir` + `read_lines` tools and walks the folder tree to find subs in non-standard layouts — RARBG's `Subs/<video-stem>/N_English.srt` is the canonical case. It reads the first ~20 cues of candidates to verify the language is English (skip Spanish / Chinese / SDH-only / forced-signs tracks). Match → COPY (not move) to satisfy strict match while preserving the torrent's original Subs/ folder → annotation proceeds. Tool calls are sandboxed to the video's parent folder and capped at 12.
 2. **OpenSubtitles (hash → text)**: if no sibling `.srt` to rescue, compute the file's OSDb hash and query OpenSubtitles. Filter to `moviehash_match=true` results (uploader-claimed exact hash match), then ask Claude Haiku to confirm the candidate's release / title / year / show / S+E matches the local filename — `moviehash_match` is uploader-claimed, not server-verified, and mis-tagged uploads do exist (real case: Spider-Man subs returned for a Whiplash hash). If hash search returns nothing or Haiku rejects every candidate, fall back to a **text search** by extracted title (+ year for movies, + season/episode for TV), again gated by the verifier. Source-stamped `※ source: opensubtitles-hash` vs `opensubtitles-text` so you can tell which path produced the SRT. On confirmed match: download → run `ffsubsync` against the video's audio to correct any release-mismatch timing drift → annotation. Misses are cached in-memory so we don't burn quota on the same file every 30s.
 
 Only if both steps miss does whisper run. For popular content (movies, mainstream TV) this means ~zero GPU is spent — OpenSubtitles' human-translated subs are higher quality than whisper output anyway.
@@ -141,5 +141,5 @@ Quota cache: same 24h transient expiry as bt's English path; permanent misses st
 
 - `jobs.json` is file-locked, not a real DB. Single-user is fine; for concurrent users move to SQLite.
 - Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
-- bt mode ignores embedded subtitle tracks (muxed into the video container) and non-standard sub layouts like `Subs/<episode>/2_English.srt` — only same-stem sidecar `.srt` files are recognized.
+- bt mode ignores embedded subtitle tracks (muxed into the video container). Non-standard external layouts like `Subs/<episode>/N_English.srt` ARE handled — the stage-2 tool-use agent finds and copies them into place — but anything muxed into the mkv container still needs `ffmpeg` extraction outside this pipeline.
 - translate_zh has no whisper fallback (English would defeat the point) — niche shows with no OpenSubtitles Chinese coverage land at `!` and stay there until the user retries (after Chinese subs become available, or via a manual drop).

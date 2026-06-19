@@ -493,15 +493,17 @@ def _queue_pending_bt_work():
             video = Path(item["path"])
 
             # 1. Cheap: any sibling .srt the LLM matcher recognizes (release-
-            #    bundled `.en.srt` etc.) — rename to satisfy strict match.
+            #    bundled `.en.srt`, RARBG's `Subs/<stem>/N_English.srt`, etc.).
+            #    COPY (not move) so the torrent's original layout — and other
+            #    language tracks shipped alongside — stay intact.
             matched = find_matching_srt(video)
             if matched is not None:
                 target = video.with_suffix(".srt")
                 try:
-                    matched.rename(target)
-                    print(f"[srt-matcher] {matched.name!r} → {target.name!r}", flush=True)
+                    shutil.copy2(matched, target)
+                    print(f"[srt-matcher] {matched.relative_to(video.parent)!s} → {target.name!r}", flush=True)
                 except OSError as e:
-                    print(f"[srt-matcher] rename failed ({e}); continuing", flush=True)
+                    print(f"[srt-matcher] copy failed ({e}); continuing", flush=True)
                 else:
                     continue
 
