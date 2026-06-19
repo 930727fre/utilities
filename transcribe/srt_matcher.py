@@ -328,11 +328,18 @@ def _find_via_agent(video: Path) -> Optional[Path]:
 
 # ── Entry point ───────────────────────────────────────────────────────────
 
-def find_matching_srt(video: Path) -> Optional[Path]:
-    """Find an English subtitle for `video` via LLM. Returns the source path,
-    or None if no match. Caller should COPY (not move) the returned file to
-    `<video-stem>.srt` so the original layout (especially nested torrent
-    Subs/ folders) stays intact for fallback / other language tracks.
+def find_matching_srt(video: Path) -> Optional[tuple[Path, str]]:
+    """Find an English subtitle for `video` via LLM. Returns `(source_path,
+    stage_tag)` on success or None on miss. `stage_tag` is "bundled-flat"
+    when stage 1 picked it (same-folder Haiku) or "bundled-agent" when
+    stage 2 (tool-use folder walk) did — the caller passes this to
+    `stamp_source` so the SRT records WHICH path produced it, matching
+    the `※ source: whisper / opensubtitles-hash / opensubtitles-text`
+    convention used elsewhere in the pipeline.
+
+    Caller should COPY (not move) the returned file to `<video-stem>.srt`
+    so the original layout (especially nested torrent Subs/ folders)
+    stays intact for fallback / other language tracks.
 
     Two-stage strategy:
       1. Same-folder flat match (cheap, single Haiku call).
@@ -340,5 +347,8 @@ def find_matching_srt(video: Path) -> Optional[Path]:
     """
     matched = _match_in_same_folder(video)
     if matched is not None:
-        return matched
-    return _find_via_agent(video)
+        return matched, "bundled-flat"
+    matched = _find_via_agent(video)
+    if matched is not None:
+        return matched, "bundled-agent"
+    return None

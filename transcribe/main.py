@@ -17,6 +17,7 @@ import bt_torrents
 from annotate import annotate_executor, annotate_job
 from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
+from srt_source import stamp_source
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from subs_finder import cache_is_permanent_miss, clear_cache, find_subs, get_failure_reason
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
@@ -495,15 +496,19 @@ def _queue_pending_bt_work():
             # 1. Cheap: any sibling .srt the LLM matcher recognizes (release-
             #    bundled `.en.srt`, RARBG's `Subs/<stem>/N_English.srt`, etc.).
             #    COPY (not move) so the torrent's original layout — and other
-            #    language tracks shipped alongside — stay intact.
-            matched = find_matching_srt(video)
-            if matched is not None:
+            #    language tracks shipped alongside — stay intact. stage_tag
+            #    is "bundled-flat" or "bundled-agent" — stamped into the SRT
+            #    so the user can tell which path produced this transcript.
+            match_result = find_matching_srt(video)
+            if match_result is not None:
+                matched, stage_tag = match_result
                 target = video.with_suffix(".srt")
                 try:
                     shutil.copy2(matched, target)
-                    print(f"[srt-matcher] {matched.relative_to(video.parent)!s} → {target.name!r}", flush=True)
+                    stamp_source(target, stage_tag)
+                    print(f"[srt-matcher] {matched.relative_to(video.parent)!s} → {target.name!r} ({stage_tag})", flush=True)
                 except OSError as e:
-                    print(f"[srt-matcher] copy failed ({e}); continuing", flush=True)
+                    print(f"[srt-matcher] copy/stamp failed ({e}); continuing", flush=True)
                 else:
                     continue
 
