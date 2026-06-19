@@ -7,7 +7,7 @@ port: 6065
 # manage a password we'd never actually rely on.
 auth: false
 
-# Two read-only sources collected under /media (see docker-compose.yml).
-# Infuse sees `qb/` and `yt/` as siblings under the WebDAV root.
+# Three read-only sources collected under /media (see docker-compose.yml).
+# Infuse sees `bt/`, `yt/`, and `translate_zh/` as siblings under the WebDAV root.
 permissions: R
 directory: /media

@@ -10,12 +10,13 @@ services:
       # .gitignore'd; bootstrap by copying config.example.yaml and editing.
       - ./config.yaml:/config.yaml:ro
       # Read-only mounts under a single /media scope: hacdias/webdav exposes
-      # one directory as the root, so we collect the two sources here. Infuse
-      # sees `qb/` and `yt/` as siblings. Read-only — Infuse is for browsing
-      # and playback, not library management; deletes happen via qBittorrent
-      # (seed-limit auto-cleanup) or shell.
-      - ../transcribe/data/library:/media/qb:ro
+      # one directory as the root, so we collect the three sources here. Infuse
+      # sees `bt/`, `yt/`, and `translate_zh/` as siblings. Read-only — Infuse
+      # is for browsing and playback, not library management; deletes happen
+      # via the transcribe UI or shell.
+      - ../transcribe/data/bt:/media/bt:ro
       - ../transcribe/data/downloads:/media/yt:ro
+      - ../transcribe/data/translate_zh:/media/translate_zh:ro
     networks:
       - my_network
 
