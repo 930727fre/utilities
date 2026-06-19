@@ -161,6 +161,21 @@ def render_chunk_for_prompt(chunk: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _cue_start_seconds(cue: dict) -> float:
+    """Parse the cue's start timestamp into seconds. Used to sort cues
+    chronologically before re-rendering, so sentinels appended at the
+    file end (`※ source: …` etc.) but timestamped at 00:00:00 sit at
+    the top of the rendered file. Permissive: malformed timestamps
+    sort to the start (safer than raising mid-render)."""
+    try:
+        start = cue["time"].split(" -->")[0]
+        h, m, rest = start.split(":")
+        sec, ms = rest.split(",")
+        return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
+    except (KeyError, ValueError, AttributeError):
+        return 0.0
+
+
 def _is_sentinel_cue(cue: dict) -> bool:
     """A cue whose visible text is just our ※ markers (e.g. `※ source: …`,
     `※ annotated`, the failure stamps). Filtered out of chunks sent to the
@@ -288,6 +303,14 @@ def _do_annotate(job_id: str):
         "time": "00:00:02,000 --> 00:00:04,000",
         "lines": ["※ annotated"],
     })
+
+    # stamp_source / stamp_os_failed / stamp_annotate_failed all APPEND to
+    # the file, so cues like `※ source: bundled-agent` (00:00:00) sit at
+    # the end of the cues list even though their timestamps belong at the
+    # start. Players sort by timestamp anyway, but anyone doing `head
+    # file.srt` sees a confusing order. Sort the cues list before render so
+    # file order = playback order and casual inspection is honest.
+    cues.sort(key=_cue_start_seconds)
 
     # Re-check before writing
     current = get_job(job_id)
