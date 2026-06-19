@@ -11,7 +11,8 @@ import yt_dlp
 
 from annotate import annotate_executor, annotate_job
 from gpu_lock import gpu_lock
-from srt_source import stamp_source, stamp_whisper_failed
+from srt_source import stamp_os_failed, stamp_source, stamp_whisper_failed
+from subs_finder import get_failure_reason
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
@@ -284,6 +285,17 @@ def process_bt_file(job_id: str):
             pass
         _fail(job_id, str(exc))
         return
+
+    # We only reach whisper for a bt video after the OS lookup already
+    # missed (see _queue_pending_bt_work). Surface WHY OS missed so the
+    # user knows whether to retry tomorrow (quota), accept this whisper
+    # SRT as best-effort (no candidate), or hunt down a manual sub.
+    os_reason = get_failure_reason(media_path, "en")
+    if os_reason:
+        try:
+            stamp_os_failed(srt_path, os_reason)
+        except OSError:
+            pass
 
     job = get_job(job_id)
     if not job or job["status"] == "DELETED":

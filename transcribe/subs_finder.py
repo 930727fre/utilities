@@ -52,7 +52,7 @@ HASH_CHUNK = 65536  # 64 KB for OSDb hash
 _token: Optional[str] = None
 _token_lock = threading.Lock()
 
-# Negative cache: { (video_path, languages): expiry_unix_timestamp }.
+# Negative cache: { (video_path, languages): (expiry_unix_timestamp, reason) }.
 #
 # Keyed by (path, languages) so the English bt branch and the zh-tw
 # translate_zh branch don't poison each other's cache — a video that has no
@@ -61,14 +61,21 @@ _token_lock = threading.Lock()
 # Without it the 30 s scan loop would burn an OS API call (and a Claude haiku
 # verify, which costs real money) every tick on the same video.
 #
-# Permanent entries (`float("inf")`) are for outcomes that the next API call
-# would deterministically reproduce — no candidate found, all candidates
-# rejected by the verifier, candidate has no file_id. Time-limited entries
-# are for "transient-looking" failures, almost always OpenSubtitles' daily
-# download quota cap (HTTP 406): the quota refreshes at the next UTC day
-# boundary, so we expire those after 24 h and let whichever scan tick lands
-# first try the API again.
-_failed: dict[tuple[str, str], float] = {}
+# Permanent entries (`expiry = float("inf")`) are for outcomes that the next
+# API call would deterministically reproduce — no candidate found, all
+# candidates rejected by the verifier, candidate has no file_id. Time-limited
+# entries are for "transient-looking" failures, almost always OpenSubtitles'
+# daily download quota cap (HTTP 406): the quota refreshes at the next UTC
+# day boundary, so we expire those after 24 h and let whichever scan tick
+# lands first try the API again.
+#
+# `reason` is a human-readable string surfaced via get_failure_reason() —
+# stamped into the SRT (bt branch via `※ os failed: …`) or into the .error
+# sidecar (translate_zh) so the user understands WHY OS didn't deliver
+# without needing to read `docker logs`. OS is the most consequential leg
+# of the pipeline (human subs > whisper), so its failure mode deserves
+# first-class visibility.
+_failed: dict[tuple[str, str], tuple[float, str]] = {}
 _failed_lock = threading.Lock()
 
 _TRANSIENT_RETRY_SECONDS = 24 * 3600
@@ -310,21 +317,22 @@ def find_subs(video: Path, languages: str = "en", out_path: Optional[Path] = Non
 
     now = time.time()
     with _failed_lock:
-        expiry = _failed.get(cache_key)
-        if expiry is not None:
+        entry = _failed.get(cache_key)
+        if entry is not None:
+            expiry, _reason = entry
             if expiry > now:
                 return None
             # Expired — drop the entry so we don't keep checking expiry.
             _failed.pop(cache_key, None)
 
-    def cache_permanent():
+    def cache_permanent(reason: str):
         with _failed_lock:
-            _failed[cache_key] = float("inf")
+            _failed[cache_key] = (float("inf"), reason)
         return None
 
-    def cache_transient():
+    def cache_transient(reason: str):
         with _failed_lock:
-            _failed[cache_key] = time.time() + _TRANSIENT_RETRY_SECONDS
+            _failed[cache_key] = (time.time() + _TRANSIENT_RETRY_SECONDS, reason)
         return None
 
     pick = _search_by_hash(video, languages)
@@ -335,17 +343,21 @@ def find_subs(video: Path, languages: str = "en", out_path: Optional[Path] = Non
         source_tag = "opensubtitles-text"
 
     if pick is None:
-        return cache_permanent()
+        return cache_permanent(
+            f"no verified subtitle candidate (lang={languages}); "
+            f"hash + text search both returned 0 results or the Haiku verifier "
+            f"rejected every candidate"
+        )
 
     attrs = pick.get("attributes") or {}
     files = attrs.get("files") or []
     if not files:
         print(f"[subs-finder] picked candidate has no files for {video.name!r}", flush=True)
-        return cache_permanent()
+        return cache_permanent("OpenSubtitles candidate had no downloadable file attached")
     file_id = files[0].get("file_id")
     if not file_id:
         print(f"[subs-finder] picked candidate has no file_id for {video.name!r}", flush=True)
-        return cache_permanent()
+        return cache_permanent("OpenSubtitles candidate file had no file_id")
     print(f"[subs-finder] picked release={attrs.get('release', '?')!r} "
           f"via {source_tag} (lang={languages})", flush=True)
 
@@ -356,7 +368,10 @@ def find_subs(video: Path, languages: str = "en", out_path: Optional[Path] = Non
         # network blip. Either way, "tomorrow / soon" is the right retry
         # window, not "permanent" or "every 30 s."
         print(f"[subs-finder] download API failed for {video.name!r}: {e}", flush=True)
-        return cache_transient()
+        return cache_transient(
+            f"OpenSubtitles /download API failed (most likely HTTP 406 = "
+            f"daily quota exhausted; retries in 24h): {e}"
+        )
 
     try:
         r = requests.get(download_url, timeout=60)
@@ -368,13 +383,13 @@ def find_subs(video: Path, languages: str = "en", out_path: Optional[Path] = Non
     except requests.RequestException as e:
         # CDN hiccup — also transient.
         print(f"[subs-finder] SRT fetch failed for {video.name!r}: {e}", flush=True)
-        return cache_transient()
+        return cache_transient(f"SRT CDN fetch failed (retries in 24h): {e}")
 
     if not srt_text.strip():
         # Genuinely missing content on OpenSubtitles' side — no point
         # retrying tomorrow.
         print(f"[subs-finder] empty SRT body for {video.name!r}", flush=True)
-        return cache_permanent()
+        return cache_permanent("OpenSubtitles returned an empty SRT body")
 
     out_path.write_text(srt_text, encoding="utf-8")
     print(f"[subs-finder] wrote {out_path.name!r} from OpenSubtitles", flush=True)
@@ -393,7 +408,24 @@ def cache_is_permanent_miss(video: Path, languages: str = "en") -> bool:
     Caller uses this to decide whether to surface a `.error` stamp.
     Transient (quota) misses return False so the UI stays in "working"."""
     with _failed_lock:
-        return _failed.get((str(video), languages)) == float("inf")
+        entry = _failed.get((str(video), languages))
+        return entry is not None and entry[0] == float("inf")
+
+
+def get_failure_reason(video: Path, languages: str = "en") -> Optional[str]:
+    """Return the human-readable failure reason for the last find_subs
+    call on (video, languages), or None if find_subs succeeded or was
+    never called for this pair.
+
+    Used by the bt path to stamp `※ os failed: …` into the SRT after
+    whisper takes over (so the user knows why OS didn't deliver this one)
+    and by translate_zh to write the `.error` sidecar with the actual
+    reason instead of a fixed string. Returns the reason regardless of
+    whether the cache entry is permanent or transient — callers usually
+    only ask after find_subs returned None on the current tick."""
+    with _failed_lock:
+        entry = _failed.get((str(video), languages))
+        return entry[1] if entry is not None else None
 
 
 def clear_cache(video: Path, languages: str = "en") -> None:

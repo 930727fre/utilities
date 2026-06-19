@@ -16,16 +16,18 @@ Markers in use (each in its own time window so a success run shows
 source-then-annotated in sequence rather than overlapping):
   00:00:00 → 00:00:02   ※ source: whisper / opensubtitles-hash / opensubtitles-text
   00:00:02 → 00:00:04   ※ annotated
+  00:00:04 → 00:00:08   ※ os failed: <reason>          (bt: appended when OS was tried + missed + whisper took over)
   00:00:00 → 00:00:03   ※ whisper failed: <reason>     (sole cue; whisper paths only)
   00:00:02 → 00:00:05   ※ annotate failed: <reason>    (appended after source)
 
-Cue indices live in the 99996+ band so they can never collide with real
+Cue indices live in the 99995+ band so they can never collide with real
 content cue numbers (longest movie SRTs are ~5000 cues).
 """
 from pathlib import Path
 
 WHISPER_FAILED_MARKER = "※ whisper failed:"
 ANNOTATE_FAILED_MARKER = "※ annotate failed:"
+OS_FAILED_MARKER = "※ os failed:"
 
 
 def _short(msg: str) -> str:
@@ -69,4 +71,26 @@ def stamp_annotate_failed(srt_path: Path, error: str) -> None:
             f"\n\n99996\n"
             f"00:00:02,000 --> 00:00:05,000\n"
             f"{ANNOTATE_FAILED_MARKER} {_short(error)}\n"
+        )
+
+
+def stamp_os_failed(srt_path: Path, reason: str) -> None:
+    """Append an `※ os failed: <reason>` sentinel to an existing SRT.
+
+    Used on the bt path after whisper takes over for a file where the
+    OpenSubtitles lookup didn't deliver — gives the user immediate
+    visibility into WHY OS didn't return a human-translated SRT (no
+    candidate / quota exhausted / verifier rejected / etc.) without
+    needing to read `docker logs`. OS is the most consequential leg of
+    the pipeline (human subs > whisper), so its failure mode deserves
+    first-class on-disk visibility.
+
+    Window 4–8 s sits after the source + annotated overlay so all three
+    show in sequence at the very start of playback.
+    """
+    with open(srt_path, "a", encoding="utf-8") as f:
+        f.write(
+            f"\n\n99995\n"
+            f"00:00:04,000 --> 00:00:08,000\n"
+            f"{OS_FAILED_MARKER} {_short(reason)}\n"
         )

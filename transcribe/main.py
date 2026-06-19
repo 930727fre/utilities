@@ -18,7 +18,7 @@ from annotate import annotate_executor, annotate_job
 from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
-from subs_finder import cache_is_permanent_miss, clear_cache, find_subs
+from subs_finder import cache_is_permanent_miss, clear_cache, find_subs, get_failure_reason
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
@@ -675,11 +675,9 @@ def _queue_pending_translate_zh_work():
         # picked up by the next tick after the 24h cache expires.
         if cache_is_permanent_miss(video, TRANSLATE_ZH_LANGUAGES):
             err_path = Path(str(zh_path) + ".error")
+            reason = get_failure_reason(video, TRANSLATE_ZH_LANGUAGES) or "(no reason recorded)"
             try:
-                err_path.write_text(
-                    "No Chinese subs found on OpenSubtitles for this release.",
-                    encoding="utf-8",
-                )
+                err_path.write_text(reason, encoding="utf-8")
             except OSError as e:
                 print(f"[translate_zh] stamp .error failed for {video.name!r}: {e}", flush=True)
 
