@@ -1,5 +1,5 @@
 """Far-future sentinel cues that double as on-disk state markers for the
-qb annotation pipeline.
+bt annotation pipeline.
 
 Every sentinel lives at 99:59:5x — past any plausible video runtime, so a
 playing user never sees them, but `grep ※` on the SRT recovers everything

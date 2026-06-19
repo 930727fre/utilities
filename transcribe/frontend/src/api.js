@@ -28,14 +28,14 @@ export async function deleteJob(id) {
   return r.json()
 }
 
-export async function listQb() {
-  const r = await fetch(`${BASE}/api/qb`)
-  if (!r.ok) throw new Error('Failed to list qb')
+export async function listBt() {
+  const r = await fetch(`${BASE}/api/bt`)
+  if (!r.ok) throw new Error('Failed to list bt')
   return r.json()
 }
 
 export async function submitMagnet(magnet) {
-  const r = await fetch(`${BASE}/api/qb/magnet`, {
+  const r = await fetch(`${BASE}/api/bt/magnet`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ magnet }),
@@ -48,19 +48,38 @@ export async function submitMagnet(magnet) {
 }
 
 export async function listTorrents() {
-  const r = await fetch(`${BASE}/api/qb/torrents`)
+  const r = await fetch(`${BASE}/api/bt/torrents`)
   if (!r.ok) throw new Error('Failed to list torrents')
   return r.json()
 }
 
 export async function deleteTorrent(wrapper) {
-  const r = await fetch(`${BASE}/api/qb/torrents/${encodeURIComponent(wrapper)}`, { method: 'DELETE' })
+  const r = await fetch(`${BASE}/api/bt/torrents/${encodeURIComponent(wrapper)}`, { method: 'DELETE' })
   if (!r.ok) throw new Error('Delete failed')
   return r.json()
 }
 
-export async function retryQbFile(path) {
-  const r = await fetch(`${BASE}/api/qb/retry`, {
+export async function retryBtFile(path) {
+  const r = await fetch(`${BASE}/api/bt/retry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) {
+    const detail = await r.json().catch(() => null)
+    throw new Error(detail?.detail || 'Retry failed')
+  }
+  return r.json()
+}
+
+export async function listTranslateZh() {
+  const r = await fetch(`${BASE}/api/translate_zh`)
+  if (!r.ok) throw new Error('Failed to list translate_zh')
+  return r.json()
+}
+
+export async function retryTranslateZh(path) {
+  const r = await fetch(`${BASE}/api/translate_zh/retry`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),

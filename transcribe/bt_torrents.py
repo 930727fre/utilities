@@ -4,12 +4,12 @@ Design contract:
   * No daemon, no RPC, no shared session state. Every magnet submission
     is a fresh `aria2c` subprocess that lives just long enough to download
     + seed under our limits, then exits.
-  * State is read from two places only — the filesystem under `/qb` (the
+  * State is read from two places only — the filesystem under `/bt` (the
     per-torrent wrapper folders + aria2c's `.aria2` control file) and an
     in-memory dict of running subprocesses. Container restart clears the
     in-memory dict and kills the subprocesses; users notice via UI rather
     than state corruption.
-  * Each torrent lands in its own per-torrent wrapper folder under `/qb`
+  * Each torrent lands in its own per-torrent wrapper folder under `/bt`
     regardless of single- vs multi-file, derived from the magnet's `dn=`
     parameter. DELETE always rmtree's the wrapper.
 
@@ -25,7 +25,7 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-QB_LIBRARY = Path("/qb")
+BT_LIBRARY = Path("/bt")
 
 # Seed limits applied to every torrent. aria2c exits when either limit is hit.
 SEED_TIME_MIN = 1440
@@ -61,19 +61,19 @@ def _safe_folder(name: str) -> str:
 
 
 def _pick_wrapper_dir(magnet: str) -> Path:
-    """Pick a free per-torrent wrapper folder under /qb for this magnet.
+    """Pick a free per-torrent wrapper folder under /bt for this magnet.
 
     Always puts the download inside its own folder so single-file torrents
-    don't dump their .mkv + sidecar SRT loose at /qb root. Disambiguates
+    don't dump their .mkv + sidecar SRT loose at /bt root. Disambiguates
     against an existing folder with the same dn= by appending ` (2)`,
     ` (3)`, ... in case the user re-submits the same magnet or two
     different torrents share a dn=.
     """
     base = _safe_folder(_magnet_display_name(magnet) or "torrent")
-    candidate = QB_LIBRARY / base
+    candidate = BT_LIBRARY / base
     i = 2
     while candidate.exists():
-        candidate = QB_LIBRARY / f"{base} ({i})"
+        candidate = BT_LIBRARY / f"{base} ({i})"
         i += 1
     candidate.mkdir(parents=True, exist_ok=True)
     return candidate
@@ -149,9 +149,9 @@ def resume_all() -> None:
     metadata fetch is one of the first things aria2c does) is logged as
     skipped, no further action.
     """
-    if not QB_LIBRARY.exists():
+    if not BT_LIBRARY.exists():
         return
-    for wrapper in QB_LIBRARY.iterdir():
+    for wrapper in BT_LIBRARY.iterdir():
         if not wrapper.is_dir():
             continue
         if not any(wrapper.rglob("*.aria2")):
@@ -190,17 +190,17 @@ def _phase(wrapper: Path, proc: subprocess.Popen | None) -> str:
 def list_torrents() -> list[dict]:
     """One entry per wrapper folder under /qb."""
     out = []
-    if not QB_LIBRARY.exists():
+    if not BT_LIBRARY.exists():
         return out
     with _procs_lock:
         procs_snapshot = dict(_procs)
         # Drop entries whose subprocess has exited AND whose wrapper no
         # longer exists — keeps the dict from growing forever.
         for name, proc in list(_procs.items()):
-            if proc.poll() is not None and not (QB_LIBRARY / name).exists():
+            if proc.poll() is not None and not (BT_LIBRARY / name).exists():
                 _procs.pop(name, None)
 
-    for wrapper in sorted(QB_LIBRARY.iterdir()):
+    for wrapper in sorted(BT_LIBRARY.iterdir()):
         if not wrapper.is_dir():
             continue
         proc = procs_snapshot.get(wrapper.name)
@@ -223,10 +223,10 @@ def delete(wrapper_name: str) -> None:
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    wrapper = (QB_LIBRARY / wrapper_name).resolve()
+    wrapper = (BT_LIBRARY / wrapper_name).resolve()
     # Safety: never touch anything outside /qb.
     try:
-        wrapper.relative_to(QB_LIBRARY.resolve())
+        wrapper.relative_to(BT_LIBRARY.resolve())
     except ValueError:
         return
     if wrapper.exists() and wrapper.is_dir():

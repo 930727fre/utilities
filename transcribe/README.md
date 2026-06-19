@@ -1,22 +1,23 @@
 # transcribe
 
-Two ways in:
+Three ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
-- **qb tab** — paste a magnet link. We spawn a one-shot `aria2c` subprocess that writes into `data/library/<per-torrent-wrapper>/` and keeps seeding until its limit (1440 min or ratio 1.0). The qb tab lists every wrapper folder; phase comes from filesystem inspection — `.aria2` control file present means downloading, gone means seeding, subprocess exit means done.
+- **bt tab** — paste a magnet link. We spawn a one-shot `aria2c` subprocess that writes into `data/bt/<per-torrent-wrapper>/` and keeps seeding until its limit (1440 min or ratio 1.0). The bt tab lists every wrapper folder; phase comes from filesystem inspection — `.aria2` control file present means downloading, gone means seeding, subprocess exit means done.
+- **translate_zh tab** — manually `mv` a watched-and-annotated folder into `data/translate_zh/`. The scan loop queries OpenSubtitles for human-translated zh-tw/zh-cn subs and saves them as `<stem>.zh-tw.srt` next to each video. No whisper fallback (whisper produces English); no annotation. Use this when the show's English+annotation pass wasn't enough — e.g. The Sopranos.
 
-In both cases, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
+For the yt + bt branches, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
-`data/downloads/` holds the yt-tab output; `data/library/` holds the BT downloads — mounted at `/qb` inside the container. [webdav](../webdav) reads both for Infuse playback (read-only). The qb-side pipeline never writes to `jobs.json` — every torrent is a directory under `/qb` plus (while live) an in-memory `subprocess.Popen` handle.
+`data/downloads/` holds the yt-tab output; `data/bt/` holds the BT downloads (mounted at `/bt`); `data/translate_zh/` holds the Chinese-fetch branch (mounted at `/translate_zh`). [webdav](../webdav) reads all three for Infuse playback (read-only). The bt-side pipeline never writes to `jobs.json` — every torrent is a directory under `/bt` plus (while live) an in-memory `subprocess.Popen` handle. The translate_zh branch also stays out of `jobs.json`.
 
 ## Stack
 
 | Layer | Tech |
 |------|------|
-| Frontend | Vite + React — tab between yt (URL submit) and qb (magnet submit + library browser) |
+| Frontend | Vite + React — three tabs: yt (URL submit), bt (magnet submit + library browser), translate_zh (Chinese-subs branch) |
 | Backend | FastAPI on port 8000 — API + in-process orchestrator |
 | Worker | `ThreadPoolExecutor(max_workers=1)` — serializes our per-job state mutations |
-| Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (qb, 1440 min / ratio 1.0 seed limits) |
+| Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (bt, 1440 min / ratio 1.0 seed limits) |
 | Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
 | SRT matcher | Claude (haiku) via tool-use — rescues bundled `.srt` files that strict same-stem matching misses |
@@ -32,12 +33,17 @@ data/downloads/                  ← YouTube output
   <sanitized title>.mp4
   <sanitized title>.srt          ← annotated in place
 
-data/library/<wrapper>/          ← per-torrent wrapper; aria2 service writes
-  Show.S01E01.mkv                  in here, transcribe reads via /qb mount
-  Show.S01E01.srt                ← written by qb transcribe, or torrent-bundled
+data/bt/<wrapper>/               ← per-torrent wrapper; aria2c writes here,
+  Show.S01E01.mkv                  transcribe reads via /bt mount
+  Show.S01E01.srt                ← written by bt transcribe, or torrent-bundled
 
   (for multi-file torrents, aria2 adds another nested folder named after
    the torrent's metadata "name" field inside <wrapper>; harmless, predictable)
+
+data/translate_zh/<folder>/      ← user mv's annotated folders in here;
+  Show.S01E01.mkv                  scan loop fetches Chinese subs and writes
+  Show.S01E01.srt                  the .zh-tw.srt sidecar next to the video.
+  Show.S01E01.zh-tw.srt          ← written by translate_zh scan
 ```
 
 YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for filesystem (control chars and `<>:"/\|?*` replaced with `_`, capped at 180 chars). Infuse auto-loads any `.srt` sibling as a sidecar.
@@ -67,34 +73,37 @@ docker compose up -d --build
 |--------|------|---------|
 | `GET`  | `/health` | Liveness |
 | `POST` | `/api/jobs` | Submit a YouTube URL (single video or `/playlist?list=…`) |
-| `GET`  | `/api/jobs?source=yt\|qb` | List jobs in one bucket; default `yt` |
+| `GET`  | `/api/jobs?source=yt\|bt` | List jobs in one bucket; default `yt` |
 | `GET`  | `/api/jobs/{id}` | Single job |
 | `POST` | `/api/jobs/{id}/retry` | Re-queue a failed job |
 | `DELETE` | `/api/jobs/{id}` | Mark deleted; yt jobs also remove their mp4 + srt |
-| `GET`  | `/api/qb` | Scan `/qb`; return file + annotation state |
-| `POST` | `/api/qb/magnet` | `{magnet}`: spawn an `aria2c` subprocess; returns `{wrapper}` (the per-torrent folder name under `/qb`) |
-| `GET`  | `/api/qb/torrents` | One entry per wrapper folder + its phase (`downloading` / `seeding` / `done` / `orphaned`) |
-| `DELETE` | `/api/qb/torrents/{wrapper}` | Kill the subprocess (if running) + rmtree the wrapper folder |
-| `POST` | `/api/qb/transcribe` | `{path}`: manually trigger whisper on a qb file (background loop already handles this; useful for power/curl override) |
+| `GET`  | `/api/bt` | Scan `/bt`; return file + annotation state |
+| `POST` | `/api/bt/magnet` | `{magnet}`: spawn an `aria2c` subprocess; returns `{wrapper}` (the per-torrent folder name under `/bt`) |
+| `GET`  | `/api/bt/torrents` | One entry per wrapper folder + its phase (`downloading` / `seeding` / `done` / `orphaned`) |
+| `DELETE` | `/api/bt/torrents/{wrapper}` | Kill the subprocess (if running) + rmtree the wrapper folder |
+| `POST` | `/api/bt/transcribe` | `{path}`: manually trigger whisper on a bt file (background loop already handles this; useful for power/curl override) |
+| `POST` | `/api/bt/retry` | `{path}`: clear the failure sentinel SRT so the loop picks the file up again |
+| `GET`  | `/api/translate_zh` | Scan `/translate_zh`; return file + zh-tw.srt sidecar state |
+| `POST` | `/api/translate_zh/retry` | `{path}`: clear the cache miss + delete the zh-tw.srt error sentinel so the loop retries |
 
 ## Job states
 
 ```
 yt:        PENDING → DOWNLOADING → TRANSCRIBING → ANNOTATING → SUCCESS
                                                  ↘ FAILED
-qb manual: PENDING → TRANSCRIBING → ANNOTATING → SUCCESS     (legacy /api/qb/transcribe path)
+bt manual: PENDING → TRANSCRIBING → ANNOTATING → SUCCESS     (legacy /api/bt/transcribe path)
                                    ↘ FAILED
 ```
 
-Magnet submissions don't enter `jobs.json` at all. The qb-tab UI shows two live views: the aria2 service's torrent list (downloading + seeding state, from `/api/qb/torrents`) and the filesystem scan (annotation state, from `/api/qb`). Whisper + annotation per video are queued by the background `_qb_work_loop` once files land in `/qb`.
+Magnet submissions don't enter `jobs.json` at all. The bt-tab UI shows two live views: the aria2c subprocess's torrent list (downloading + seeding state, from `/api/bt/torrents`) and the filesystem scan (annotation state, from `/api/bt`). Whisper + annotation per video are queued by the background `_bt_work_loop` once files land in `/bt`. translate_zh files also stay out of `jobs.json` — the scan loop is a tight filesystem-driven check.
 
-Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` jobs flip to `FAILED` on startup. `ANNOTATING` crashes flip to `SUCCESS` with `annotation_error` set; for qb jobs the background loop will retry.
+Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` jobs flip to `FAILED` on startup. `ANNOTATING` crashes flip to `SUCCESS` with `annotation_error` set; for bt jobs the background loop will retry.
 
 ## Annotation
 
 Claude scans the SRT for U.S.-cultural references a Taiwanese viewer might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues. After annotation, two far-future sentinel cues (at 99:59:58 / 99:59:59, never displayed during playback) sit at the end of every processed SRT: `※ source: <whisper|opensubtitles>` recording which pipeline step produced the SRT (only if we produced it; bundled / manually-dropped SRTs carry no source tag), and `※ annotated` marking the annotation pass complete. The presence of `※ annotated` on disk is the only annotation-state signal — no jobs.json overlay.
 
-A background loop scans `/qb` every 30s for both whisper work (video without SRT) and annotation work (SRT without `※ annotated`), and queues each through the appropriate executor. Per-path failure counters (whisper / annotation tracked separately) cap at 3 attempts each (in-memory; container restart resets them).
+A background loop scans `/bt` every 30s for both whisper work (video without SRT) and annotation work (SRT without `※ annotated`), and queues each through the appropriate executor. Failures are recorded as sentinel cues inside the SRT itself (`※ whisper failed:` / `※ annotate failed:`) so the loop knows not to retry; the UI ↻ button is the only path back into the pipeline.
 
 **Before queuing whisper, two rescue steps fire** (in order, cheapest first):
 
@@ -103,19 +112,34 @@ A background loop scans `/qb` every 30s for both whisper work (video without SRT
 
 Only if both steps miss does whisper run. For popular content (movies, mainstream TV) this means ~zero GPU is spent — OpenSubtitles' human-translated subs are higher quality than whisper output anyway.
 
-## qb scan filters
+## bt scan filters
 
-The qb tab and background annotation loop skip:
+The bt tab and background annotation loop skip:
 
 - Dotfiles
 - Any video that still has a sibling `.aria2` control file (aria2c hasn't finished downloading it)
 - Files whose mtime is within the last 60 seconds (belt-and-suspenders for non-aria2c writers — manual drops, webdav copies, rsync)
-(yt staging files live in `/app/data/downloads`, not `/qb`, so they're not scanned in the first place.)
+(yt staging files live in `/app/data/downloads`, not `/bt`, so they're not scanned in the first place.)
 
 Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.
+
+## translate_zh branch
+
+For shows whose English-only annotation pass isn't enough (Sopranos, The Wire, anything with thick dialect / mob slang / AAVE), the translate_zh tab fetches Chinese subs from OpenSubtitles in parallel to the existing English SRT.
+
+Workflow:
+1. Watch a folder finish the normal yt or bt annotation pipeline (`<stem>.srt` with `※ annotated` sentinel).
+2. `mv` the folder into `data/translate_zh/`.
+3. The scan loop (every 30s, same cadence as bt) picks each video up and queries OpenSubtitles with `languages=zh-tw,zh-cn`. The verifier (Claude Haiku) confirms the candidate matches the local release. ffsubsync corrects timing drift. Output saved as `<stem>.zh-tw.srt` next to the video.
+4. Infuse picks both `<stem>.srt` (English + ✨) and `<stem>.zh-tw.srt` (Chinese) as separate language tracks.
+
+If no Chinese subs exist on OpenSubtitles (niche shows), the loop writes a `<stem>.zh-tw.srt.error` marker file so the UI can show ! and the loop stops retrying. There's no whisper fallback — whisper produces English, which would defeat the point.
+
+Quota cache: same 24h transient expiry as bt's English path; permanent misses stay permanent until ↻.
 
 ## Known limitations
 
 - `jobs.json` is file-locked, not a real DB. Single-user is fine; for concurrent users move to SQLite.
 - Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
-- qb mode ignores embedded subtitle tracks (muxed into the video container) and non-standard sub layouts like `Subs/<episode>/2_English.srt` — only same-stem sidecar `.srt` files are recognized.
+- bt mode ignores embedded subtitle tracks (muxed into the video container) and non-standard sub layouts like `Subs/<episode>/2_English.srt` — only same-stem sidecar `.srt` files are recognized.
+- translate_zh has no whisper fallback (English would defeat the point) — niche shows with no OpenSubtitles Chinese coverage land at `!` and stay there until the user retries (after Chinese subs become available, or via a manual drop).

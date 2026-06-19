@@ -188,7 +188,7 @@ def annotate_job(job_id: str):
 
 
 def _srt_path_for(job: dict) -> Path | None:
-    if job.get("source") == "qb" and job.get("source_path"):
+    if job.get("source") == "bt" and job.get("source_path"):
         return Path(job["source_path"]).with_suffix(".srt")
     base = job.get("basename")
     if base:
@@ -201,9 +201,9 @@ def _do_annotate(job_id: str):
     if not job or job["status"] != "ANNOTATING":
         return
 
-    # qb jobs annotate the SRT sibling to the source video; yt jobs annotate
+    # bt jobs annotate the SRT sibling to the source video; yt jobs annotate
     # the title-based SRT in DOWNLOADS_DIR.
-    if job.get("source") == "qb" and job.get("source_path"):
+    if job.get("source") == "bt" and job.get("source_path"):
         srt_path = Path(job["source_path"]).with_suffix(".srt")
     else:
         basename = job.get("basename")

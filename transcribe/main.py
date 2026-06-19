@@ -13,26 +13,33 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-import qb_torrents
+import bt_torrents
 from annotate import annotate_executor, annotate_job
 from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
-from subs_finder import find_subs
-from tasks import enumerate_playlist, executor, process_qb_file, process_video
+from subs_finder import cache_is_permanent_miss, clear_cache, find_subs
+from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
-# qb mode scans only /qb. yt-tab files in DOWNLOADS_DIR show up in the yt
-# tab's job list — no reason to also list them under qb.
-QB_ROOTS = [Path("/qb")]
+# bt mode scans only /bt. yt-tab files in DOWNLOADS_DIR show up in the yt
+# tab's job list — no reason to also list them under bt.
+BT_ROOTS = [Path("/bt")]
+# translate_zh is the "fetch Chinese subs only" branch. User manually mv's
+# folders here; the scan loop queries OpenSubtitles with zh-tw/zh-cn and
+# saves results as `<stem>.zh-tw.srt` next to the video.
+TRANSLATE_ZH_ROOTS = [Path("/translate_zh")]
+TRANSLATE_ZH_LANGUAGES = "zh-tw,zh-cn"
+TRANSLATE_ZH_SUFFIX = ".zh-tw.srt"
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 ANNOTATION_MARKER = "※ annotated"
 WHISPER_FAILED_MARKER = "※ whisper failed:"
 ANNOTATE_FAILED_MARKER = "※ annotate failed:"
 MTIME_GRACE_SECONDS = 60
-QB_SCAN_INTERVAL = 30
+BT_SCAN_INTERVAL = 30
+TRANSLATE_ZH_SCAN_INTERVAL = 30
 
 # No in-memory failure counters: "we tried this once" is recorded as a
 # sentinel cue inside the SRT itself (see srt_source.stamp_*), so the
@@ -66,13 +73,13 @@ async def lifespan(app: FastAPI):
     jobs = read_jobs()
     changed = False
     for job in jobs:
-        # Schema migration: source labels were renamed youtube→yt, library→qb.
+        # Schema migration: source labels were renamed youtube→yt, library→qb→bt.
         src = job.get("source")
         if src == "youtube":
             job["source"] = "yt"
             changed = True
-        elif src == "library":
-            job["source"] = "qb"
+        elif src in ("library", "qb"):
+            job["source"] = "bt"
             changed = True
         if job["status"] in ("DOWNLOADING", "TRANSCRIBING", "PENDING"):
             job["status"] = "FAILED"
@@ -83,7 +90,7 @@ async def lifespan(app: FastAPI):
         elif job["status"] == "ANNOTATING":
             # Annotation is optional; if it crashed mid-way, flip back to SUCCESS.
             # The .srt may be partially overwritten — the background loop will
-            # pick it up again if it's a qb job, or the yt user re-runs the
+            # pick it up again if it's a bt job, or the yt user re-runs the
             # whole job.
             job["status"] = "SUCCESS"
             job["annotation_error"] = "Interrupted by restart"
@@ -95,17 +102,19 @@ async def lifespan(app: FastAPI):
 
     # Re-spawn aria2c for any wrapper that has a half-finished download
     # (a `.aria2` control file present from before the container restart).
-    qb_torrents.resume_all()
+    bt_torrents.resume_all()
 
-    annotation_loop_task = asyncio.create_task(_qb_work_loop())
+    annotation_loop_task = asyncio.create_task(_bt_work_loop())
+    translate_zh_loop_task = asyncio.create_task(_translate_zh_work_loop())
 
     try:
         yield
     finally:
         annotation_loop_task.cancel()
+        translate_zh_loop_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         annotate_executor.shutdown(wait=False, cancel_futures=True)
-        qb_torrents.shutdown()
+        bt_torrents.shutdown()
         # Free any GPU leases still held — the broker has no TTL, so without
         # this a SIGTERM mid-whisper leaves the next acquire blocked forever.
         release_all_held()
@@ -135,10 +144,10 @@ def _new_job(job_id: str, url: str) -> dict:
     }
 
 
-def _new_qb_job(job_id: str, source_path: str) -> dict:
+def _new_bt_job(job_id: str, source_path: str) -> dict:
     return {
         "job_id": job_id,
-        "source": "qb",
+        "source": "bt",
         "source_path": source_path,
         "title": Path(source_path).name,
         "status": "PENDING",
@@ -225,8 +234,8 @@ async def retry_job(job_id: str):
     job["error"] = None
     job["updated_at"] = _now()
     upsert_job(job)
-    if job.get("source") == "qb":
-        executor.submit(process_qb_file, job_id)
+    if job.get("source") == "bt":
+        executor.submit(process_bt_file, job_id)
     else:
         executor.submit(process_video, job_id, job["url"])
     return {"ok": True}
@@ -248,10 +257,10 @@ async def delete_job(job_id: str):
         (DOWNLOADS_DIR / f"{job_id}.mp4").unlink(missing_ok=True)
         (DOWNLOADS_DIR / f"{job_id}.srt").unlink(missing_ok=True)
 
-    # qb jobs reference files transcribe doesn't own through jobs.json (the
-    # legacy /api/qb/transcribe path) or are stale magnet-era entries from
+    # bt jobs reference files transcribe doesn't own through jobs.json (the
+    # legacy /api/bt/transcribe path) or are stale magnet-era entries from
     # earlier schema versions. Either way: just drop the entry, leave the
-    # filesystem alone. Torrents are managed via /api/qb/torrent/{wrapper}.
+    # filesystem alone. Torrents are managed via /api/bt/torrent/{wrapper}.
 
     job["status"] = "DELETED"
     job["updated_at"] = _now()
@@ -259,9 +268,9 @@ async def delete_job(job_id: str):
     return {"ok": True}
 
 
-# ── qb API ─────────────────────────────────────────────────────────────────
+# ── bt API ─────────────────────────────────────────────────────────────────
 
-class QbTranscribeRequest(BaseModel):
+class BtTranscribeRequest(BaseModel):
     path: str
 
 
@@ -292,11 +301,11 @@ def _read_srt_marker(srt_path: Path, marker: str) -> str | None:
     return None
 
 
-def _scan_qb() -> list[dict]:
-    """Walk QB_ROOTS, return one entry per video file. Filesystem only."""
+def _scan_bt() -> list[dict]:
+    """Walk BT_ROOTS, return one entry per video file. Filesystem only."""
     out = []
     now = time.time()
-    for root in QB_ROOTS:
+    for root in BT_ROOTS:
         if not root.exists():
             continue
         for video in root.rglob("*"):
@@ -350,25 +359,25 @@ def _scan_qb() -> list[dict]:
     return out
 
 
-def _validate_qb_path(path_str: str) -> Path:
-    """Reject paths outside the qb roots. Defense in depth."""
+def _validate_bt_path(path_str: str) -> Path:
+    """Reject paths outside the bt roots. Defense in depth."""
     path = Path(path_str).resolve()
-    for root in QB_ROOTS:
+    for root in BT_ROOTS:
         try:
             path.relative_to(root.resolve())
             return path
         except ValueError:
             continue
-    raise HTTPException(status_code=400, detail=f"Path not under a qb root: {path_str}")
+    raise HTTPException(status_code=400, detail=f"Path not under a bt root: {path_str}")
 
 
-@app.get("/api/qb")
-async def qb():
-    items = await asyncio.to_thread(_scan_qb)
+@app.get("/api/bt")
+async def bt():
+    items = await asyncio.to_thread(_scan_bt)
     jobs = read_jobs()
     in_flight: dict[str, str] = {}
     for j in jobs:
-        if j.get("source") != "qb":
+        if j.get("source") != "bt":
             continue
         if j["status"] in ("PENDING", "TRANSCRIBING", "ANNOTATING"):
             in_flight[j.get("source_path", "")] = j["job_id"]
@@ -377,44 +386,44 @@ async def qb():
     return items
 
 
-class QbMagnetRequest(BaseModel):
+class BtMagnetRequest(BaseModel):
     magnet: str
 
 
-@app.post("/api/qb/magnet", status_code=201)
-async def submit_magnet(req: QbMagnetRequest):
+@app.post("/api/bt/magnet", status_code=201)
+async def submit_magnet(req: BtMagnetRequest):
     """Spawn a one-shot aria2c subprocess for this magnet. The torrent
     lives entirely in the subprocess's lifetime + the per-torrent wrapper
-    folder under /qb; nothing is persisted in jobs.json."""
+    folder under /bt; nothing is persisted in jobs.json."""
     if not req.magnet.startswith("magnet:"):
         raise HTTPException(status_code=400, detail="must be a magnet: URI")
     try:
-        wrapper = qb_torrents.submit(req.magnet)
+        wrapper = bt_torrents.submit(req.magnet)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"aria2c launch failed: {exc}")
     return {"wrapper": wrapper}
 
 
-@app.get("/api/qb/torrents")
+@app.get("/api/bt/torrents")
 async def list_torrents():
-    """One entry per wrapper folder under /qb, phase derived live from
+    """One entry per wrapper folder under /bt, phase derived live from
     aria2c's `.aria2` control file + the subprocess registry."""
-    return qb_torrents.list_torrents()
+    return bt_torrents.list_torrents()
 
 
-@app.delete("/api/qb/torrents/{wrapper}")
+@app.delete("/api/bt/torrents/{wrapper}")
 async def delete_torrent(wrapper: str):
     """Kill the subprocess (if running) + rmtree the wrapper folder."""
-    qb_torrents.delete(wrapper)
+    bt_torrents.delete(wrapper)
     return {"ok": True}
 
 
-class QbRetryRequest(BaseModel):
+class BtRetryRequest(BaseModel):
     path: str
 
 
-@app.post("/api/qb/retry", status_code=200)
-async def qb_retry(req: QbRetryRequest):
+@app.post("/api/bt/retry", status_code=200)
+async def bt_retry(req: BtRetryRequest):
     """Clear a failure sentinel so the scan loop picks the file up again.
 
     Implementation: delete the SRT entirely. Yes that throws away a
@@ -423,7 +432,7 @@ async def qb_retry(req: QbRetryRequest):
     different retry buttons. Whisper's the expensive bit, and even then
     it's <10 min on the GPU; cheaper than building partial-retry UI.
     """
-    path = _validate_qb_path(req.path)
+    path = _validate_bt_path(req.path)
     srt = path.with_suffix(".srt")
     if srt.exists():
         try:
@@ -433,40 +442,40 @@ async def qb_retry(req: QbRetryRequest):
     return {"ok": True}
 
 
-@app.post("/api/qb/transcribe", status_code=201)
-async def transcribe_qb_file(req: QbTranscribeRequest):
-    path = _validate_qb_path(req.path)
+@app.post("/api/bt/transcribe", status_code=201)
+async def transcribe_bt_file(req: BtTranscribeRequest):
+    path = _validate_bt_path(req.path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
     # Reject duplicate in-flight requests for the same path.
     for j in read_jobs():
-        if (j.get("source") == "qb"
+        if (j.get("source") == "bt"
                 and j.get("source_path") == str(path)
                 and j["status"] in ("PENDING", "TRANSCRIBING", "ANNOTATING")):
             raise HTTPException(status_code=409, detail="Already in flight")
 
     job_id = str(uuid.uuid4())
-    job = _new_qb_job(job_id, str(path))
+    job = _new_bt_job(job_id, str(path))
     upsert_job(job)
-    executor.submit(process_qb_file, job_id)
+    executor.submit(process_bt_file, job_id)
     return {"job_id": job_id, "status": "PENDING"}
 
 
 # ── Background annotation loop ────────────────────────────────────────────
 
-def _queue_pending_qb_work():
-    """For every qb video without SRT, enqueue whisper; for every SRT without ※,
+def _queue_pending_bt_work():
+    """For every bt video without SRT, enqueue whisper; for every SRT without ※,
     enqueue annotation. Files carrying a `※ whisper failed:` or
     `※ annotate failed:` sentinel in their SRT are skipped — the worker
     that hit the error wrote the sentinel itself, and the user clears it
     via the UI ↻ button (which deletes the SRT).
     """
-    items = _scan_qb()
+    items = _scan_bt()
     jobs = read_jobs()
     in_flight_paths = set()
     for j in jobs:
-        if j.get("source") != "qb":
+        if j.get("source") != "bt":
             continue
         if j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING"):
             in_flight_paths.add(j.get("source_path"))
@@ -475,7 +484,7 @@ def _queue_pending_qb_work():
         if item["path"] in in_flight_paths:
             continue
 
-        # whisper-failed SRTs read as `has_srt=False` from _scan_qb, but the
+        # whisper-failed SRTs read as `has_srt=False` from _scan_bt, but the
         # sentinel is still present on disk — skip so we don't re-fire.
         if item["whisper_error"]:
             continue
@@ -506,9 +515,9 @@ def _queue_pending_qb_work():
             #    failure sentinel onto the SRT itself — we'll see it on the
             #    next tick and skip via the `whisper_error` branch above.
             job_id = str(uuid.uuid4())
-            job = _new_qb_job(job_id, item["path"])
+            job = _new_bt_job(job_id, item["path"])
             upsert_job(job)
-            executor.submit(process_qb_file, job_id)
+            executor.submit(process_bt_file, job_id)
             continue
 
         # Has SRT — check if annotation is needed. Skip annotated-once-
@@ -518,17 +527,169 @@ def _queue_pending_qb_work():
         if item["annotate_error"]:
             continue
         job_id = str(uuid.uuid4())
-        job = _new_qb_job(job_id, item["path"])
+        job = _new_bt_job(job_id, item["path"])
         job["status"] = "ANNOTATING"
         upsert_job(job)
         annotate_executor.submit(annotate_job, job_id)
 
 
-async def _qb_work_loop():
-    """Periodically scan /qb for files needing whisper or annotation, and queue them."""
+async def _bt_work_loop():
+    """Periodically scan /bt for files needing whisper or annotation, and queue them."""
     while True:
         try:
-            await asyncio.to_thread(_queue_pending_qb_work)
+            await asyncio.to_thread(_queue_pending_bt_work)
         except Exception:
             traceback.print_exc()
-        await asyncio.sleep(QB_SCAN_INTERVAL)
+        await asyncio.sleep(BT_SCAN_INTERVAL)
+
+
+# ── translate_zh API + scan loop ──────────────────────────────────────────
+#
+# The translate_zh branch shares the same filesystem-as-state pattern as bt:
+# no jobs.json overlay, every file's state derives entirely from sidecar
+# files in its folder. Three signals per video:
+#   - <stem>.zh-tw.srt        → done
+#   - <stem>.zh-tw.srt.error  → permanent miss (no Chinese subs available)
+#   - neither                  → still trying (working/queued)
+# The `.error` sentinel is a plain text file with the failure reason; the UI
+# tooltips it and exposes a retry button that deletes the sentinel + clears
+# the in-memory subs_finder cache.
+
+def _scan_translate_zh() -> list[dict]:
+    out = []
+    now = time.time()
+    for root in TRANSLATE_ZH_ROOTS:
+        if not root.exists():
+            continue
+        for video in root.rglob("*"):
+            if not video.is_file():
+                continue
+            if video.suffix.lower() not in VIDEO_EXTS:
+                continue
+            if video.name.startswith("."):
+                continue
+            # mtime grace for in-progress mv / rsync into this folder.
+            try:
+                if now - video.stat().st_mtime < MTIME_GRACE_SECONDS:
+                    continue
+            except OSError:
+                continue
+            zh_path = video.parent / f"{video.stem}{TRANSLATE_ZH_SUFFIX}"
+            err_path = Path(str(zh_path) + ".error")
+            has_zh = zh_path.exists()
+            error: str | None = None
+            if not has_zh and err_path.exists():
+                try:
+                    error = err_path.read_text(encoding="utf-8", errors="replace").strip() or "(empty error)"
+                except OSError:
+                    error = "(unreadable .error stamp)"
+            try:
+                parent_rel = str(video.parent.relative_to(root))
+            except ValueError:
+                parent_rel = ""
+            if parent_rel == ".":
+                parent_rel = ""
+            out.append({
+                "path": str(video),
+                "name": video.name,
+                "parent": parent_rel,
+                "root": str(root),
+                "has_zh_srt": has_zh,
+                "error": error,
+            })
+    out.sort(key=lambda x: (x["root"], x["parent"], x["name"].lower()))
+    return out
+
+
+def _validate_translate_zh_path(path_str: str) -> Path:
+    path = Path(path_str).resolve()
+    for root in TRANSLATE_ZH_ROOTS:
+        try:
+            path.relative_to(root.resolve())
+            return path
+        except ValueError:
+            continue
+    raise HTTPException(status_code=400, detail=f"Path not under a translate_zh root: {path_str}")
+
+
+@app.get("/api/translate_zh")
+async def translate_zh():
+    return await asyncio.to_thread(_scan_translate_zh)
+
+
+class TranslateZhRetryRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/translate_zh/retry", status_code=200)
+async def translate_zh_retry(req: TranslateZhRetryRequest):
+    """Clear the failure sentinel + in-memory cache so the next scan tick
+    re-queries OpenSubtitles for this video."""
+    path = _validate_translate_zh_path(req.path)
+    zh_path = path.parent / f"{path.stem}{TRANSLATE_ZH_SUFFIX}"
+    err_path = Path(str(zh_path) + ".error")
+    if err_path.exists():
+        try:
+            err_path.unlink()
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"unlink .error failed: {e}")
+    if zh_path.exists():
+        try:
+            zh_path.unlink()
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"unlink .zh-tw.srt failed: {e}")
+    clear_cache(path, TRANSLATE_ZH_LANGUAGES)
+    return {"ok": True}
+
+
+def _queue_pending_translate_zh_work():
+    """For every translate_zh video without a `.zh-tw.srt` sidecar (and no
+    `.error` stamp), call subs_finder synchronously with Chinese languages.
+
+    Synchronous because:
+      - find_subs is network + ffsubsync (up to ~5 min worst case), and
+        translate_zh has no upstream queue depth pressure — folders trickle
+        in by hand;
+      - it keeps backpressure simple: while a call is in flight, the next
+        scan tick is delayed, which prevents fanning out parallel OS calls
+        and burning the quota faster than the 24h transient cache expects.
+
+    Permanent misses (no candidates / verifier rejects all / empty body)
+    surface as a `<stem>.zh-tw.srt.error` stamp so the UI can show !;
+    transient misses (HTTP 406 quota) leave no stamp — the in-memory
+    cache returns None for 24h and the loop quietly waits.
+    """
+    items = _scan_translate_zh()
+    for item in items:
+        if item["has_zh_srt"]:
+            continue
+        if item["error"]:
+            continue  # already stamped; user must retry to clear
+        video = Path(item["path"])
+        zh_path = video.parent / f"{video.stem}{TRANSLATE_ZH_SUFFIX}"
+        result = find_subs(video, languages=TRANSLATE_ZH_LANGUAGES, out_path=zh_path)
+        if result is not None:
+            continue
+        # find_subs returned None — either permanent miss or transient
+        # (quota). Stamp only the permanent case so transient retries get
+        # picked up by the next tick after the 24h cache expires.
+        if cache_is_permanent_miss(video, TRANSLATE_ZH_LANGUAGES):
+            err_path = Path(str(zh_path) + ".error")
+            try:
+                err_path.write_text(
+                    "No Chinese subs found on OpenSubtitles for this release.",
+                    encoding="utf-8",
+                )
+            except OSError as e:
+                print(f"[translate_zh] stamp .error failed for {video.name!r}: {e}", flush=True)
+
+
+async def _translate_zh_work_loop():
+    """Periodically scan /translate_zh for videos without a Chinese sub
+    sidecar, and call find_subs(zh-tw,zh-cn) for each."""
+    while True:
+        try:
+            await asyncio.to_thread(_queue_pending_translate_zh_work)
+        except Exception:
+            traceback.print_exc()
+        await asyncio.sleep(TRANSLATE_ZH_SCAN_INTERVAL)

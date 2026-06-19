@@ -5,11 +5,16 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     volumes:
       - ./data:/app/data
-      # /qb is the annotation library. Each magnet submitted via the qb tab
+      # /bt is the annotation library. Each magnet submitted via the bt tab
       # gets its own aria2c subprocess that writes a per-torrent wrapper
       # folder in here; transcribe's annotation loop then reads videos out
       # for whisper + Claude. Single bind mount, single source of truth.
-      - ./data/library:/qb
+      - ./data/bt:/bt
+      # /translate_zh is the "fetch Chinese subs only" branch. User manually
+      # mv's a watched-and-annotated folder in here; the scan loop queries
+      # OpenSubtitles for zh-tw/zh-cn subs and saves them as
+      # `<stem>.zh-tw.srt` next to the video. No whisper fallback.
+      - ./data/translate_zh:/translate_zh
     environment:
       - JOBS_FILE=/app/data/jobs.json
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be exported before docker compose up}

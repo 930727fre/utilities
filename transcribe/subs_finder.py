@@ -1,6 +1,6 @@
 """OpenSubtitles.com client — find a matching subtitle for a video file.
 
-Called before whisper for any qb video that's missing a strict-stem .srt. For
+Called before whisper for any bt video that's missing a strict-stem .srt. For
 popular content (movies, mainstream TV) OpenSubtitles usually has a hand-
 translated sub with proper punctuation and clean cue boundaries — much better
 than whisper output, and free at the API layer (just 5-20 downloads/day on the
@@ -52,7 +52,11 @@ HASH_CHUNK = 65536  # 64 KB for OSDb hash
 _token: Optional[str] = None
 _token_lock = threading.Lock()
 
-# Negative cache: { video_path: expiry_unix_timestamp }.
+# Negative cache: { (video_path, languages): expiry_unix_timestamp }.
+#
+# Keyed by (path, languages) so the English bt branch and the zh-tw
+# translate_zh branch don't poison each other's cache — a video that has no
+# English subs may well have Chinese subs, and vice versa.
 #
 # Without it the 30 s scan loop would burn an OS API call (and a Claude haiku
 # verify, which costs real money) every tick on the same video.
@@ -64,7 +68,7 @@ _token_lock = threading.Lock()
 # download quota cap (HTTP 406): the quota refreshes at the next UTC day
 # boundary, so we expire those after 24 h and let whichever scan tick lands
 # first try the API again.
-_failed: dict[str, float] = {}
+_failed: dict[tuple[str, str], float] = {}
 _failed_lock = threading.Lock()
 
 _TRANSIENT_RETRY_SECONDS = 24 * 3600
@@ -204,7 +208,7 @@ def _parse_filename(video: Path) -> dict:
 
 # ── Two search strategies ─────────────────────────────────────────────────
 
-def _search_by_hash(video: Path) -> Optional[dict]:
+def _search_by_hash(video: Path, languages: str) -> Optional[dict]:
     """Hash-based search. Returns the verified candidate or None."""
     try:
         h = _osdb_hash(video)
@@ -215,7 +219,7 @@ def _search_by_hash(video: Path) -> Optional[dict]:
     try:
         r = requests.get(
             f"{API_BASE}/subtitles",
-            params={"moviehash": h, "languages": "en"},
+            params={"moviehash": h, "languages": languages},
             headers=_headers(),
             timeout=15,
         )
@@ -226,7 +230,7 @@ def _search_by_hash(video: Path) -> Optional[dict]:
         return None
 
     if not data:
-        print(f"[subs-finder] hash 0 results for {video.name!r}", flush=True)
+        print(f"[subs-finder] hash 0 results for {video.name!r} (lang={languages})", flush=True)
         return None
 
     # `moviehash_match` is uploader-claimed (not server-verified); Haiku
@@ -240,7 +244,7 @@ def _search_by_hash(video: Path) -> Optional[dict]:
     return verify_candidate(video, hash_exact)
 
 
-def _search_by_text(video: Path) -> Optional[dict]:
+def _search_by_text(video: Path, languages: str) -> Optional[dict]:
     """Text-based search using title + (year | season/episode). Returns the
     verified candidate or None.
 
@@ -253,7 +257,7 @@ def _search_by_text(video: Path) -> Optional[dict]:
         print(f"[subs-finder] text: could not extract title from {video.name!r}", flush=True)
         return None
 
-    params: dict = {"query": info["title"], "languages": "en"}
+    params: dict = {"query": info["title"], "languages": languages}
     if info["season"] is not None and info["episode"] is not None:
         params["season_number"] = info["season"]
         params["episode_number"] = info["episode"]
@@ -288,37 +292,46 @@ def _search_by_text(video: Path) -> Optional[dict]:
 
 # ── Entry point ───────────────────────────────────────────────────────────
 
-def find_subs(video: Path) -> Optional[Path]:
-    """Search OpenSubtitles for an English subtitle matching this video.
+def find_subs(video: Path, languages: str = "en", out_path: Optional[Path] = None) -> Optional[Path]:
+    """Search OpenSubtitles for a subtitle in `languages` matching this video.
+
+    `languages` is a comma-separated list of ISO codes (e.g. "en",
+    "zh-tw,zh-cn"). `out_path` overrides the default `video.with_suffix('.srt')`
+    output location — used by the translate_zh branch to write a `.zh-tw.srt`
+    sidecar alongside (rather than overwriting) the English SRT.
 
     Try hash search first (zero timing drift when it hits), fall back to
     text search (drift fixed by ffsubsync). Returns the written SRT path
     on success, None on any miss/error.
     """
+    if out_path is None:
+        out_path = video.with_suffix(".srt")
+    cache_key = (str(video), languages)
+
     now = time.time()
     with _failed_lock:
-        expiry = _failed.get(str(video))
+        expiry = _failed.get(cache_key)
         if expiry is not None:
             if expiry > now:
                 return None
             # Expired — drop the entry so we don't keep checking expiry.
-            _failed.pop(str(video), None)
+            _failed.pop(cache_key, None)
 
     def cache_permanent():
         with _failed_lock:
-            _failed[str(video)] = float("inf")
+            _failed[cache_key] = float("inf")
         return None
 
     def cache_transient():
         with _failed_lock:
-            _failed[str(video)] = time.time() + _TRANSIENT_RETRY_SECONDS
+            _failed[cache_key] = time.time() + _TRANSIENT_RETRY_SECONDS
         return None
 
-    pick = _search_by_hash(video)
+    pick = _search_by_hash(video, languages)
     source_tag = "opensubtitles-hash"
 
     if pick is None:
-        pick = _search_by_text(video)
+        pick = _search_by_text(video, languages)
         source_tag = "opensubtitles-text"
 
     if pick is None:
@@ -334,7 +347,7 @@ def find_subs(video: Path) -> Optional[Path]:
         print(f"[subs-finder] picked candidate has no file_id for {video.name!r}", flush=True)
         return cache_permanent()
     print(f"[subs-finder] picked release={attrs.get('release', '?')!r} "
-          f"via {source_tag}", flush=True)
+          f"via {source_tag} (lang={languages})", flush=True)
 
     try:
         download_url = _download_with_retry(file_id)
@@ -363,16 +376,31 @@ def find_subs(video: Path) -> Optional[Path]:
         print(f"[subs-finder] empty SRT body for {video.name!r}", flush=True)
         return cache_permanent()
 
-    out = video.with_suffix(".srt")
-    out.write_text(srt_text, encoding="utf-8")
-    print(f"[subs-finder] wrote {out.name!r} from OpenSubtitles", flush=True)
+    out_path.write_text(srt_text, encoding="utf-8")
+    print(f"[subs-finder] wrote {out_path.name!r} from OpenSubtitles", flush=True)
 
     # ffsubsync overwrites the SRT, so source-stamp AFTER it (whether it
     # succeeded or fell through). Tag distinguishes hash vs text origin —
     # text-origin SRTs are more likely to need timing verification.
-    _resync_inplace(video, out)
-    stamp_source(out, source_tag)
-    return out
+    _resync_inplace(video, out_path)
+    stamp_source(out_path, source_tag)
+    return out_path
+
+
+def cache_is_permanent_miss(video: Path, languages: str = "en") -> bool:
+    """True if the last find_subs call cached this (video, languages) pair
+    as a permanent miss (no candidates / verifier rejection / empty body).
+    Caller uses this to decide whether to surface a `.error` stamp.
+    Transient (quota) misses return False so the UI stays in "working"."""
+    with _failed_lock:
+        return _failed.get((str(video), languages)) == float("inf")
+
+
+def clear_cache(video: Path, languages: str = "en") -> None:
+    """Drop the cached miss for (video, languages) so the next find_subs
+    call retries the API. Used by the retry endpoint."""
+    with _failed_lock:
+        _failed.pop((str(video), languages), None)
 
 
 def _resync_inplace(video: Path, srt: Path) -> None:

@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef } from 'react'
-import { listQb, listTorrents, submitMagnet, deleteTorrent, retryQbFile } from '../api'
+import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile } from '../api'
 
-// qb tab has two regions: the magnet form + active-torrent list at the
+// bt tab has two regions: the magnet form + active-torrent list at the
 // top (each row = one wrapper folder, phase derived from filesystem + an
 // in-memory subprocess registry on the backend), and the library list
-// below (filesystem scan, annotation state). No qb-side persistence in
+// below (filesystem scan, annotation state). No bt-side persistence in
 // jobs.json — the wrapper folder name IS the identifier.
 
 const PHASE_LABEL = {
@@ -20,7 +20,7 @@ const PHASE_TITLE = {
   orphaned:    'Subprocess gone (container was restarted); files on disk are still usable',
 }
 
-export default function Qb() {
+export default function Bt() {
   const [items, setItems] = useState([])
   const [torrents, setTorrents] = useState([])
   const [magnet, setMagnet] = useState('')
@@ -29,7 +29,7 @@ export default function Qb() {
 
   async function refresh() {
     try {
-      const [lib, t] = await Promise.all([listQb(), listTorrents()])
+      const [lib, t] = await Promise.all([listBt(), listTorrents()])
       setItems(lib)
       setTorrents(t)
     } catch (e) {
@@ -80,7 +80,7 @@ export default function Qb() {
 
   async function handleRetry(path) {
     try {
-      await retryQbFile(path)
+      await retryBtFile(path)
       await refresh()
     } catch (err) {
       alert('Retry failed: ' + err.message)
@@ -90,7 +90,7 @@ export default function Qb() {
   const sortedTorrents = [...torrents].sort((a, b) => a.name.localeCompare(b.name))
 
   // Each torrent lives in its own per-torrent wrapper folder — group by it.
-  // Loose files at /qb root land under an empty group with no header.
+  // Loose files at /bt root land under an empty group with no header.
   const groups = new Map()
   for (const item of items) {
     const key = item.parent || ''
