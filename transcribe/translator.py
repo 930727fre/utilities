@@ -85,6 +85,13 @@ translate concisely as 「[掌聲]」「[音樂]」「[關門聲]」 etc.
 naturally; keep `♪` markers if present in the source.
 - Speaker labels (e.g. `MICHAEL:`, `-CARMELA:`): keep the label format but \
 translate the dialogue part. Names stay in original Roman script.
+- Personal names inside dialogue (Tony, Carmela, Christopher, Junior, \
+Dr. Cusamano, Pussy, etc.): keep in the original Roman script verbatim — \
+DO NOT transliterate into Chinese characters (write "Tony" not "東尼", \
+"Carmela" not "卡梅拉"). This applies even if a name has a well-known \
+Chinese rendering. Place names follow the same rule unless they are \
+canonical 繁體中文 terms (e.g. "New York" stays "紐約" because that is \
+the standard rendering, but "Newark" stays "Newark").
 - Lines that already contain `※` (our own sentinel markers like \
 `※ source: …`, `※ annotated`): pass through UNCHANGED, do not translate, \
 do not edit.
