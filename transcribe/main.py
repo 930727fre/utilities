@@ -311,6 +311,19 @@ def _is_annotated_srt(srt_path: Path) -> bool:
         return False
 
 
+def _has_source_stamp(srt_path: Path) -> bool:
+    """Whether the SRT carries any `※ source: …` sentinel cue. Used to
+    detect strict-stem bundled SRTs (`<stem>.srt` sitting next to the
+    video, picked up by has_srt=True without ever invoking srt_matcher),
+    which otherwise carry no source attribution."""
+    try:
+        with open(srt_path, "rb") as f:
+            content = f.read()
+        return b"\xe2\x80\xbb source:" in content  # "※ source:" UTF-8
+    except OSError:
+        return False
+
+
 def _read_srt_marker(srt_path: Path, marker: str) -> str | None:
     """If the SRT contains a sentinel cue starting with `marker`, return the
     text that follows (the error message). Returns None if not present."""
@@ -619,6 +632,21 @@ def _queue_pending_bt_work():
         # sentinel is still present on disk — skip so we don't re-fire.
         if item["whisper_error"]:
             continue
+
+        # If the SRT was simply sitting next to the video as a strict-stem
+        # sibling (the torrent shipped `<stem>.srt` flat next to `<stem>.mkv`,
+        # no Subs/ folder), srt_matcher never fired and nothing stamped a
+        # source on it. Stamp `bundled-strict-stem` retroactively so the
+        # playback flash + on-disk attribution stay consistent with every
+        # other path. Cheap substring check, idempotent.
+        if item["has_srt"]:
+            srt_path = Path(item["path"]).with_suffix(".srt")
+            if not _has_source_stamp(srt_path):
+                try:
+                    stamp_source(srt_path, "bundled-strict-stem")
+                except OSError as e:
+                    print(f"[srt-matcher] strict-stem source stamp failed for "
+                          f"{srt_path.name!r}: {e}", flush=True)
 
         if not item["has_srt"]:
             video = Path(item["path"])

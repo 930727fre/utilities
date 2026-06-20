@@ -238,11 +238,14 @@ def _tool_srt_summary(sandbox: Path, args: dict) -> str:
 
 def find_matching_srt(video: Path) -> Optional[tuple[Path, str]]:
     """Find an English subtitle for `video` via tool-use Haiku agent.
-    Returns `(source_path, "bundled")` on success or None on miss.
+    Returns `(source_path, "bundled-recursive")` on success or None on miss.
 
-    The "bundled" stage tag matches the `※ source: …` convention used by
-    the rest of the pipeline — caller passes it to `stamp_source` after
-    copying the matched SRT into place.
+    The "bundled-recursive" stage tag matches the `※ source: …` convention
+    used by the rest of the pipeline — caller passes it to `stamp_source`
+    after copying the matched SRT into place. "Recursive" distinguishes
+    this case (agent had to walk into Subs/ or similar subfolders to find
+    the SRT) from "bundled-strict-stem" (a `<stem>.srt` sitting right next
+    to the video, found without invoking the agent).
 
     Caller should COPY (not move) the returned file to `<video-stem>.srt`
     so the original layout (especially nested torrent Subs/ folders)
@@ -315,7 +318,7 @@ def find_matching_srt(video: Path) -> Optional[tuple[Path, str]]:
                 print(f"[srt-matcher] invalid match returned: {match_rel!r}", flush=True)
                 return None
             print(f"[srt-matcher] picked {match_rel!r} for {video.name!r}", flush=True)
-            return target, "bundled"
+            return target, "bundled-recursive"
 
         if not tool_results:
             # Model returned text-only (no tool_use) — protocol violation; bail.
