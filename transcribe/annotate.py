@@ -1,4 +1,4 @@
-"""SRT annotation worker — calls Gemini to flag U.S.-culture-specific references
+"""SRT annotation worker — calls Claude (Sonnet) to flag U.S.-culture-specific references
 and embeds short 繁體中文 notes into each cue's text.
 """
 import re

@@ -381,7 +381,7 @@ def _scan_bt() -> list[dict]:
             has_annotation = has_real_srt and _is_annotated_srt(srt)
             # Chinese sub state (user-triggered translate-zh button output).
             # `.zh-tw.srt` is the sidecar; `.zh-tw.srt.error` records a
-            # failure reason from OS-miss + Gemini-also-failed paths.
+            # failure reason from Haiku translation when it surfaces one.
             zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
             zh_err_path = Path(str(zh_path) + ".error")
             has_zh_srt = zh_path.exists()
@@ -481,21 +481,19 @@ class BtTranslateZhRequest(BaseModel):
 @app.post("/api/bt/translate-zh", status_code=200)
 async def bt_translate_zh(req: BtTranslateZhRequest):
     """Submit every video in `wrapper` to the Chinese-translation worker.
-    Each video tries OS find_subs(zh-tw,zh-cn) first, falls through to
-    Gemini translating the sibling `<stem>.srt`, writes `<stem>.zh-tw.srt`
-    on success or `<stem>.zh-tw.srt.error` on failure.
+    Each video uses Haiku to translate the sibling `<stem>.srt` into
+    `<stem>.zh-tw.srt`, or stamps `<stem>.zh-tw.srt.error` on failure.
 
     Refuses if:
       - the wrapper isn't directly under /bt
       - the torrent hasn't finished (any `.aria2` anywhere)
       - any video lacks the `※ annotated` sentinel (i.e. bt pipeline not
-        done yet — without an annotated English SRT, the Gemini fallback
+        done yet — without an annotated English SRT, the Haiku translator
         has nothing to translate from)
 
     Idempotent — videos that already have `<stem>.zh-tw.srt` get skipped
     inside the worker. Calling again after a partial failure clears
-    `.error` stamps + the subs_finder cache, so the button doubles as
-    retry."""
+    `.error` stamps, so the button doubles as retry."""
     bt_root = BT_ROOTS[0]
     src = (bt_root / req.wrapper).resolve()
     try:

@@ -1,8 +1,10 @@
-"""English-to-zh-TW SRT translator — Gemini Flash Lite drives the bt
+"""English-to-zh-TW SRT translator — Claude Haiku drives the bt
 "translate to 中" button. Reuses annotate.py's SRT parse → chunk →
 forced-JSON → render pattern. Translation is a well-trodden,
-low-creativity task that the small Gemini tier handles fine; quality on
-mainstream films is comparable to an average OpenSubtitles user upload.
+low-creativity task; Haiku's instruction-following is stronger than
+Haiku at the structural constraint we need (every input
+cue must come back as an entry, no dropping short interjections that
+shift later cues onto wrong timestamps).
 
 Output SRT is structurally identical to the input — same cue indices,
 same timestamps — just the dialogue lines replaced with 繁體中文 and the
@@ -18,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from annotate import parse_srt, render_srt  # reuse the same parser/renderer
-from gemini_client import generate_json
+from claude_client import generate_json
 from srt_source import stamp_source
 
 ZH_SUFFIX = ".zh-tw.srt"
@@ -36,7 +38,7 @@ translator_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tran
 # noticeably (Flash Lite returns in ~5-10s either way).
 CHUNK_SIZE = 200
 
-_MODEL = os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash-lite")
+_MODEL = os.environ.get("TRANSLATE_MODEL", "claude-haiku-4-5-20251001")
 
 _SCHEMA = {
     "type": "array",
@@ -123,7 +125,7 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
         expected = len(chunk)
         prompt = _PROMPT_TEMPLATE % (expected, expected, expected, chunk_text)
 
-        # Up to two attempts: if Gemini's first response drops cues (its
+        # Up to two attempts: if Haiku's first response drops cues (its
         # known failure mode is silently collapsing short interjections),
         # the indices of everything afterwards in that chunk shift onto
         # the wrong on-screen timestamp. Detect by count + by checking
@@ -132,7 +134,11 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
         valid: dict[int, list[str]] = {}
         chunk_idxs = {c["idx"] for c in chunk}
         for attempt in range(2):
-            result = generate_json(prompt, _SCHEMA, temperature=0.0, model=_MODEL)
+            # max_tokens needs headroom for 200 translated cues × 2-3 short
+            # lines each at ~30 tokens of CJK + JSON formatting per line.
+            # 16k gives a comfortable ceiling; Haiku's hard cap is 16384.
+            result = generate_json(prompt, _SCHEMA, temperature=0.0,
+                                   model=_MODEL, max_tokens=16000)
             valid = {}
             for entry in result:
                 try:
@@ -141,7 +147,7 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
                 except (KeyError, ValueError, TypeError):
                     continue
                 if cue_idx not in chunk_idxs:
-                    # Gemini hallucinated an index outside this chunk —
+                    # Haiku hallucinated an index outside this chunk —
                     # could be the symptom of a shifted-renumbering pass.
                     # Reject so it can't poison a cue from another chunk.
                     continue
@@ -150,7 +156,7 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
             if not missing:
                 break
             print(f"[translator] chunk {start}-{start+expected}: "
-                  f"Gemini returned {len(valid)}/{expected} cues "
+                  f"Haiku returned {len(valid)}/{expected} cues "
                   f"(missing {len(missing)}); attempt {attempt+1}/2", flush=True)
         else:
             # Both attempts dropped cues. We keep what we got and the
@@ -161,7 +167,7 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
 
         translations.update(valid)
 
-    # Apply — any cue Gemini didn't translate (or that we rejected as
+    # Apply — any cue Haiku didn't translate (or that we rejected as
     # off-chunk) stays as the original English. Better partial Chinese
     # than corrupted alignment.
     for c in cues:
@@ -176,15 +182,15 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
 def translate_video_zh(video: Path) -> None:
     """Top-level worker submitted by the bt translate-zh endpoint. Translate
     the sibling `<stem>.srt` (the English transcript bt left in place) to
-    繁體中文 via Gemini Flash Lite.
+    繁體中文 via Haiku.
 
     OpenSubtitles is NOT consulted — Chinese-sub uploads on OS are sparse
     and frequently mistagged for releases the user actually watches, so
-    going straight to Gemini gives a more predictable result. Cost is
+    going straight to Haiku gives a more predictable result. Cost is
     ~$0.01 per movie.
 
     Output: `<stem>.zh-tw.srt` next to the video on success, or
-    `<stem>.zh-tw.srt.error` with the failure reason if Gemini fails or
+    `<stem>.zh-tw.srt.error` with the failure reason if Haiku fails or
     the English SRT is missing.
 
     Idempotent: skips if `<stem>.zh-tw.srt` already exists. The endpoint
@@ -209,13 +215,13 @@ def translate_video_zh(video: Path) -> None:
             print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
         return
 
-    print(f"[translate-zh] translating {video.name!r} via Gemini", flush=True)
+    print(f"[translate-zh] translating {video.name!r} via Haiku", flush=True)
     try:
         translate_to_zh(eng_srt, zh_path)
         print(f"[translate-zh] wrote {zh_path.name!r}", flush=True)
     except Exception as exc:
         traceback.print_exc()
         try:
-            err_path.write_text(f"Gemini translation failed: {exc}", encoding="utf-8")
+            err_path.write_text(f"Haiku translation failed: {exc}", encoding="utf-8")
         except OSError as e:
             print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
