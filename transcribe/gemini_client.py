@@ -72,12 +72,18 @@ def generate(prompt: str, *, response_schema: Optional[dict] = None,
             r = s.post(url, json=body, timeout=timeout)
             if r.status_code == 429 or 500 <= r.status_code < 600:
                 last_exc = RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}")
+                print(f"[gemini-client] {r.status_code} on attempt {attempt+1}/{MAX_RETRIES}, "
+                      f"sleeping {RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)]}s",
+                      flush=True)
                 time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])
                 continue
             r.raise_for_status()
             return _extract_text(r.json())
         except requests.RequestException as e:
             last_exc = e
+            print(f"[gemini-client] exception on attempt {attempt+1}/{MAX_RETRIES} ({type(e).__name__}): "
+                  f"sleeping {RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)]}s",
+                  flush=True)
             time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])
 
     raise RuntimeError(f"Gemini call failed after {MAX_RETRIES} attempts: {last_exc}")
