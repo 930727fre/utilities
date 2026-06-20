@@ -20,7 +20,7 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (bt, 1440 min / ratio 1.0 seed limits) |
 | Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
-| SRT matcher | Claude (haiku) tool-use agent — `list_dir` + `read_lines` to browse the torrent's tree (flat sibling, RARBG's `Subs/<stem>/N_English.srt`, anything in between), reading cue text to verify language. Sandboxed to the video's folder, capped at 12 tool calls |
+| SRT matcher | Claude (haiku) tool-use agent — `list_dir` + `read_lines` + `srt_summary` to browse the torrent's tree (flat sibling, RARBG's `Subs/<stem>/N_English.srt`, anything in between), comparing cue count + time-span coverage to tell forced/fragment tracks from full dialogue tracks, then reading cue text to verify language. Sandboxed to the video's folder, capped at 12 tool calls |
 | Subs finder | OpenSubtitles REST API — queries by OSDb file hash for human-translated subs before falling back to whisper |
 | Subs verifier | Claude (haiku) — confirms the OpenSubtitles candidate's release/title/year matches the local filename, guarding against mis-tagged uploads |
 | Subs sync | `ffsubsync` — VAD on the video's audio aligns the downloaded SRT's cue timing (handles release-mismatch drift) |
