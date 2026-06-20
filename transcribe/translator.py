@@ -38,9 +38,13 @@ through unchanged. A new `※ source: llm-translated` sentinel gets
 appended at the file end with timestamp 00:00:00.
 """
 import os
+import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import requests
+from requests.adapters import HTTPAdapter
 
 from annotate import parse_srt, render_srt  # reuse the same parser/renderer
 from gemini_client import generate_json
@@ -68,6 +72,31 @@ _CONTEXT_BEFORE = 5
 _CONTEXT_AFTER = 5
 
 _MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-2.5-flash-lite")
+
+# Shared HTTP session with an enlarged connection pool. The default
+# `requests` module-level session caps at 10 connections per host, so 30
+# concurrent translation threads would actually only get 10 sockets and
+# queue for the rest — measured 6x slowdown vs theoretical (per-call
+# latency ~1 s, 818 cues / 30 should finish in ~30 s, observed ~3 min).
+# Bumping pool_maxsize to 2× _CUE_CONCURRENCY × max_workers leaves
+# comfortable headroom.
+_http_session: requests.Session | None = None
+_http_session_lock = threading.Lock()
+
+
+def _get_session() -> requests.Session:
+    global _http_session
+    if _http_session is not None:
+        return _http_session
+    with _http_session_lock:
+        if _http_session is None:
+            s = requests.Session()
+            pool_size = _CUE_CONCURRENCY * 2 * 2  # cue concurrency × episode workers × 2 headroom
+            adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
+            s.mount("https://", adapter)
+            s.mount("http://", adapter)
+            _http_session = s
+    return _http_session
 
 # Schema for one cue's translation: a list of dialogue lines mirroring
 # the input cue's line count.
@@ -146,7 +175,8 @@ def _translate_one_cue(cues: list[dict], idx: int) -> list[str] | None:
     prompt = _PROMPT_TEMPLATE % (before_block, target_text, after_block)
 
     try:
-        result = generate_json(prompt, _SCHEMA, temperature=0.0, model=_MODEL)
+        result = generate_json(prompt, _SCHEMA, temperature=0.0, model=_MODEL,
+                               session=_get_session())
     except Exception as e:
         print(f"[translator] cue {target['idx']} failed: {e}", flush=True)
         return None
