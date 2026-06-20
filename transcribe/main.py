@@ -525,6 +525,10 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"reading SRT failed: {e}")
         videos.append(video)
+    # rglob order is filesystem-dependent (inode order on ext4). Sort by
+    # name so a multi-episode pack like Sopranos S01 translates E01→E13 in
+    # order rather than whatever shape the seeder happened to land bytes in.
+    videos.sort(key=lambda p: p.name)
 
     queued = 0
     with _translating_lock:
