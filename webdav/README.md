@@ -1,6 +1,6 @@
 # webdav
 
-Read-only WebDAV server exposing [transcribe](../transcribe)'s library — the BT downloads (transcribe spawns aria2c when you submit a magnet on the bt tab), the YouTube downloads, and the translate_zh branch (Chinese subs fetched for shows the English+annotation pass isn't enough on) — for [Infuse](https://firecore.com/infuse) (or any other player that speaks WebDAV: VLC, Kodi, etc.).
+Read-only WebDAV server exposing [transcribe](../transcribe)'s library — the BT downloads (transcribe spawns aria2c when you submit a magnet on the bt tab) and the YouTube downloads — for [Infuse](https://firecore.com/infuse) (or any other player that speaks WebDAV: VLC, Kodi, etc.). The bt-side Chinese sub sidecars (produced by transcribe's "translate to zh" button) ride along inside the same `/media/bt/...` paths; Infuse picks them up as separate language tracks on the same video.
 
 Replaces Jellyfin in the playback layer for this stack — Infuse handles codec decoding (universal) and offers iCloud-backed progress sync across iPhone + Mac, which is all this user needs. No transcoding, no metadata catalog, no library scans. Just files.
 
@@ -11,7 +11,7 @@ Replaces Jellyfin in the playback layer for this stack — Infuse handles codec 
 | Server | [`hacdias/webdav`](https://github.com/hacdias/webdav) — single Go binary, YAML config |
 | Auth | None — Tailscale provides device-level access control upstream |
 | Access | Tailscale (host's tailnet IP on port 8081) |
-| Mounts | `/media/bt` (transcribe's BT downloads + annotated SRTs) + `/media/yt` (transcribe's YouTube output) + `/media/translate_zh` (Chinese-subs branch), all read-only |
+| Mounts | `/media/bt` (transcribe's BT downloads + annotated English SRTs + button-produced Chinese SRTs) + `/media/yt` (transcribe's YouTube output), both read-only |
 
 Read-only is deliberate: Infuse is for browsing and playback, not library management. Deletes happen via shell.
 

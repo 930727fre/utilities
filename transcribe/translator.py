@@ -1,6 +1,6 @@
 """English-to-zh-TW SRT translator — Gemini Flash Lite fallback for the
-translate_zh branch when OpenSubtitles doesn't have a Chinese sub for
-the release (most common cause: brand-new films, niche shows).
+bt "translate to zh" button when OpenSubtitles doesn't have a Chinese sub
+for the release (most common cause: brand-new films, niche shows).
 
 Reuses annotate.py's SRT parse → chunk → forced-JSON → render pattern.
 Translation is a well-trodden, low-creativity task that the small
@@ -19,15 +19,16 @@ English SRT) but not our new tag. That's a known cosmetic; the SRT is
 functionally correct.
 """
 import os
-import re
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional
 
 from annotate import parse_srt, render_srt  # reuse the same parser/renderer
 from gemini_client import generate_json
 from srt_source import stamp_source
+
+ZH_SUFFIX = ".zh-tw.srt"
+ZH_LANGUAGES = "zh-tw,zh-cn"
 
 # Single worker — translation is API-bound and we want predictable
 # ordering across the file. Same shape as annotate_executor.
@@ -129,3 +130,55 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
 
     out_path.write_text(render_srt(cues), encoding="utf-8")
     stamp_source(out_path, "llm-translated")
+
+
+def translate_video_zh(video: Path) -> None:
+    """Top-level worker submitted by the bt translate-zh endpoint. For one
+    video: try OpenSubtitles for a human-translated zh-tw/zh-cn sub first;
+    if OS misses for any reason, fall through to Gemini translating the
+    sibling `<stem>.srt` (the English transcript bt left in place).
+
+    Output: `<stem>.zh-tw.srt` next to the video on success, or
+    `<stem>.zh-tw.srt.error` with the failure reason on either-step failure.
+
+    Idempotent: skips if `<stem>.zh-tw.srt` already exists. The endpoint
+    pre-clears `.error` stamps + the subs_finder cache before submitting,
+    so calling the endpoint again counts as a retry.
+    """
+    from subs_finder import find_subs  # local: avoid import cycle on app boot
+
+    zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
+    err_path = Path(str(zh_path) + ".error")
+    eng_srt = video.with_suffix(".srt")
+
+    if zh_path.exists():
+        return  # already done
+
+    # 1) OS — best quality when available (human upload).
+    result = find_subs(video, languages=ZH_LANGUAGES, out_path=zh_path)
+    if result is not None:
+        print(f"[translate-zh] OS picked {zh_path.name!r}", flush=True)
+        return
+
+    # 2) Gemini fallback — needs the English transcript as source.
+    if not eng_srt.exists():
+        reason = (
+            "no English SRT to translate from; the sibling <stem>.srt is "
+            "missing. Did the bt pipeline produce one for this video?"
+        )
+        try:
+            err_path.write_text(reason, encoding="utf-8")
+        except OSError as e:
+            print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
+        return
+
+    print(f"[translate-zh] OS missed for {video.name!r}, using Gemini", flush=True)
+    try:
+        translate_to_zh(eng_srt, zh_path)
+        print(f"[translate-zh] wrote {zh_path.name!r} via Gemini", flush=True)
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            err_path.write_text(f"Gemini translation failed: {exc}", encoding="utf-8")
+        except OSError as e:
+            print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)

@@ -4,17 +4,17 @@ Three ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
 - **bt tab** — paste a magnet link. We spawn a one-shot `aria2c` subprocess that writes into `data/bt/<per-torrent-wrapper>/` and keeps seeding until its limit (1440 min or ratio 1.0). The bt tab lists every wrapper folder; phase comes from filesystem inspection — `.aria2` control file present means downloading, gone means seeding, subprocess exit means done.
-- **translate_zh tab** — manually `mv` a watched-and-annotated folder into `data/translate_zh/`. The scan loop queries OpenSubtitles for human-translated zh-tw/zh-cn subs and saves them as `<stem>.zh-tw.srt` next to each video. If OS doesn't have the release (typical for brand-new films / niche shows), it falls through to Gemini Flash Lite translating the carried-over English `<stem>.srt` directly. No whisper fallback. Use this when the show's English+annotation pass wasn't enough — e.g. The Sopranos.
+- **bt tab → "translate to 中" button per torrent** — for shows whose English+annotation pass isn't enough (Sopranos-grade dialect / mob slang), click the per-torrent button to produce `<stem>.zh-tw.srt` sidecars in place. Tries OpenSubtitles (zh-tw/zh-cn) first for human translations, falls through to Gemini Flash Lite translating the carried-over English `<stem>.srt` when OS misses. ~$0.01 / ~1 min per video at the Gemini tier. No separate folder, no whisper fallback.
 
 For the yt + bt branches, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
-`data/downloads/` holds the yt-tab output; `data/bt/` holds the BT downloads (mounted at `/bt`); `data/translate_zh/` holds the Chinese-fetch branch (mounted at `/translate_zh`). [webdav](../webdav) reads all three for Infuse playback (read-only). The bt-side pipeline never writes to `jobs.json` — every torrent is a directory under `/bt` plus (while live) an in-memory `subprocess.Popen` handle. The translate_zh branch also stays out of `jobs.json`.
+`data/downloads/` holds the yt-tab output; `data/bt/` holds the BT downloads (mounted at `/bt`), with `.zh-tw.srt` sidecars sitting next to their videos when produced. [webdav](../webdav) reads both for Infuse playback (read-only). The bt-side pipeline never writes to `jobs.json` — every torrent is a directory under `/bt` plus (while live) an in-memory `subprocess.Popen` handle. Chinese sub state is also a filesystem-only signal: `<stem>.zh-tw.srt` present = done, `<stem>.zh-tw.srt.error` present = failed.
 
 ## Stack
 
 | Layer | Tech |
 |------|------|
-| Frontend | Vite + React — three tabs: yt (URL submit), bt (magnet submit + library browser), translate_zh (Chinese-subs branch) |
+| Frontend | Vite + React — two tabs: yt (URL submit) and bt (magnet submit + library browser; per-torrent "translate to 中" button on annotated torrents) |
 | Backend | FastAPI on port 8000 — API + in-process orchestrator |
 | Worker | `ThreadPoolExecutor(max_workers=1)` — serializes our per-job state mutations |
 | Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (bt, 1440 min / ratio 1.0 seed limits) |
@@ -35,15 +35,13 @@ data/downloads/                  ← YouTube output
 
 data/bt/<wrapper>/               ← per-torrent wrapper; aria2c writes here,
   Show.S01E01.mkv                  transcribe reads via /bt mount
-  Show.S01E01.srt                ← written by bt transcribe, or torrent-bundled
+  Show.S01E01.srt                ← written by bt pipeline (whisper / OS /
+                                    bundled-agent), annotated in place
+  Show.S01E01.zh-tw.srt          ← written by the "translate to 中" button
+                                    (OS Chinese first, Gemini fallback)
 
   (for multi-file torrents, aria2 adds another nested folder named after
    the torrent's metadata "name" field inside <wrapper>; harmless, predictable)
-
-data/translate_zh/<folder>/      ← user mv's annotated folders in here;
-  Show.S01E01.mkv                  scan loop fetches Chinese subs and writes
-  Show.S01E01.srt                  the .zh-tw.srt sidecar next to the video.
-  Show.S01E01.zh-tw.srt          ← written by translate_zh scan
 ```
 
 YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for filesystem (control chars and `<>:"/\|?*` replaced with `_`, capped at 180 chars). Infuse auto-loads any `.srt` sibling as a sidecar.
@@ -54,7 +52,7 @@ Prereqs:
 - External Docker network `my_network`.
 - The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
 - `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet) + srt-matcher agent + OS subs verifier (both Haiku).
-- `GEMINI_API_KEY` exported — required for the translate_zh Gemini fallback path.
+- `GEMINI_API_KEY` exported — required for the bt "translate to 中" button's Gemini fallback path.
 - `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
 
 All five use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
@@ -85,8 +83,7 @@ docker compose up -d --build
 | `DELETE` | `/api/bt/torrents/{wrapper}` | Kill the subprocess (if running) + rmtree the wrapper folder |
 | `POST` | `/api/bt/transcribe` | `{path}`: manually trigger whisper on a bt file (background loop already handles this; useful for power/curl override) |
 | `POST` | `/api/bt/retry` | `{path}`: clear the failure sentinel SRT so the loop picks the file up again |
-| `GET`  | `/api/translate_zh` | Scan `/translate_zh`; return file + zh-tw.srt sidecar state |
-| `POST` | `/api/translate_zh/retry` | `{path}`: clear the cache miss + delete the zh-tw.srt error sentinel so the loop retries |
+| `POST` | `/api/bt/translate-zh` | `{wrapper}`: queue every video in this torrent for Chinese translation (OS first, Gemini fallback). Refuses if torrent still downloading or any video lacks `※ annotated`. Idempotent — clicking again clears `.error` stamps + the subs_finder cache so it doubles as retry |
 
 ## Job states
 
@@ -97,7 +94,7 @@ bt manual: PENDING → TRANSCRIBING → ANNOTATING → SUCCESS     (legacy /api/
                                    ↘ FAILED
 ```
 
-Magnet submissions don't enter `jobs.json` at all. The bt-tab UI shows two live views: the aria2c subprocess's torrent list (downloading + seeding state, from `/api/bt/torrents`) and the filesystem scan (annotation state, from `/api/bt`). Whisper + annotation per video are queued by the background `_bt_work_loop` once files land in `/bt`. translate_zh files also stay out of `jobs.json` — the scan loop is a tight filesystem-driven check.
+Magnet submissions don't enter `jobs.json` at all. The bt-tab UI shows two live views: the aria2c subprocess's torrent list (downloading + seeding state, from `/api/bt/torrents`) and the filesystem scan (annotation + Chinese-sub state, from `/api/bt`). Whisper + annotation per video are queued by the background `_bt_work_loop` once files land in `/bt`. Chinese translation is button-triggered, not scan-triggered — every click submits the wrapper's videos to the translator executor.
 
 Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` jobs flip to `FAILED` on startup. `ANNOTATING` crashes flip to `SUCCESS` with `annotation_error` set; for bt jobs the background loop will retry.
 
@@ -125,25 +122,24 @@ The bt tab and background annotation loop skip:
 
 Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.
 
-## translate_zh branch
+## Chinese translation ("translate to 中" button)
 
-For shows whose English-only annotation pass isn't enough (Sopranos, The Wire, anything with thick dialect / mob slang / AAVE), the translate_zh tab fetches Chinese subs from OpenSubtitles in parallel to the existing English SRT.
+For shows whose English+annotation pass isn't enough (Sopranos, The Wire, anything with thick dialect / mob slang / AAVE), each bt torrent card carries a per-torrent "→ 中" button (visible when every video in the wrapper has `※ annotated`). One click queues every video for Chinese translation; results land as `<stem>.zh-tw.srt` sidecars next to the videos. Infuse picks both `<stem>.srt` (English + ✨) and `<stem>.zh-tw.srt` (Chinese) as separate language tracks on the same video.
 
-Workflow:
-1. Watch a folder finish the normal yt or bt annotation pipeline (`<stem>.srt` with `※ annotated` sentinel).
-2. `mv` the folder into `data/translate_zh/`.
-3. The scan loop (every 30s, same cadence as bt) picks each video up and queries OpenSubtitles with `languages=zh-tw,zh-cn`. The verifier (Claude Haiku) confirms the candidate matches the local release. ffsubsync corrects timing drift. Output saved as `<stem>.zh-tw.srt` next to the video.
-4. Infuse picks both `<stem>.srt` (English + ✨) and `<stem>.zh-tw.srt` (Chinese) as separate language tracks.
+Two-stage cascade per video:
 
-If OS misses for any reason (no candidate / verifier rejection / quota / network), the loop falls through to **Gemini Flash Lite** translating the carried-over English `<stem>.srt` (the one bt left behind) cue-by-cue into 繁體中文. ~$0.01 per movie, ~1 minute for a feature-length film. Sentinel stamp `※ source: llm-translated` records that the SRT came from machine translation rather than a human upload.
+1. **OpenSubtitles**: query with `languages=zh-tw,zh-cn`. Haiku verifier confirms the candidate matches the local release; ffsubsync corrects timing drift. Best quality when available — these are human translations.
+2. **Gemini Flash Lite fallback**: if OS misses for any reason (no candidate / verifier rejection / quota / network), translate the carried-over English `<stem>.srt` cue-by-cue. ~$0.01 per movie, ~1 minute for a feature-length film. Sentinel stamp `※ source: llm-translated` records that the SRT came from machine translation rather than a human upload.
 
-If the English SRT is also missing (e.g. you dropped a raw mp4 into translate_zh without running it through bt first), the loop writes a `<stem>.zh-tw.srt.error` marker file so the UI can show ! and the loop stops retrying. There's no whisper fallback — whisper produces English, which would defeat the point.
+The user trusts Gemini quality enough that the cascade does NOT wait for transient OS misses (quota will refresh in 24h) — any miss falls straight to Gemini so the SRT is ready immediately.
 
-Quota cache (the in-memory `_failed` dict in subs_finder) still uses the 24h transient expiry to avoid hammering OS during quota windows on the bt path, but translate_zh doesn't gate on it — any miss falls straight to Gemini.
+`<stem>.zh-tw.srt.error` sentinel files (plain text, holding the failure reason) appear on either-step failures. The button doubles as retry: clicking again clears `.error` stamps + the in-memory subs_finder cache before re-queueing, so a failed video gets a fresh attempt.
+
+Single worker (`translator_executor` with `max_workers=1`) serializes translations to avoid Gemini rate limits and keep the UI's `中` flips predictable. A 13-episode pack translates in ~13 minutes.
 
 ## Known limitations
 
 - `jobs.json` is file-locked, not a real DB. Single-user is fine; for concurrent users move to SQLite.
 - Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
 - bt mode ignores embedded subtitle tracks (muxed into the video container). Non-standard external layouts like `Subs/<episode>/N_English.srt` ARE handled — the srt-matcher tool-use agent finds and copies them into place — but anything muxed into the mkv container still needs `ffmpeg` extraction outside this pipeline.
-- translate_zh has no whisper fallback (English would defeat the point) — niche shows with no OpenSubtitles Chinese coverage land at `!` and stay there until the user retries (after Chinese subs become available, or via a manual drop).
+- The Chinese translation cascade has no whisper fallback (whisper produces English, which would defeat the point) — the Gemini fallback covers it. If Gemini also fails (rare), the video lands at `中 !` and stays there until the user clicks the torrent's button again to retry.

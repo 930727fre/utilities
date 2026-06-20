@@ -72,21 +72,15 @@ export async function retryBtFile(path) {
   return r.json()
 }
 
-export async function listTranslateZh() {
-  const r = await fetch(`${BASE}/api/translate_zh`)
-  if (!r.ok) throw new Error('Failed to list translate_zh')
-  return r.json()
-}
-
-export async function retryTranslateZh(path) {
-  const r = await fetch(`${BASE}/api/translate_zh/retry`, {
+export async function translateTorrentZh(wrapper) {
+  const r = await fetch(`${BASE}/api/bt/translate-zh`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ wrapper }),
   })
   if (!r.ok) {
     const detail = await r.json().catch(() => null)
-    throw new Error(detail?.detail || 'Retry failed')
+    throw new Error(detail?.detail || 'Translate failed')
   }
   return r.json()
 }

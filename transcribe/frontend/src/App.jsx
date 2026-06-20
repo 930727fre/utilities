@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import JobList from './components/JobList'
 import Bt from './components/Bt'
-import TranslateZh from './components/TranslateZh'
 
 function useBackendHealth() {
   const [down, setDown] = useState(false)
@@ -37,13 +36,8 @@ export default function App() {
         <button
           style={tab === 'bt' ? styles.tabActive : styles.tab}
           onClick={() => setTab('bt')}>bt</button>
-        <button
-          style={tab === 'translate_zh' ? styles.tabActive : styles.tab}
-          onClick={() => setTab('translate_zh')}>translate_zh</button>
       </div>
-      {tab === 'yt' && <JobList />}
-      {tab === 'bt' && <Bt />}
-      {tab === 'translate_zh' && <TranslateZh />}
+      {tab === 'yt' ? <JobList /> : <Bt />}
       {backendDown && (
         <div style={styles.snackbar}>
           ⚠ Backend is not accessible — retrying…

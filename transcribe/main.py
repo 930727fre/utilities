@@ -19,8 +19,8 @@ from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
 from srt_source import stamp_source
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
-from subs_finder import cache_is_permanent_miss, clear_cache, find_subs, get_failure_reason
-from translator import translate_to_zh
+from subs_finder import clear_cache, find_subs
+from translator import translate_video_zh, translator_executor
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
@@ -29,19 +29,17 @@ DOWNLOADS_DIR = Path("/app/data/downloads")
 # bt mode scans only /bt. yt-tab files in DOWNLOADS_DIR show up in the yt
 # tab's job list — no reason to also list them under bt.
 BT_ROOTS = [Path("/bt")]
-# translate_zh is the "fetch Chinese subs only" branch. User manually mv's
-# folders here; the scan loop queries OpenSubtitles with zh-tw/zh-cn and
-# saves results as `<stem>.zh-tw.srt` next to the video.
-TRANSLATE_ZH_ROOTS = [Path("/translate_zh")]
-TRANSLATE_ZH_LANGUAGES = "zh-tw,zh-cn"
-TRANSLATE_ZH_SUFFIX = ".zh-tw.srt"
+# When the user clicks the "translate to zh" button on a bt torrent, we
+# write the Chinese sub as a sidecar next to the video — same folder, same
+# stem, .zh-tw.srt suffix. Infuse picks it up as a separate language track.
+ZH_LANGUAGES = "zh-tw,zh-cn"
+ZH_SUFFIX = ".zh-tw.srt"
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 ANNOTATION_MARKER = "※ annotated"
 WHISPER_FAILED_MARKER = "※ whisper failed:"
 ANNOTATE_FAILED_MARKER = "※ annotate failed:"
 MTIME_GRACE_SECONDS = 60
 BT_SCAN_INTERVAL = 30
-TRANSLATE_ZH_SCAN_INTERVAL = 30
 
 # No in-memory failure counters: "we tried this once" is recorded as a
 # sentinel cue inside the SRT itself (see srt_source.stamp_*), so the
@@ -107,15 +105,14 @@ async def lifespan(app: FastAPI):
     bt_torrents.resume_all()
 
     annotation_loop_task = asyncio.create_task(_bt_work_loop())
-    translate_zh_loop_task = asyncio.create_task(_translate_zh_work_loop())
 
     try:
         yield
     finally:
         annotation_loop_task.cancel()
-        translate_zh_loop_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         annotate_executor.shutdown(wait=False, cancel_futures=True)
+        translator_executor.shutdown(wait=False, cancel_futures=True)
         bt_torrents.shutdown()
         # Free any GPU leases still held — the broker has no TTL, so without
         # this a SIGTERM mid-whisper leaves the next acquire blocked forever.
@@ -354,6 +351,18 @@ def _scan_bt() -> list[dict]:
             # as "no SRT yet, but don't retry."
             has_real_srt = has_srt and whisper_error is None
             has_annotation = has_real_srt and _is_annotated_srt(srt)
+            # Chinese sub state (user-triggered translate-zh button output).
+            # `.zh-tw.srt` is the sidecar; `.zh-tw.srt.error` records a
+            # failure reason from OS-miss + Gemini-also-failed paths.
+            zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
+            zh_err_path = Path(str(zh_path) + ".error")
+            has_zh_srt = zh_path.exists()
+            zh_error: str | None = None
+            if not has_zh_srt and zh_err_path.exists():
+                try:
+                    zh_error = zh_err_path.read_text(encoding="utf-8", errors="replace").strip() or "(empty error)"
+                except OSError:
+                    zh_error = "(unreadable .zh-tw.srt.error stamp)"
             try:
                 parent_rel = str(video.parent.relative_to(root))
             except ValueError:
@@ -369,6 +378,8 @@ def _scan_bt() -> list[dict]:
                 "has_annotation": has_annotation,
                 "whisper_error": whisper_error,
                 "annotate_error": annotate_error,
+                "has_zh_srt": has_zh_srt,
+                "zh_error": zh_error,
             })
     out.sort(key=lambda x: (x["root"], x["parent"], x["name"].lower()))
     return out
@@ -431,6 +442,75 @@ async def delete_torrent(wrapper: str):
     """Kill the subprocess (if running) + rmtree the wrapper folder."""
     bt_torrents.delete(wrapper)
     return {"ok": True}
+
+
+class BtTranslateZhRequest(BaseModel):
+    wrapper: str
+
+
+@app.post("/api/bt/translate-zh", status_code=200)
+async def bt_translate_zh(req: BtTranslateZhRequest):
+    """Submit every video in `wrapper` to the Chinese-translation worker.
+    Each video tries OS find_subs(zh-tw,zh-cn) first, falls through to
+    Gemini translating the sibling `<stem>.srt`, writes `<stem>.zh-tw.srt`
+    on success or `<stem>.zh-tw.srt.error` on failure.
+
+    Refuses if:
+      - the wrapper isn't directly under /bt
+      - the torrent hasn't finished (any `.aria2` anywhere)
+      - any video lacks the `※ annotated` sentinel (i.e. bt pipeline not
+        done yet — without an annotated English SRT, the Gemini fallback
+        has nothing to translate from)
+
+    Idempotent — videos that already have `<stem>.zh-tw.srt` get skipped
+    inside the worker. Calling again after a partial failure clears
+    `.error` stamps + the subs_finder cache, so the button doubles as
+    retry."""
+    bt_root = BT_ROOTS[0]
+    src = (bt_root / req.wrapper).resolve()
+    try:
+        src.relative_to(bt_root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="wrapper not under /bt")
+    if not src.is_dir():
+        raise HTTPException(status_code=404, detail=f"wrapper not found: {req.wrapper}")
+    if any(src.rglob("*.aria2")):
+        raise HTTPException(status_code=409, detail="torrent still downloading")
+
+    videos: list[Path] = []
+    for video in src.rglob("*"):
+        if not video.is_file():
+            continue
+        if video.suffix.lower() not in VIDEO_EXTS:
+            continue
+        if video.name.startswith("."):
+            continue
+        srt = video.with_suffix(".srt")
+        if not srt.exists():
+            raise HTTPException(status_code=409, detail=f"{video.name} has no SRT yet")
+        try:
+            if ANNOTATION_MARKER.encode("utf-8") not in srt.read_bytes():
+                raise HTTPException(status_code=409, detail=f"{video.name} not annotated yet")
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"reading SRT failed: {e}")
+        videos.append(video)
+
+    queued = 0
+    for video in videos:
+        zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
+        if zh_path.exists():
+            continue  # already translated
+        # Clear stale failure state so retry-via-button works as expected.
+        err_path = Path(str(zh_path) + ".error")
+        if err_path.exists():
+            try:
+                err_path.unlink()
+            except OSError:
+                pass
+        clear_cache(video, ZH_LANGUAGES)
+        translator_executor.submit(translate_video_zh, video)
+        queued += 1
+    return {"ok": True, "queued": queued, "total": len(videos)}
 
 
 class BtRetryRequest(BaseModel):
@@ -564,169 +644,3 @@ async def _bt_work_loop():
         await asyncio.sleep(BT_SCAN_INTERVAL)
 
 
-# ── translate_zh API + scan loop ──────────────────────────────────────────
-#
-# The translate_zh branch shares the same filesystem-as-state pattern as bt:
-# no jobs.json overlay, every file's state derives entirely from sidecar
-# files in its folder. Three signals per video:
-#   - <stem>.zh-tw.srt        → done
-#   - <stem>.zh-tw.srt.error  → permanent miss (no Chinese subs available)
-#   - neither                  → still trying (working/queued)
-# The `.error` sentinel is a plain text file with the failure reason; the UI
-# tooltips it and exposes a retry button that deletes the sentinel + clears
-# the in-memory subs_finder cache.
-
-def _scan_translate_zh() -> list[dict]:
-    out = []
-    now = time.time()
-    for root in TRANSLATE_ZH_ROOTS:
-        if not root.exists():
-            continue
-        for video in root.rglob("*"):
-            if not video.is_file():
-                continue
-            if video.suffix.lower() not in VIDEO_EXTS:
-                continue
-            if video.name.startswith("."):
-                continue
-            # mtime grace for in-progress mv / rsync into this folder.
-            try:
-                if now - video.stat().st_mtime < MTIME_GRACE_SECONDS:
-                    continue
-            except OSError:
-                continue
-            zh_path = video.parent / f"{video.stem}{TRANSLATE_ZH_SUFFIX}"
-            err_path = Path(str(zh_path) + ".error")
-            has_zh = zh_path.exists()
-            error: str | None = None
-            if not has_zh and err_path.exists():
-                try:
-                    error = err_path.read_text(encoding="utf-8", errors="replace").strip() or "(empty error)"
-                except OSError:
-                    error = "(unreadable .error stamp)"
-            try:
-                parent_rel = str(video.parent.relative_to(root))
-            except ValueError:
-                parent_rel = ""
-            if parent_rel == ".":
-                parent_rel = ""
-            out.append({
-                "path": str(video),
-                "name": video.name,
-                "parent": parent_rel,
-                "root": str(root),
-                "has_zh_srt": has_zh,
-                "error": error,
-            })
-    out.sort(key=lambda x: (x["root"], x["parent"], x["name"].lower()))
-    return out
-
-
-def _validate_translate_zh_path(path_str: str) -> Path:
-    path = Path(path_str).resolve()
-    for root in TRANSLATE_ZH_ROOTS:
-        try:
-            path.relative_to(root.resolve())
-            return path
-        except ValueError:
-            continue
-    raise HTTPException(status_code=400, detail=f"Path not under a translate_zh root: {path_str}")
-
-
-@app.get("/api/translate_zh")
-async def translate_zh():
-    return await asyncio.to_thread(_scan_translate_zh)
-
-
-class TranslateZhRetryRequest(BaseModel):
-    path: str
-
-
-@app.post("/api/translate_zh/retry", status_code=200)
-async def translate_zh_retry(req: TranslateZhRetryRequest):
-    """Clear the failure sentinel + in-memory cache so the next scan tick
-    re-queries OpenSubtitles for this video."""
-    path = _validate_translate_zh_path(req.path)
-    zh_path = path.parent / f"{path.stem}{TRANSLATE_ZH_SUFFIX}"
-    err_path = Path(str(zh_path) + ".error")
-    if err_path.exists():
-        try:
-            err_path.unlink()
-        except OSError as e:
-            raise HTTPException(status_code=500, detail=f"unlink .error failed: {e}")
-    if zh_path.exists():
-        try:
-            zh_path.unlink()
-        except OSError as e:
-            raise HTTPException(status_code=500, detail=f"unlink .zh-tw.srt failed: {e}")
-    clear_cache(path, TRANSLATE_ZH_LANGUAGES)
-    return {"ok": True}
-
-
-def _queue_pending_translate_zh_work():
-    """For every translate_zh video without a `.zh-tw.srt` sidecar (and no
-    `.error` stamp), try OpenSubtitles first; if OS misses for any reason
-    (permanent or transient), fall through to Gemini Flash Lite translating
-    the carried-over English `<stem>.srt` directly.
-
-    Synchronous because:
-      - find_subs is network + ffsubsync (up to ~5 min worst case), and
-        translate_zh has no upstream queue depth pressure — folders trickle
-        in by hand;
-      - it keeps backpressure simple: while a call is in flight, the next
-        scan tick is delayed.
-
-    OS-then-Gemini ordering: the user trusts Gemini quality enough that
-    they'd rather have a Chinese SRT NOW (even if OS quota would refresh
-    tomorrow) than wait. Cost is ~$0.01 per movie at Flash Lite tier.
-    """
-    items = _scan_translate_zh()
-    for item in items:
-        if item["has_zh_srt"]:
-            continue
-        if item["error"]:
-            continue  # already stamped; user must retry to clear
-        video = Path(item["path"])
-        zh_path = video.parent / f"{video.stem}{TRANSLATE_ZH_SUFFIX}"
-        result = find_subs(video, languages=TRANSLATE_ZH_LANGUAGES, out_path=zh_path)
-        if result is not None:
-            continue
-
-        # OS missed (permanent or transient). Fall through to Gemini if
-        # there's a carried-over English SRT to translate from.
-        eng_srt = video.with_suffix(".srt")
-        err_path = Path(str(zh_path) + ".error")
-        if not eng_srt.exists():
-            reason = (
-                "no English SRT to translate from; the carried-over "
-                "<stem>.srt is missing. Did this folder come from the bt "
-                "pipeline (which would have produced one)?"
-            )
-            try:
-                err_path.write_text(reason, encoding="utf-8")
-            except OSError as e:
-                print(f"[translate_zh] stamp .error failed for {video.name!r}: {e}", flush=True)
-            continue
-
-        print(f"[translate_zh] OS missed for {video.name!r}, falling through to Gemini", flush=True)
-        try:
-            translate_to_zh(eng_srt, zh_path)
-            print(f"[translate_zh] wrote {zh_path.name!r} via Gemini", flush=True)
-        except Exception as exc:
-            traceback.print_exc()
-            reason = f"Gemini translation failed: {exc}"
-            try:
-                err_path.write_text(reason, encoding="utf-8")
-            except OSError as e:
-                print(f"[translate_zh] stamp .error failed for {video.name!r}: {e}", flush=True)
-
-
-async def _translate_zh_work_loop():
-    """Periodically scan /translate_zh for videos without a Chinese sub
-    sidecar, and call find_subs(zh-tw,zh-cn) for each."""
-    while True:
-        try:
-            await asyncio.to_thread(_queue_pending_translate_zh_work)
-        except Exception:
-            traceback.print_exc()
-        await asyncio.sleep(TRANSLATE_ZH_SCAN_INTERVAL)

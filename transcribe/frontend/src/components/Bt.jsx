@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile } from '../api'
+import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh } from '../api'
 
 // bt tab has two regions: the magnet form + active-torrent list at the
 // top (each row = one wrapper folder, phase derived from filesystem + an
@@ -25,6 +25,11 @@ export default function Bt() {
   const [torrents, setTorrents] = useState([])
   const [magnet, setMagnet] = useState('')
   const [expanded, setExpanded] = useState(() => new Set())
+  // Wrappers the user has just clicked translate on — videos in here that
+  // don't yet have a `<stem>.zh-tw.srt` (and no .error) get a pulsing ○
+  // so the user gets visual feedback that something's working. Cleared
+  // implicitly: once has_zh_srt or zh_error flips, the pulse stops.
+  const [translatingWrappers, setTranslatingWrappers] = useState(() => new Set())
   const submittingRef = useRef(false)
 
   async function refresh() {
@@ -87,6 +92,60 @@ export default function Bt() {
     }
   }
 
+  async function handleTranslate(wrapper, count) {
+    const ok = confirm(`Translate ${count} video${count === 1 ? '' : 's'} in this torrent to 繁體中文?\n\n` +
+      `Tries OpenSubtitles first; falls through to Gemini (~$0.01 + ~1 min per video).`)
+    if (!ok) return
+    try {
+      const res = await translateTorrentZh(wrapper)
+      setTranslatingWrappers(prev => {
+        const next = new Set(prev)
+        next.add(wrapper)
+        return next
+      })
+      if (res.queued === 0) {
+        alert(`Already translated — nothing queued.`)
+      }
+      await refresh()
+    } catch (err) {
+      alert('Translate failed: ' + err.message)
+    }
+  }
+
+  // Group videos under their torrent's outer-wrapper name so we can decide
+  // whether a torrent is ready to translate (all videos annotated, not
+  // downloading) and surface per-video Chinese-sub state.
+  const itemsByTorrent = new Map()
+  for (const item of items) {
+    const torrentName = (item.parent || '').split('/')[0]
+    if (!torrentName) continue
+    if (!itemsByTorrent.has(torrentName)) itemsByTorrent.set(torrentName, [])
+    itemsByTorrent.get(torrentName).push(item)
+  }
+
+  function translateStatus(torrent) {
+    if (torrent.phase === 'downloading') {
+      return { ready: false, count: 0, reason: 'Torrent still downloading' }
+    }
+    const myItems = itemsByTorrent.get(torrent.name) || []
+    if (myItems.length === 0) {
+      return { ready: false, count: 0, reason: 'No videos found in this torrent yet' }
+    }
+    const done = myItems.filter(it => it.has_annotation).length
+    if (done < myItems.length) {
+      return { ready: false, count: 0, reason: `${done} of ${myItems.length} videos annotated — wait for the rest` }
+    }
+    const untranslated = myItems.filter(it => !it.has_zh_srt).length
+    if (untranslated === 0) {
+      return { ready: false, count: 0, reason: 'All videos already have Chinese subs' }
+    }
+    return {
+      ready: true,
+      count: untranslated,
+      reason: `Translate ${untranslated} video${untranslated === 1 ? '' : 's'} to 繁體中文 (OS first, Gemini fallback)`,
+    }
+  }
+
   const sortedTorrents = [...torrents].sort((a, b) => a.name.localeCompare(b.name))
 
   // Each torrent lives in its own per-torrent wrapper folder — group by it.
@@ -143,13 +202,20 @@ export default function Bt() {
                     )}
                   </div>
                 </div>
-                {isExpanded && (
-                  <div style={styles.actionRow}>
-                    <div style={{ flex: 1 }} />
-                    <button style={styles.deleteBtn} title="Delete torrent + files"
-                      onClick={e => { e.stopPropagation(); handleDelete(t.name) }}>✕</button>
-                  </div>
-                )}
+                {isExpanded && (() => {
+                  const ts = translateStatus(t)
+                  return (
+                    <div style={styles.actionRow}>
+                      <div style={{ flex: 1 }} />
+                      <button style={{ ...styles.translateBtn, ...(ts.ready ? {} : styles.disabledBtn) }}
+                        title={ts.reason}
+                        disabled={!ts.ready}
+                        onClick={e => { e.stopPropagation(); handleTranslate(t.name, ts.count) }}>→ 中</button>
+                      <button style={styles.deleteBtn} title="Delete torrent + files"
+                        onClick={e => { e.stopPropagation(); handleDelete(t.name) }}>✕</button>
+                    </div>
+                  )
+                })()}
               </div>
             )
           })}
@@ -163,43 +229,68 @@ export default function Bt() {
       {[...groups.entries()].map(([groupKey, rows]) => (
         <div key={groupKey || '__root__'} style={styles.group}>
           {groupKey && <div style={styles.groupHeader}>{groupKey}</div>}
-          {rows.map(item => <RowItem key={item.path} item={item} onRetry={handleRetry} />)}
+          {rows.map(item => {
+            const wrapper = (item.parent || '').split('/')[0]
+            const isTranslating = translatingWrappers.has(wrapper)
+            return <RowItem key={item.path} item={item} onRetry={handleRetry} isTranslating={isTranslating} />
+          })}
         </div>
       ))}
     </div>
   )
 }
 
-function RowItem({ item, onRetry }) {
-  const state = deriveState(item)
-  const errMsg = item.whisper_error || item.annotate_error || ''
+function RowItem({ item, onRetry, isTranslating }) {
+  const engState = deriveEngState(item)
+  const zhState = deriveZhState(item, isTranslating)
+  const engErrMsg = item.whisper_error || item.annotate_error || ''
   return (
     <div className="fade-in" style={styles.row}>
       <div style={styles.name}>{item.name}</div>
       <div style={styles.slot}>
-        {state === 'working' && (
+        {engState === 'working' && (
           <span className="status-pulse" style={styles.glyph} title="Working / queued">○</span>
         )}
-        {state === 'done' && (
+        {engState === 'done' && (
           <span style={{ ...styles.glyph, color: '#636366' }} title="Annotated">✓</span>
         )}
-        {state === 'failed' && (
+        {engState === 'failed' && (
           <>
-            <span style={styles.glyph} title={errMsg}>!</span>
+            <span style={styles.glyph} title={engErrMsg}>!</span>
             <button style={styles.retryBtn} title="Retry (deletes the SRT and re-runs the pipeline)"
               onClick={() => onRetry(item.path)}>↻</button>
           </>
+        )}
+        {/* zh state only meaningful after annotation is done */}
+        {engState === 'done' && zhState !== 'absent' && (
+          <span style={styles.zhDivider}>·</span>
+        )}
+        {engState === 'done' && zhState === 'translating' && (
+          <span className="status-pulse" style={styles.zhGlyph} title="Translating to 繁體中文">中</span>
+        )}
+        {engState === 'done' && zhState === 'done' && (
+          <span style={styles.zhGlyph} title="Chinese sub ready">中</span>
+        )}
+        {engState === 'done' && zhState === 'failed' && (
+          <span style={{ ...styles.zhGlyph, color: '#c79968' }} title={`中: ${item.zh_error}`}>!</span>
         )}
       </div>
     </div>
   )
 }
 
-function deriveState(item) {
+function deriveEngState(item) {
   if (item.in_flight_job_id) return 'working'
   if (item.has_annotation) return 'done'
   if (item.whisper_error || item.annotate_error) return 'failed'
   return 'working'
+}
+
+function deriveZhState(item, isTranslating) {
+  if (item.has_zh_srt) return 'done'
+  if (item.zh_error) return 'failed'
+  if (isTranslating) return 'translating'
+  return 'absent'
 }
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
@@ -236,10 +327,18 @@ const styles = {
     color: '#aeaeb2', fontSize: 18, fontWeight: 700, lineHeight: 1,
     cursor: 'default', fontFamily: MONO,
   },
-  actionRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12 },
+  actionRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, gap: 16 },
   deleteBtn: {
     background: 'none', border: 'none', color: '#636366',
     fontSize: 18, padding: 0, cursor: 'pointer', lineHeight: 1,
+  },
+  translateBtn: {
+    background: 'none', border: '1px solid #c79968', color: '#c79968',
+    fontSize: 12, fontWeight: 600, padding: '4px 10px', borderRadius: 6,
+    cursor: 'pointer', lineHeight: 1, fontFamily: MONO,
+  },
+  disabledBtn: {
+    opacity: 0.3, cursor: 'not-allowed',
   },
 
   empty: { color: '#636366', textAlign: 'center', marginTop: 60, fontSize: 14 },
@@ -259,9 +358,16 @@ const styles = {
     flex: 1, minWidth: 0, fontSize: 14, color: '#e8e3d9',
     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
   },
-  slot: { display: 'flex', alignItems: 'center', gap: 12, minWidth: 28, justifyContent: 'flex-end' },
+  slot: { display: 'flex', alignItems: 'center', gap: 10, minWidth: 28, justifyContent: 'flex-end' },
   glyph: {
     color: '#aeaeb2', fontSize: 18, fontWeight: 700, lineHeight: 1,
+    cursor: 'default', fontFamily: MONO,
+  },
+  zhDivider: {
+    color: '#3a3a3c', fontSize: 14, lineHeight: 1, cursor: 'default',
+  },
+  zhGlyph: {
+    color: '#aeaeb2', fontSize: 14, fontWeight: 700, lineHeight: 1,
     cursor: 'default', fontFamily: MONO,
   },
   retryBtn: {
