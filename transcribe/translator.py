@@ -25,9 +25,11 @@ from srt_source import stamp_source
 
 ZH_SUFFIX = ".zh-tw.srt"
 
-# Single worker — translation is API-bound and we want predictable
-# ordering across the file. Same shape as annotate_executor.
-translator_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="translator-worker")
+# Two workers — Haiku is API-bound; running two episodes in parallel
+# halves season translation time without straining Anthropic Tier 2's
+# Haiku TPM/RPM budget. (Per-episode chunks still go serial within one
+# worker, so cue ordering inside any single SRT stays deterministic.)
+translator_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="translator-worker")
 
 # Cue count per call. Originally 400 cues — Flash Lite's output token cap
 # wasn't the issue, but at that size the model would silently drop short

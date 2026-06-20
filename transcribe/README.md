@@ -140,7 +140,7 @@ Cost: ~$0.05 per movie, ~1-2 minutes per movie. A 13-episode pack like Sopranos 
 
 **Per-torrent button + per-video `zh_in_flight` state**: the backend keeps an in-memory map of `path → Future` for every video currently mid-translation. The bt scan exposes `zh_in_flight: bool` per video so the UI can show a pulsing `中` while translation is in progress AND disable the per-torrent button (with a "Translation in progress…" tooltip) while any of its videos are still in flight. The `finally` clause inside the submission wrapper pops the entry when the worker exits, so the flag is self-cleaning — no useEffect diffing on the client.
 
-Single worker (`translator_executor` with `max_workers=1`) serializes translations to avoid Anthropic rate limits and keep the UI's `中` flips predictable.
+Two workers (`translator_executor` with `max_workers=2`) — within an episode chunks still run serial so cue ordering is deterministic, but two episodes can be in flight at once. Cuts a 13-episode pack's wall-clock from ~45 min to ~24 min. Tier 2 Anthropic limits comfortably fit two concurrent Haiku calls; bump to 3 if you upgrade tiers.
 
 ## Known limitations
 
