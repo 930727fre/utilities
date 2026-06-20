@@ -4,7 +4,7 @@ Three ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
 - **bt tab** — paste a magnet link. We spawn a one-shot `aria2c` subprocess that writes into `data/bt/<per-torrent-wrapper>/` and keeps seeding until its limit (1440 min or ratio 1.0). The bt tab lists every wrapper folder; phase comes from filesystem inspection — `.aria2` control file present means downloading, gone means seeding, subprocess exit means done.
-- **bt tab → "translate to 中" button per torrent** — for shows whose English+annotation pass isn't enough (Sopranos-grade dialect / mob slang), click the per-torrent button to produce `<stem>.zh-tw.srt` sidecars in place. Claude Haiku translates the carried-over English `<stem>.srt` cue-by-cue; ~$0.05 and ~1-2 min per video. No separate folder, no whisper fallback.
+- **bt tab → "translate to 中" button per torrent** — for shows whose English+annotation pass isn't enough (Sopranos-grade dialect / mob slang), click the per-torrent button to produce `<stem>.zh-tw.srt` sidecars in place. Per-cue Gemini Flash Lite (one call per cue, sliding-window context for pronouns + speaker + emotional beat) translates the carried-over English `<stem>.srt`; ~$0.06 and ~3-5 min per video. No separate folder, no whisper fallback.
 
 For the yt + bt branches, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
@@ -38,7 +38,7 @@ data/bt/<wrapper>/               ← per-torrent wrapper; aria2c writes here,
   Show.S01E01.srt                ← written by bt pipeline (whisper / OS /
                                     bundled-agent), annotated in place
   Show.S01E01.zh-tw.srt          ← written by the "translate to 中" button
-                                    (Haiku translates the English SRT)
+                                    (per-cue Gemini Flash Lite + sliding context)
 
   (for multi-file torrents, aria2 adds another nested folder named after
    the torrent's metadata "name" field inside <wrapper>; harmless, predictable)
@@ -51,13 +51,15 @@ YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for
 Prereqs:
 - External Docker network `my_network`.
 - The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
-- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet), srt-matcher agent (Haiku), OS subs verifier (Haiku), and the bt "translate to 中" button (Haiku).
+- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet), srt-matcher agent (Haiku), OS subs verifier (Haiku).
+- `GEMINI_API_KEY` exported — required for the bt "translate to 中" button (per-cue Gemini Flash Lite). Get one at https://aistudio.google.com/apikey.
 - `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
 
-All four use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
+All five use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
 
 ```sh
 export ANTHROPIC_API_KEY=…
+export GEMINI_API_KEY=…
 export OPENSUBTITLES_API_KEY=…
 export OPENSUBTITLES_USERNAME=…
 export OPENSUBTITLES_PASSWORD=…
@@ -81,7 +83,7 @@ docker compose up -d --build
 | `DELETE` | `/api/bt/torrents/{wrapper}` | Kill the subprocess (if running) + rmtree the wrapper folder |
 | `POST` | `/api/bt/transcribe` | `{path}`: manually trigger whisper on a bt file (background loop already handles this; useful for power/curl override) |
 | `POST` | `/api/bt/retry` | `{path}`: clear the failure sentinel SRT so the loop picks the file up again |
-| `POST` | `/api/bt/translate-zh` | `{wrapper}`: queue every video in this torrent for Chinese translation via Haiku. Refuses if torrent still downloading or any video lacks `※ annotated`. Idempotent — clicking again clears `.error` stamps so it doubles as retry |
+| `POST` | `/api/bt/translate-zh` | `{wrapper}`: queue every video in this torrent for Chinese translation via per-cue Gemini Flash Lite. Refuses if torrent still downloading or any video lacks `※ annotated`. Idempotent — clicking again clears `.error` stamps so it doubles as retry |
 
 ## Job states
 
@@ -124,27 +126,30 @@ Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.
 
 For shows whose English+annotation pass isn't enough (Sopranos, The Wire, anything with thick dialect / mob slang / AAVE), each bt torrent card carries a per-torrent "→ 中" button (visible when every video in the wrapper has `※ annotated`). One click queues every video for Chinese translation; results land as `<stem>.zh-tw.srt` sidecars next to the videos. Infuse picks both `<stem>.srt` (English + ✨) and `<stem>.zh-tw.srt` (Chinese) as separate language tracks on the same video.
 
-**Claude Haiku only — no OpenSubtitles lookup.** The OS step was tried and dropped: Chinese-sub uploads on OpenSubtitles are sparse and frequently mistagged for the releases the user actually watches, so the result was either no candidate or a wrong-content match the verifier had to reject anyway. Going straight to an LLM gives a more predictable result. Cue timing is inherited verbatim from the English SRT (which was already release-aligned by the bt pipeline) — no ffsubsync needed.
+**Gemini Flash Lite, per-cue with sliding-window context — no OpenSubtitles lookup.** The OS step was tried and dropped: Chinese-sub uploads on OpenSubtitles are sparse and frequently mistagged for the releases the user actually watches. Cue timing is inherited verbatim from the English SRT (which was already release-aligned by the bt pipeline) — no ffsubsync needed.
 
-We tried Gemini Flash Lite first (~10x cheaper than Haiku) and it had one structural failure mode: silently dropping short cues ("Yeah.", interjections, profanity) from its forced-JSON output, which then shifted every later cue's translation onto the wrong on-screen timestamp inside a chunk. Haiku's instruction-following on "return exactly N entries" is far tighter — alignment integrity beats cost at our scale.
+**Why per-cue instead of batch.** We went through two batch architectures (Flash Lite 400→200 cues per call, then Haiku 200 cues per call) and both had structural alignment failure modes — Flash Lite silently dropped short cues from its JSON output and renumbered the rest; Haiku kept the entry count right but occasionally shifted content within entries. The industry-standard fix (DeepL Pro / Google Translate API / Subtitle Edit) is per-segment translation: one LLM call per cue, no array of N entries that the model has to keep aligned. Structurally no possibility of misalignment, because the response IS the translation of the one cue we asked about. Per-cue with Gemini Flash Lite ends up roughly the same total cost as the Haiku batch approach (~$0.06/movie), because tiny calls offset Flash Lite's lower per-token cost.
+
+Each per-cue call carries 5 cues before + 5 cues after as REFERENCE (not to translate, only as context) — the model sees pronouns, speaker, and emotional tone of the surrounding dialogue, matching DeepL's sliding-window "document mode".
 
 Per video:
 1. Look up sibling `<stem>.srt` (the English transcript bt produced).
-2. Chunk it 200 cues at a time; send each chunk to Haiku for forced-JSON translation; preserve cue line structure + pass `※` sentinel cues through unchanged.
-3. Per chunk, validate Haiku returned exactly the input cue count + cue indices that match the chunk; on mismatch, retry once with the same prompt before accepting partial coverage (missing slots stay in English).
-4. Write `<stem>.zh-tw.srt` next to the video and stamp `※ source: llm-translated` so the player flashes the source tag at the 0–2 s window same as everywhere else.
+2. Identify cues to translate (skip `※`-prefixed sentinels — they pass through verbatim).
+3. Run translation calls in parallel (15 concurrent Gemini calls per episode), each with sliding-window context + forced-JSON output of just the one cue's translation lines.
+4. Apply translations back in place; any cue whose call failed keeps original English.
+5. Write `<stem>.zh-tw.srt` next to the video and stamp `※ source: llm-translated` so the player flashes the source tag at the 0–2 s window same as everywhere else.
 
-Cost: ~$0.05 per movie, ~1-2 minutes per movie. A 13-episode pack like Sopranos S01 takes ~20 min end-to-end.
+Cost: ~$0.06 per movie, ~3-5 minutes per movie depending on cue count and Gemini load. A 13-episode pack like Sopranos S01 takes ~30 min end-to-end.
 
 `<stem>.zh-tw.srt.error` sentinel files (plain text, holding the failure reason) appear on either-step failures. The button doubles as retry: clicking again clears `.error` stamps before re-queueing, so a failed video gets a fresh attempt.
 
 **Per-torrent button + per-video `zh_in_flight` state**: the backend keeps an in-memory map of `path → Future` for every video currently mid-translation. The bt scan exposes `zh_in_flight: bool` per video so the UI can show a pulsing `中` while translation is in progress AND disable the per-torrent button (with a "Translation in progress…" tooltip) while any of its videos are still in flight. The `finally` clause inside the submission wrapper pops the entry when the worker exits, so the flag is self-cleaning — no useEffect diffing on the client.
 
-Two workers (`translator_executor` with `max_workers=2`) — within an episode chunks still run serial so cue ordering is deterministic, but two episodes can be in flight at once. Cuts a 13-episode pack's wall-clock from ~45 min to ~24 min. Tier 2 Anthropic limits comfortably fit two concurrent Haiku calls; bump to 3 if you upgrade tiers.
+Two workers at the episode level (`translator_executor` with `max_workers=2`); inside each, 15 concurrent cue-level calls (`_CUE_CONCURRENCY` in translator.py). At peak that's 30 Gemini Flash Lite calls in flight, comfortably below Flash Lite quota.
 
 ## Known limitations
 
 - `jobs.json` is file-locked, not a real DB. Single-user is fine; for concurrent users move to SQLite.
 - Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
 - bt mode ignores embedded subtitle tracks (muxed into the video container). Non-standard external layouts like `Subs/<episode>/N_English.srt` ARE handled — the srt-matcher tool-use agent finds and copies them into place — but anything muxed into the mkv container still needs `ffmpeg` extraction outside this pipeline.
-- The Chinese translation cascade has no whisper fallback (whisper produces English, which would defeat the point). If Haiku translation fails (rare), the video lands at `中 !` and stays there until the user clicks the torrent's button again to retry.
+- The Chinese translation cascade has no whisper fallback (whisper produces English, which would defeat the point). If the Gemini per-cue call fails for a particular cue, that one cue silently keeps its English line (the rest of the SRT is still useful). If the whole translation raises (e.g. all calls hit a long Gemini outage), the video lands at `中 !` and stays there until the user clicks the torrent's button again to retry.

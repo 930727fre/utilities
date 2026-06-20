@@ -55,7 +55,7 @@ _token_lock = threading.Lock()
 # Negative cache: { (video_path, languages): (expiry_unix_timestamp, reason) }.
 #
 # Keyed by (path, languages) for hygiene — only ever populated with "en" now
-# (the Chinese-translation path is Haiku-only and doesn't go through OS at
+# (the Chinese-translation path is LLM-only and doesn't go through OS at
 # all) but the structure remains generic in case we ever bring it back.
 #
 # Without it the 30 s scan loop would burn an OS API call (and a Claude haiku

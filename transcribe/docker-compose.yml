@@ -13,6 +13,7 @@ services:
     environment:
       - JOBS_FILE=/app/data/jobs.json
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be exported before docker compose up}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:?GEMINI_API_KEY must be exported before docker compose up}
       - WHISPER_URL=http://whisper:8000
       - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:?OPENSUBTITLES_API_KEY must be exported before docker compose up}
       - OPENSUBTITLES_USERNAME=${OPENSUBTITLES_USERNAME:?OPENSUBTITLES_USERNAME must be exported before docker compose up}
