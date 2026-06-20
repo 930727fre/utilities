@@ -4,7 +4,7 @@ Three ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
 - **bt tab** — paste a magnet link. We spawn a one-shot `aria2c` subprocess that writes into `data/bt/<per-torrent-wrapper>/` and keeps seeding until its limit (1440 min or ratio 1.0). The bt tab lists every wrapper folder; phase comes from filesystem inspection — `.aria2` control file present means downloading, gone means seeding, subprocess exit means done.
-- **translate_zh tab** — manually `mv` a watched-and-annotated folder into `data/translate_zh/`. The scan loop queries OpenSubtitles for human-translated zh-tw/zh-cn subs and saves them as `<stem>.zh-tw.srt` next to each video. No whisper fallback (whisper produces English); no annotation. Use this when the show's English+annotation pass wasn't enough — e.g. The Sopranos.
+- **translate_zh tab** — manually `mv` a watched-and-annotated folder into `data/translate_zh/`. The scan loop queries OpenSubtitles for human-translated zh-tw/zh-cn subs and saves them as `<stem>.zh-tw.srt` next to each video. If OS doesn't have the release (typical for brand-new films / niche shows), it falls through to Gemini Flash Lite translating the carried-over English `<stem>.srt` directly. No whisper fallback. Use this when the show's English+annotation pass wasn't enough — e.g. The Sopranos.
 
 For the yt + bt branches, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
@@ -53,13 +53,15 @@ YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for
 Prereqs:
 - External Docker network `my_network`.
 - The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
-- `ANTHROPIC_API_KEY` exported in the shell — required for annotation.
+- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet) + srt-matcher agent + OS subs verifier (both Haiku).
+- `GEMINI_API_KEY` exported — required for the translate_zh Gemini fallback path.
 - `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
 
-All four use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
+All five use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
 
 ```sh
 export ANTHROPIC_API_KEY=…
+export GEMINI_API_KEY=…
 export OPENSUBTITLES_API_KEY=…
 export OPENSUBTITLES_USERNAME=…
 export OPENSUBTITLES_PASSWORD=…
@@ -133,9 +135,11 @@ Workflow:
 3. The scan loop (every 30s, same cadence as bt) picks each video up and queries OpenSubtitles with `languages=zh-tw,zh-cn`. The verifier (Claude Haiku) confirms the candidate matches the local release. ffsubsync corrects timing drift. Output saved as `<stem>.zh-tw.srt` next to the video.
 4. Infuse picks both `<stem>.srt` (English + ✨) and `<stem>.zh-tw.srt` (Chinese) as separate language tracks.
 
-If no Chinese subs exist on OpenSubtitles (niche shows), the loop writes a `<stem>.zh-tw.srt.error` marker file so the UI can show ! and the loop stops retrying. There's no whisper fallback — whisper produces English, which would defeat the point.
+If OS misses for any reason (no candidate / verifier rejection / quota / network), the loop falls through to **Gemini Flash Lite** translating the carried-over English `<stem>.srt` (the one bt left behind) cue-by-cue into 繁體中文. ~$0.01 per movie, ~1 minute for a feature-length film. Sentinel stamp `※ source: llm-translated` records that the SRT came from machine translation rather than a human upload.
 
-Quota cache: same 24h transient expiry as bt's English path; permanent misses stay permanent until ↻.
+If the English SRT is also missing (e.g. you dropped a raw mp4 into translate_zh without running it through bt first), the loop writes a `<stem>.zh-tw.srt.error` marker file so the UI can show ! and the loop stops retrying. There's no whisper fallback — whisper produces English, which would defeat the point.
+
+Quota cache (the in-memory `_failed` dict in subs_finder) still uses the 24h transient expiry to avoid hammering OS during quota windows on the bt path, but translate_zh doesn't gate on it — any miss falls straight to Gemini.
 
 ## Known limitations
 

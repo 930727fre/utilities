@@ -20,6 +20,7 @@ from srt_matcher import find_matching_srt
 from srt_source import stamp_source
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from subs_finder import cache_is_permanent_miss, clear_cache, find_subs, get_failure_reason
+from translator import translate_to_zh
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
@@ -664,20 +665,20 @@ async def translate_zh_retry(req: TranslateZhRetryRequest):
 
 def _queue_pending_translate_zh_work():
     """For every translate_zh video without a `.zh-tw.srt` sidecar (and no
-    `.error` stamp), call subs_finder synchronously with Chinese languages.
+    `.error` stamp), try OpenSubtitles first; if OS misses for any reason
+    (permanent or transient), fall through to Gemini Flash Lite translating
+    the carried-over English `<stem>.srt` directly.
 
     Synchronous because:
       - find_subs is network + ffsubsync (up to ~5 min worst case), and
         translate_zh has no upstream queue depth pressure — folders trickle
         in by hand;
       - it keeps backpressure simple: while a call is in flight, the next
-        scan tick is delayed, which prevents fanning out parallel OS calls
-        and burning the quota faster than the 24h transient cache expects.
+        scan tick is delayed.
 
-    Permanent misses (no candidates / verifier rejects all / empty body)
-    surface as a `<stem>.zh-tw.srt.error` stamp so the UI can show !;
-    transient misses (HTTP 406 quota) leave no stamp — the in-memory
-    cache returns None for 24h and the loop quietly waits.
+    OS-then-Gemini ordering: the user trusts Gemini quality enough that
+    they'd rather have a Chinese SRT NOW (even if OS quota would refresh
+    tomorrow) than wait. Cost is ~$0.01 per movie at Flash Lite tier.
     """
     items = _scan_translate_zh()
     for item in items:
@@ -690,12 +691,30 @@ def _queue_pending_translate_zh_work():
         result = find_subs(video, languages=TRANSLATE_ZH_LANGUAGES, out_path=zh_path)
         if result is not None:
             continue
-        # find_subs returned None — either permanent miss or transient
-        # (quota). Stamp only the permanent case so transient retries get
-        # picked up by the next tick after the 24h cache expires.
-        if cache_is_permanent_miss(video, TRANSLATE_ZH_LANGUAGES):
-            err_path = Path(str(zh_path) + ".error")
-            reason = get_failure_reason(video, TRANSLATE_ZH_LANGUAGES) or "(no reason recorded)"
+
+        # OS missed (permanent or transient). Fall through to Gemini if
+        # there's a carried-over English SRT to translate from.
+        eng_srt = video.with_suffix(".srt")
+        err_path = Path(str(zh_path) + ".error")
+        if not eng_srt.exists():
+            reason = (
+                "no English SRT to translate from; the carried-over "
+                "<stem>.srt is missing. Did this folder come from the bt "
+                "pipeline (which would have produced one)?"
+            )
+            try:
+                err_path.write_text(reason, encoding="utf-8")
+            except OSError as e:
+                print(f"[translate_zh] stamp .error failed for {video.name!r}: {e}", flush=True)
+            continue
+
+        print(f"[translate_zh] OS missed for {video.name!r}, falling through to Gemini", flush=True)
+        try:
+            translate_to_zh(eng_srt, zh_path)
+            print(f"[translate_zh] wrote {zh_path.name!r} via Gemini", flush=True)
+        except Exception as exc:
+            traceback.print_exc()
+            reason = f"Gemini translation failed: {exc}"
             try:
                 err_path.write_text(reason, encoding="utf-8")
             except OSError as e:
