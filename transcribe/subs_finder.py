@@ -54,9 +54,9 @@ _token_lock = threading.Lock()
 
 # Negative cache: { (video_path, languages): (expiry_unix_timestamp, reason) }.
 #
-# Keyed by (path, languages) so the English bt branch and the zh-tw
-# translate_zh branch don't poison each other's cache — a video that has no
-# English subs may well have Chinese subs, and vice versa.
+# Keyed by (path, languages) for hygiene — only ever populated with "en" now
+# (the Chinese-translation path is Gemini-only and doesn't go through OS at
+# all) but the structure remains generic in case we ever bring it back.
 #
 # Without it the 30 s scan loop would burn an OS API call (and a Claude haiku
 # verify, which costs real money) every tick on the same video.
@@ -70,11 +70,11 @@ _token_lock = threading.Lock()
 # lands first try the API again.
 #
 # `reason` is a human-readable string surfaced via get_failure_reason() —
-# stamped into the SRT (bt branch via `※ os failed: …`) or into the .error
-# sidecar (translate_zh) so the user understands WHY OS didn't deliver
-# without needing to read `docker logs`. OS is the most consequential leg
-# of the pipeline (human subs > whisper), so its failure mode deserves
-# first-class visibility.
+# stamped into the SRT (`※ os failed: …` when whisper takes over) so the
+# user understands WHY OS didn't deliver without needing to read
+# `docker logs`. OS is the most consequential leg of the English pipeline
+# (human subs > whisper), so its failure mode deserves first-class
+# visibility.
 _failed: dict[tuple[str, str], tuple[float, str]] = {}
 _failed_lock = threading.Lock()
 
@@ -302,10 +302,10 @@ def _search_by_text(video: Path, languages: str) -> Optional[dict]:
 def find_subs(video: Path, languages: str = "en", out_path: Optional[Path] = None) -> Optional[Path]:
     """Search OpenSubtitles for a subtitle in `languages` matching this video.
 
-    `languages` is a comma-separated list of ISO codes (e.g. "en",
-    "zh-tw,zh-cn"). `out_path` overrides the default `video.with_suffix('.srt')`
-    output location — used by the translate_zh branch to write a `.zh-tw.srt`
-    sidecar alongside (rather than overwriting) the English SRT.
+    `languages` is a comma-separated list of ISO codes (currently always
+    "en" — the Chinese-translation path bypasses OS entirely). `out_path`
+    overrides the default `video.with_suffix('.srt')` output location. Both
+    parameters stay generic in case the OS-Chinese branch is ever revived.
 
     Try hash search first (zero timing drift when it hits), fall back to
     text search (drift fixed by ffsubsync). Returns the written SRT path
@@ -402,37 +402,19 @@ def find_subs(video: Path, languages: str = "en", out_path: Optional[Path] = Non
     return out_path
 
 
-def cache_is_permanent_miss(video: Path, languages: str = "en") -> bool:
-    """True if the last find_subs call cached this (video, languages) pair
-    as a permanent miss (no candidates / verifier rejection / empty body).
-    Caller uses this to decide whether to surface a `.error` stamp.
-    Transient (quota) misses return False so the UI stays in "working"."""
-    with _failed_lock:
-        entry = _failed.get((str(video), languages))
-        return entry is not None and entry[0] == float("inf")
-
-
 def get_failure_reason(video: Path, languages: str = "en") -> Optional[str]:
     """Return the human-readable failure reason for the last find_subs
     call on (video, languages), or None if find_subs succeeded or was
     never called for this pair.
 
     Used by the bt path to stamp `※ os failed: …` into the SRT after
-    whisper takes over (so the user knows why OS didn't deliver this one)
-    and by translate_zh to write the `.error` sidecar with the actual
-    reason instead of a fixed string. Returns the reason regardless of
-    whether the cache entry is permanent or transient — callers usually
-    only ask after find_subs returned None on the current tick."""
+    whisper takes over, so the user sees WHY OS didn't deliver this one
+    at playback start. Returns the reason regardless of whether the cache
+    entry is permanent or transient — callers usually only ask after
+    find_subs returned None on the current tick."""
     with _failed_lock:
         entry = _failed.get((str(video), languages))
         return entry[1] if entry is not None else None
-
-
-def clear_cache(video: Path, languages: str = "en") -> None:
-    """Drop the cached miss for (video, languages) so the next find_subs
-    call retries the API. Used by the retry endpoint."""
-    with _failed_lock:
-        _failed.pop((str(video), languages), None)
 
 
 def _resync_inplace(video: Path, srt: Path) -> None:

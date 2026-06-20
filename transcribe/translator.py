@@ -1,22 +1,16 @@
-"""English-to-zh-TW SRT translator — Gemini Flash Lite fallback for the
-bt "translate to zh" button when OpenSubtitles doesn't have a Chinese sub
-for the release (most common cause: brand-new films, niche shows).
-
-Reuses annotate.py's SRT parse → chunk → forced-JSON → render pattern.
-Translation is a well-trodden, low-creativity task that the small
-Gemini tier handles fine; quality on mainstream films is comparable to
-the average OpenSubtitles user upload at a fraction of the wait.
+"""English-to-zh-TW SRT translator — Gemini Flash Lite drives the bt
+"translate to 中" button. Reuses annotate.py's SRT parse → chunk →
+forced-JSON → render pattern. Translation is a well-trodden,
+low-creativity task that the small Gemini tier handles fine; quality on
+mainstream films is comparable to an average OpenSubtitles user upload.
 
 Output SRT is structurally identical to the input — same cue indices,
 same timestamps — just the dialogue lines replaced with 繁體中文 and the
 existing sentinel cues (`※ source: …`, `※ annotated`, etc.) carried
 through unchanged. A new `※ source: llm-translated` sentinel gets
-appended; annotate.py's chronological sort on the next pass — wait,
-annotate.py doesn't touch translate_zh outputs. The sentinel sits at
-end of file with timestamp 00:00:00 so a player honors timestamp order;
-casual `head` inspection sees `※ annotated` (from the carried-over
-English SRT) but not our new tag. That's a known cosmetic; the SRT is
-functionally correct.
+appended at the file end with timestamp 00:00:00. Players honor
+timestamp order, so the source tag flashes at playback start same as
+every other source.
 """
 import os
 import traceback
@@ -28,7 +22,6 @@ from gemini_client import generate_json
 from srt_source import stamp_source
 
 ZH_SUFFIX = ".zh-tw.srt"
-ZH_LANGUAGES = "zh-tw,zh-cn"
 
 # Single worker — translation is API-bound and we want predictable
 # ordering across the file. Same shape as annotate_executor.

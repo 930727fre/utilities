@@ -34,7 +34,6 @@ BT_ROOTS = [Path("/bt")]
 # When the user clicks the "translate to zh" button on a bt torrent, we
 # write the Chinese sub as a sidecar next to the video — same folder, same
 # stem, .zh-tw.srt suffix. Infuse picks it up as a separate language track.
-ZH_LANGUAGES = "zh-tw,zh-cn"
 ZH_SUFFIX = ".zh-tw.srt"
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 ANNOTATION_MARKER = "※ annotated"
