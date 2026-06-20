@@ -117,7 +117,7 @@ Only if both steps miss does whisper run. For popular content (movies, mainstrea
 The bt tab and background annotation loop skip:
 
 - Dotfiles
-- Any video that still has a sibling `.aria2` control file (aria2c hasn't finished downloading it)
+- Any video whose wrapper folder still contains a `.aria2` control file anywhere (aria2c uses ONE control file per torrent, not per-file; its presence anywhere under the wrapper means the whole torrent is still mid-download / mid-verify)
 - Files whose mtime is within the last 60 seconds (belt-and-suspenders for non-aria2c writers — manual drops, webdav copies, rsync)
 (yt staging files live in `/app/data/downloads`, not `/bt`, so they're not scanned in the first place.)
 

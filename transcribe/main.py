@@ -309,6 +309,18 @@ def _scan_bt() -> list[dict]:
     for root in BT_ROOTS:
         if not root.exists():
             continue
+        # aria2c keeps ONE `.aria2` control file per torrent (not one per
+        # file inside a multi-file torrent), and only deletes it once every
+        # piece across every file has verified. So any `.aria2` anywhere
+        # under a wrapper means EVERY file in that wrapper is still being
+        # written / verified and unsafe to scan — far more reliable than
+        # the mtime check below for stalled-peer cases where individual
+        # file writes can pause for minutes.
+        wrappers_in_flight = {
+            w.resolve()
+            for w in root.iterdir()
+            if w.is_dir() and any(w.rglob("*.aria2"))
+        }
         for video in root.rglob("*"):
             if not video.is_file():
                 continue
@@ -316,13 +328,14 @@ def _scan_bt() -> list[dict]:
                 continue
             if video.name.startswith("."):
                 continue
-            # aria2c writes a sibling `<name>.aria2` control file while a
-            # download is in flight and deletes it the moment all pieces
-            # verify. Its presence is the authoritative "still downloading"
-            # signal — far more reliable than the mtime check below for
-            # stalled-peer cases where writes can pause for minutes.
-            if (video.parent / (video.name + ".aria2")).exists():
-                continue
+            # Skip the whole wrapper if its torrent hasn't finished yet.
+            try:
+                wrapper = root / video.relative_to(root).parts[0]
+                if wrapper.resolve() in wrappers_in_flight:
+                    continue
+            except (ValueError, IndexError):
+                # video is directly at root with no wrapper; nothing to skip.
+                pass
             # Belt-and-suspenders for non-aria2c writers (manual drops,
             # webdav copies, rsync mid-flight): files whose mtime hasn't
             # settled for 60 s aren't ready yet.
