@@ -133,20 +133,23 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
 
 
 def translate_video_zh(video: Path) -> None:
-    """Top-level worker submitted by the bt translate-zh endpoint. For one
-    video: try OpenSubtitles for a human-translated zh-tw/zh-cn sub first;
-    if OS misses for any reason, fall through to Gemini translating the
-    sibling `<stem>.srt` (the English transcript bt left in place).
+    """Top-level worker submitted by the bt translate-zh endpoint. Translate
+    the sibling `<stem>.srt` (the English transcript bt left in place) to
+    繁體中文 via Gemini Flash Lite.
+
+    OpenSubtitles is NOT consulted — Chinese-sub uploads on OS are sparse
+    and frequently mistagged for releases the user actually watches, so
+    going straight to Gemini gives a more predictable result. Cost is
+    ~$0.01 per movie.
 
     Output: `<stem>.zh-tw.srt` next to the video on success, or
-    `<stem>.zh-tw.srt.error` with the failure reason on either-step failure.
+    `<stem>.zh-tw.srt.error` with the failure reason if Gemini fails or
+    the English SRT is missing.
 
     Idempotent: skips if `<stem>.zh-tw.srt` already exists. The endpoint
-    pre-clears `.error` stamps + the subs_finder cache before submitting,
-    so calling the endpoint again counts as a retry.
+    pre-clears `.error` stamps before submitting, so calling the endpoint
+    again counts as a retry.
     """
-    from subs_finder import find_subs  # local: avoid import cycle on app boot
-
     zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
     err_path = Path(str(zh_path) + ".error")
     eng_srt = video.with_suffix(".srt")
@@ -154,13 +157,6 @@ def translate_video_zh(video: Path) -> None:
     if zh_path.exists():
         return  # already done
 
-    # 1) OS — best quality when available (human upload).
-    result = find_subs(video, languages=ZH_LANGUAGES, out_path=zh_path)
-    if result is not None:
-        print(f"[translate-zh] OS picked {zh_path.name!r}", flush=True)
-        return
-
-    # 2) Gemini fallback — needs the English transcript as source.
     if not eng_srt.exists():
         reason = (
             "no English SRT to translate from; the sibling <stem>.srt is "
@@ -172,10 +168,10 @@ def translate_video_zh(video: Path) -> None:
             print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
         return
 
-    print(f"[translate-zh] OS missed for {video.name!r}, using Gemini", flush=True)
+    print(f"[translate-zh] translating {video.name!r} via Gemini", flush=True)
     try:
         translate_to_zh(eng_srt, zh_path)
-        print(f"[translate-zh] wrote {zh_path.name!r} via Gemini", flush=True)
+        print(f"[translate-zh] wrote {zh_path.name!r}", flush=True)
     except Exception as exc:
         traceback.print_exc()
         try:

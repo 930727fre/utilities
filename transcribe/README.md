@@ -4,7 +4,7 @@ Three ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
 - **bt tab** — paste a magnet link. We spawn a one-shot `aria2c` subprocess that writes into `data/bt/<per-torrent-wrapper>/` and keeps seeding until its limit (1440 min or ratio 1.0). The bt tab lists every wrapper folder; phase comes from filesystem inspection — `.aria2` control file present means downloading, gone means seeding, subprocess exit means done.
-- **bt tab → "translate to 中" button per torrent** — for shows whose English+annotation pass isn't enough (Sopranos-grade dialect / mob slang), click the per-torrent button to produce `<stem>.zh-tw.srt` sidecars in place. Tries OpenSubtitles (zh-tw/zh-cn) first for human translations, falls through to Gemini Flash Lite translating the carried-over English `<stem>.srt` when OS misses. ~$0.01 / ~1 min per video at the Gemini tier. No separate folder, no whisper fallback.
+- **bt tab → "translate to 中" button per torrent** — for shows whose English+annotation pass isn't enough (Sopranos-grade dialect / mob slang), click the per-torrent button to produce `<stem>.zh-tw.srt` sidecars in place. Gemini Flash Lite translates the carried-over English `<stem>.srt` cue-by-cue; ~$0.01 and ~1 min per video. No separate folder, no whisper fallback.
 
 For the yt + bt branches, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
@@ -126,16 +126,20 @@ Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.
 
 For shows whose English+annotation pass isn't enough (Sopranos, The Wire, anything with thick dialect / mob slang / AAVE), each bt torrent card carries a per-torrent "→ 中" button (visible when every video in the wrapper has `※ annotated`). One click queues every video for Chinese translation; results land as `<stem>.zh-tw.srt` sidecars next to the videos. Infuse picks both `<stem>.srt` (English + ✨) and `<stem>.zh-tw.srt` (Chinese) as separate language tracks on the same video.
 
-Two-stage cascade per video:
+**Gemini Flash Lite only — no OpenSubtitles lookup.** The OS step was tried and dropped: Chinese-sub uploads on OpenSubtitles are sparse and frequently mistagged for the releases the user actually watches, so the result was either no candidate or a wrong-content match the verifier had to reject anyway. Going straight to Gemini gives a more predictable result. Cue timing is inherited verbatim from the English SRT (which was already release-aligned by the bt pipeline) — no ffsubsync needed.
 
-1. **OpenSubtitles**: query with `languages=zh-tw,zh-cn`. Haiku verifier confirms the candidate matches the local release; ffsubsync corrects timing drift. Best quality when available — these are human translations.
-2. **Gemini Flash Lite fallback**: if OS misses for any reason (no candidate / verifier rejection / quota / network), translate the carried-over English `<stem>.srt` cue-by-cue. ~$0.01 per movie, ~1 minute for a feature-length film. Sentinel stamp `※ source: llm-translated` records that the SRT came from machine translation rather than a human upload.
+Per video:
+1. Look up sibling `<stem>.srt` (the English transcript bt produced).
+2. Chunk it 400 cues at a time; send each chunk to Gemini Flash Lite for forced-JSON translation; preserve cue line structure + pass `※` sentinel cues through unchanged.
+3. Write `<stem>.zh-tw.srt` next to the video and stamp `※ source: llm-translated` so the player flashes the source tag at the 0–2 s window same as everywhere else.
 
-The user trusts Gemini quality enough that the cascade does NOT wait for transient OS misses (quota will refresh in 24h) — any miss falls straight to Gemini so the SRT is ready immediately.
+Cost: ~$0.01 per movie, ~1 minute per movie. A 13-episode pack like Sopranos S01 takes ~13 min end-to-end.
 
-`<stem>.zh-tw.srt.error` sentinel files (plain text, holding the failure reason) appear on either-step failures. The button doubles as retry: clicking again clears `.error` stamps + the in-memory subs_finder cache before re-queueing, so a failed video gets a fresh attempt.
+`<stem>.zh-tw.srt.error` sentinel files (plain text, holding the failure reason) appear on either-step failures. The button doubles as retry: clicking again clears `.error` stamps before re-queueing, so a failed video gets a fresh attempt.
 
-Single worker (`translator_executor` with `max_workers=1`) serializes translations to avoid Gemini rate limits and keep the UI's `中` flips predictable. A 13-episode pack translates in ~13 minutes.
+**Per-torrent button + per-video `zh_in_flight` state**: the backend keeps an in-memory map of `path → Future` for every video currently mid-translation. The bt scan exposes `zh_in_flight: bool` per video so the UI can show a pulsing `中` while Gemini is working AND disable the per-torrent button (with a "Translation in progress…" tooltip) while any of its videos are still in flight. The `finally` clause inside the submission wrapper pops the entry when the worker exits, so the flag is self-cleaning — no useEffect diffing on the client.
+
+Single worker (`translator_executor` with `max_workers=1`) serializes translations to avoid Gemini rate limits and keep the UI's `中` flips predictable.
 
 ## Known limitations
 

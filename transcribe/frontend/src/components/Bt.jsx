@@ -25,11 +25,6 @@ export default function Bt() {
   const [torrents, setTorrents] = useState([])
   const [magnet, setMagnet] = useState('')
   const [expanded, setExpanded] = useState(() => new Set())
-  // Wrappers the user has just clicked translate on — videos in here that
-  // don't yet have a `<stem>.zh-tw.srt` (and no .error) get a pulsing ○
-  // so the user gets visual feedback that something's working. Cleared
-  // implicitly: once has_zh_srt or zh_error flips, the pulse stops.
-  const [translatingWrappers, setTranslatingWrappers] = useState(() => new Set())
   const submittingRef = useRef(false)
 
   async function refresh() {
@@ -94,15 +89,10 @@ export default function Bt() {
 
   async function handleTranslate(wrapper, count) {
     const ok = confirm(`Translate ${count} video${count === 1 ? '' : 's'} in this torrent to 繁體中文?\n\n` +
-      `Tries OpenSubtitles first; falls through to Gemini (~$0.01 + ~1 min per video).`)
+      `Gemini Flash Lite — ~$0.01 and ~1 minute per video.`)
     if (!ok) return
     try {
       const res = await translateTorrentZh(wrapper)
-      setTranslatingWrappers(prev => {
-        const next = new Set(prev)
-        next.add(wrapper)
-        return next
-      })
       if (res.queued === 0) {
         alert(`Already translated — nothing queued.`)
       }
@@ -114,7 +104,8 @@ export default function Bt() {
 
   // Group videos under their torrent's outer-wrapper name so we can decide
   // whether a torrent is ready to translate (all videos annotated, not
-  // downloading) and surface per-video Chinese-sub state.
+  // downloading, none currently being translated) and surface per-video
+  // Chinese-sub state on the row.
   const itemsByTorrent = new Map()
   for (const item of items) {
     const torrentName = (item.parent || '').split('/')[0]
@@ -131,6 +122,9 @@ export default function Bt() {
     if (myItems.length === 0) {
       return { ready: false, count: 0, reason: 'No videos found in this torrent yet' }
     }
+    if (myItems.some(it => it.zh_in_flight)) {
+      return { ready: false, count: 0, reason: 'Translation in progress…' }
+    }
     const done = myItems.filter(it => it.has_annotation).length
     if (done < myItems.length) {
       return { ready: false, count: 0, reason: `${done} of ${myItems.length} videos annotated — wait for the rest` }
@@ -142,7 +136,7 @@ export default function Bt() {
     return {
       ready: true,
       count: untranslated,
-      reason: `Translate ${untranslated} video${untranslated === 1 ? '' : 's'} to 繁體中文 (OS first, Gemini fallback)`,
+      reason: `Translate ${untranslated} video${untranslated === 1 ? '' : 's'} to 繁體中文 via Gemini`,
     }
   }
 
@@ -229,20 +223,16 @@ export default function Bt() {
       {[...groups.entries()].map(([groupKey, rows]) => (
         <div key={groupKey || '__root__'} style={styles.group}>
           {groupKey && <div style={styles.groupHeader}>{groupKey}</div>}
-          {rows.map(item => {
-            const wrapper = (item.parent || '').split('/')[0]
-            const isTranslating = translatingWrappers.has(wrapper)
-            return <RowItem key={item.path} item={item} onRetry={handleRetry} isTranslating={isTranslating} />
-          })}
+          {rows.map(item => <RowItem key={item.path} item={item} onRetry={handleRetry} />)}
         </div>
       ))}
     </div>
   )
 }
 
-function RowItem({ item, onRetry, isTranslating }) {
+function RowItem({ item, onRetry }) {
   const engState = deriveEngState(item)
-  const zhState = deriveZhState(item, isTranslating)
+  const zhState = deriveZhState(item)
   const engErrMsg = item.whisper_error || item.annotate_error || ''
   return (
     <div className="fade-in" style={styles.row}>
@@ -286,10 +276,10 @@ function deriveEngState(item) {
   return 'working'
 }
 
-function deriveZhState(item, isTranslating) {
+function deriveZhState(item) {
+  if (item.zh_in_flight) return 'translating'
   if (item.has_zh_srt) return 'done'
   if (item.zh_error) return 'failed'
-  if (isTranslating) return 'translating'
   return 'absent'
 }
 

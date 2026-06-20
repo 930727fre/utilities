@@ -1,9 +1,11 @@
 import asyncio
 import os
 import shutil
+import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +21,7 @@ from gpu_lock import release_all_held
 from srt_matcher import find_matching_srt
 from srt_source import stamp_source
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
-from subs_finder import clear_cache, find_subs
+from subs_finder import find_subs
 from translator import translate_video_zh, translator_executor
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
@@ -46,6 +48,30 @@ BT_SCAN_INTERVAL = 30
 # scan loop reads it back on every tick and survives container restarts.
 # Auto-retry is gone; the UI ↻ button is the only path back into the
 # pipeline for a failed file.
+
+# In-flight translate-to-zh futures keyed by absolute video path. Set when
+# the translate-zh endpoint submits a worker, cleared (via a `finally` in
+# the submission wrapper) when the worker exits. The bt scan reads this
+# to expose `zh_in_flight` per video so the UI knows the "中" pulse is
+# alive — and the per-torrent "→ 中" button can disable while any of its
+# videos are still being translated. Container restart wipes the dict
+# along with the executor's threads, which is the right behaviour: any
+# half-finished translations get retried by the next button click.
+_translating: dict[str, Future] = {}
+_translating_lock = threading.Lock()
+
+
+def _submit_translate(video: Path) -> None:
+    def _run():
+        try:
+            translate_video_zh(video)
+        finally:
+            with _translating_lock:
+                _translating.pop(str(video), None)
+
+    fut = translator_executor.submit(_run)
+    with _translating_lock:
+        _translating[str(video)] = fut
 
 
 def _now() -> str:
@@ -301,9 +327,12 @@ def _read_srt_marker(srt_path: Path, marker: str) -> str | None:
 
 
 def _scan_bt() -> list[dict]:
-    """Walk BT_ROOTS, return one entry per video file. Filesystem only."""
+    """Walk BT_ROOTS, return one entry per video file. Filesystem only,
+    plus the in-flight set of translate-zh futures for `zh_in_flight`."""
     out = []
     now = time.time()
+    with _translating_lock:
+        in_flight = {p for p, f in _translating.items() if not f.done()}
     for root in BT_ROOTS:
         if not root.exists():
             continue
@@ -357,6 +386,7 @@ def _scan_bt() -> list[dict]:
             zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
             zh_err_path = Path(str(zh_path) + ".error")
             has_zh_srt = zh_path.exists()
+            zh_in_flight = str(video) in in_flight
             zh_error: str | None = None
             if not has_zh_srt and zh_err_path.exists():
                 try:
@@ -379,6 +409,7 @@ def _scan_bt() -> list[dict]:
                 "whisper_error": whisper_error,
                 "annotate_error": annotate_error,
                 "has_zh_srt": has_zh_srt,
+                "zh_in_flight": zh_in_flight,
                 "zh_error": zh_error,
             })
     out.sort(key=lambda x: (x["root"], x["parent"], x["name"].lower()))
@@ -496,10 +527,14 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
         videos.append(video)
 
     queued = 0
+    with _translating_lock:
+        in_flight = {p for p, f in _translating.items() if not f.done()}
     for video in videos:
         zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
         if zh_path.exists():
             continue  # already translated
+        if str(video) in in_flight:
+            continue  # already submitted, worker hasn't finished
         # Clear stale failure state so retry-via-button works as expected.
         err_path = Path(str(zh_path) + ".error")
         if err_path.exists():
@@ -507,8 +542,7 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
                 err_path.unlink()
             except OSError:
                 pass
-        clear_cache(video, ZH_LANGUAGES)
-        translator_executor.submit(translate_video_zh, video)
+        _submit_translate(video)
         queued += 1
     return {"ok": True, "queued": queued, "total": len(videos)}
 
