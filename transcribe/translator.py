@@ -143,8 +143,18 @@ DO NOT transliterate into Chinese characters (write "Tony" not "東尼", \
 are canonical 繁體中文 terms (e.g. "New York" stays "紐約" because that \
 is the standard rendering, but "Newark" stays "Newark").
 - Lines that already contain `※` (our own sentinel markers like \
-`※ source: …`, `※ annotated`): output the line UNCHANGED, do not \
-translate, do not edit.
+`※ source: …`, `※ annotated`, or cultural-context notes prepended by \
+the annotator): output that specific line UNCHANGED. This applies \
+per-line, not per-cue: if a cue has 2 lines where one is English \
+dialogue and the other starts with `※`, you MUST translate the English \
+dialogue line into 繁體中文 AND output the `※` line verbatim. NEVER \
+skip translating an English dialogue line just because a sibling line \
+in the same cue contains `※`.
+- NEVER include the original English in your output unless the line \
+itself starts with `※`. The output is a Chinese-only subtitle track — \
+returning English dialogue verbatim is a translation failure. If a cue \
+is short ("Hey", "Yeah", single-word interjections), translate it; do \
+not pass through.
 
 Output JSON: array of {"cue": <int>, "lines": [<str>, ...]} — EXACTLY \
 %d entries, one per input target cue, in input order.
