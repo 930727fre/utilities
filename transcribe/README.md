@@ -145,7 +145,7 @@ Cost: ~$0.06 per movie, ~3-5 minutes per movie depending on cue count and Gemini
 
 **Per-torrent button + per-video `zh_in_flight` state**: the backend keeps an in-memory map of `path → Future` for every video currently mid-translation. The bt scan exposes `zh_in_flight: bool` per video so the UI can show a pulsing `中` while translation is in progress AND disable the per-torrent button (with a "Translation in progress…" tooltip) while any of its videos are still in flight. The `finally` clause inside the submission wrapper pops the entry when the worker exits, so the flag is self-cleaning — no useEffect diffing on the client.
 
-Two workers at the episode level (`translator_executor` with `max_workers=2`); inside each, 15 concurrent cue-level calls (`_CUE_CONCURRENCY` in translator.py). At peak that's 30 Gemini Flash Lite calls in flight, comfortably below Flash Lite quota.
+Two workers at the episode level (`translator_executor` with `max_workers=2`); inside each, 30 concurrent cue-level calls (`_CUE_CONCURRENCY` in translator.py). At peak that's 60 Gemini Flash Lite calls in flight, comfortably below the user's Flash Lite quota (4000 RPM / 4M TPM at peak hits ~15 RPS / ~40k TPM).
 
 ## Known limitations
 

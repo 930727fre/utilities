@@ -54,11 +54,12 @@ ZH_SUFFIX = ".zh-tw.srt"
 translator_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="translator-worker")
 
 # Cue-level parallelism INSIDE translate_to_zh. With sliding-window
-# per-cue calls each finishing in ~3-5 s, running 15 in parallel brings
-# an 818-cue episode down to ~3-5 minutes wall-clock. Two episode workers
-# × 15 cue workers = 30 simultaneous Gemini calls peak; well inside
-# Flash Lite's quota.
-_CUE_CONCURRENCY = 15
+# per-cue calls each finishing in ~3-5 s, running 30 in parallel brings
+# an 818-cue episode down to ~1-2 minutes wall-clock. Two episode workers
+# × 30 cue workers = 60 simultaneous Gemini calls peak — well inside
+# Flash Lite's quota (4000 RPM / 4M TPM on the user's tier; we sit
+# around 15 RPS / 40k TPM at peak).
+_CUE_CONCURRENCY = 30
 
 # Number of context cues on each side of the target. 5+5 gives enough
 # surrounding dialogue for the model to resolve pronouns / speaker
