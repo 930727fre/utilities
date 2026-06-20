@@ -27,9 +27,14 @@ ZH_SUFFIX = ".zh-tw.srt"
 # ordering across the file. Same shape as annotate_executor.
 translator_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="translator-worker")
 
-# Cue count per call. Gemini Flash Lite handles 400 cues comfortably
-# at the output token cap.
-CHUNK_SIZE = 400
+# Cue count per call. Originally 400 cues — Flash Lite's output token cap
+# wasn't the issue, but at that size the model would silently drop short
+# cues ("Yeah.", "Asshole!", interjections) and renumber the rest,
+# causing the visible-on-screen translation to slide off the spoken
+# dialogue by N cues even though every timestamp matched verbatim.
+# 200 keeps each call's accounting tight without doubling wall-clock
+# noticeably (Flash Lite returns in ~5-10s either way).
+CHUNK_SIZE = 200
 
 _MODEL = os.environ.get("GEMINI_TRANSLATE_MODEL", "gemini-2.5-flash-lite")
 
@@ -51,7 +56,21 @@ _SCHEMA = {
 _PROMPT_TEMPLATE = """\
 Translate the following English SRT cues to 繁體中文 (Taiwan).
 
-Rules:
+CRITICAL — cue alignment integrity:
+- The input has %d cues. The output JSON array MUST contain EXACTLY %d \
+entries — one per input cue, in input order.
+- DO NOT drop, merge, skip, or combine cues — not even very short ones \
+("Yeah.", "Asshole!", "Mm-hmm.", single interjections, repeated lines). \
+A subtitle viewer relies on every cue having a translation at its own \
+timestamp; missing entries shift every later cue's content onto the wrong \
+timestamp and break the entire viewing experience.
+- Use the EXACT integer `cue` index shown in the input for each output \
+entry. Do not renumber, increment, or invent new indices.
+- If a cue's content is genuinely untranslatable (e.g. pure music notation, \
+already in Chinese), still emit an entry — copy the original text or use \
+an empty string for `lines`, but emit the entry.
+
+Translation rules:
 - Translate the DIALOGUE faithfully and naturally in Taiwanese idiom; do not \
 add explanations or expand.
 - Preserve the line break structure within each cue: a cue with 2 input lines \
@@ -65,10 +84,9 @@ translate the dialogue part. Names stay in original Roman script.
 - Lines that already contain `※` (our own sentinel markers like \
 `※ source: …`, `※ annotated`): pass through UNCHANGED, do not translate, \
 do not edit.
-- Cue indices: use the integer index shown in the input.
 
-OUTPUT JSON: array of {"cue": <int>, "lines": [<str>, ...]}. Include EVERY \
-input cue — empty lines stay empty, sentinel cues pass through verbatim.
+OUTPUT JSON: array of {"cue": <int>, "lines": [<str>, ...]}. EXACTLY %d \
+entries, one per input cue, in input order.
 
 SRT chunk:
 %s
@@ -102,23 +120,53 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
     for start in range(0, len(cues), CHUNK_SIZE):
         chunk = cues[start:start + CHUNK_SIZE]
         chunk_text = _render_chunk_for_prompt(chunk)
-        prompt = _PROMPT_TEMPLATE % chunk_text
-        result = generate_json(prompt, _SCHEMA, temperature=0.2, model=_MODEL)
-        for entry in result:
-            try:
-                cue_idx = int(entry["cue"])
-                lines = [str(ln) for ln in entry["lines"]]
-            except (KeyError, ValueError, TypeError):
-                continue
-            if not lines:
-                continue
-            translations[cue_idx] = lines
+        expected = len(chunk)
+        prompt = _PROMPT_TEMPLATE % (expected, expected, expected, chunk_text)
 
-    # Apply — keep any cue Gemini skipped as original English (defensive;
-    # better partial Chinese than no SRT).
+        # Up to two attempts: if Gemini's first response drops cues (its
+        # known failure mode is silently collapsing short interjections),
+        # the indices of everything afterwards in that chunk shift onto
+        # the wrong on-screen timestamp. Detect by count + by checking
+        # which input cue indices got covered; retry once before giving
+        # up and falling back to original English for the missing cues.
+        valid: dict[int, list[str]] = {}
+        chunk_idxs = {c["idx"] for c in chunk}
+        for attempt in range(2):
+            result = generate_json(prompt, _SCHEMA, temperature=0.0, model=_MODEL)
+            valid = {}
+            for entry in result:
+                try:
+                    cue_idx = int(entry["cue"])
+                    lines = [str(ln) for ln in entry["lines"]]
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if cue_idx not in chunk_idxs:
+                    # Gemini hallucinated an index outside this chunk —
+                    # could be the symptom of a shifted-renumbering pass.
+                    # Reject so it can't poison a cue from another chunk.
+                    continue
+                valid[cue_idx] = lines
+            missing = chunk_idxs - valid.keys()
+            if not missing:
+                break
+            print(f"[translator] chunk {start}-{start+expected}: "
+                  f"Gemini returned {len(valid)}/{expected} cues "
+                  f"(missing {len(missing)}); attempt {attempt+1}/2", flush=True)
+        else:
+            # Both attempts dropped cues. We keep what we got and the
+            # missing slots stay in English; user can read those few lines.
+            print(f"[translator] chunk {start}-{start+expected}: gave up "
+                  f"after 2 attempts, {len(missing)} cues will stay English",
+                  flush=True)
+
+        translations.update(valid)
+
+    # Apply — any cue Gemini didn't translate (or that we rejected as
+    # off-chunk) stays as the original English. Better partial Chinese
+    # than corrupted alignment.
     for c in cues:
         new_lines = translations.get(c["idx"])
-        if new_lines is not None:
+        if new_lines:
             c["lines"] = new_lines
 
     out_path.write_text(render_srt(cues), encoding="utf-8")
