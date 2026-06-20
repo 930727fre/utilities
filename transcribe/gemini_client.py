@@ -19,7 +19,11 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # Retry behavior: short, bounded. Real outages should surface, not be papered over.
 MAX_RETRIES = 3
-RETRY_BACKOFF_SEC = (1.0, 3.0, 8.0)  # one per attempt
+# Aggressive backoff was costing throughput when transient 503s hit
+# bursty traffic — Google's overload recovers within ~1 s in practice,
+# so 0.3/0.8/2.0 is plenty of breathing room while letting threads get
+# back to work much faster than the original 1/3/8 cadence.
+RETRY_BACKOFF_SEC = (0.3, 0.8, 2.0)  # one per attempt
 
 
 def _api_key() -> str:

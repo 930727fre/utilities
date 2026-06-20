@@ -57,11 +57,13 @@ ZH_SUFFIX = ".zh-tw.srt"
 # inside each one. (See _CUE_CONCURRENCY below.)
 translator_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="translator-worker")
 
-# Cue-level parallelism INSIDE translate_to_zh. Host-side benchmarking
-# with the real prompt size showed RPS peaks at ~20 parallel (15.4 RPS)
-# and DROPS at 30 (13.4 RPS) — Google starts throttling burstier traffic
-# even within the per-minute quota. 20 sits in the sweet spot.
-_CUE_CONCURRENCY = 20
+# Cue-level parallelism INSIDE translate_to_zh. Host-side burst tests
+# peaked at parallel=20 (RPS ~15) but in sustained production runs that
+# triggered silent 503 retries inside gemini_client — those 1/3/8 s
+# sleeps compounded across threads and dragged effective throughput to
+# ~4.5 RPS (3x predicted). parallel=10 in the same tests gave 9.3 RPS
+# with zero 503s, so it's the sustained-throughput sweet spot.
+_CUE_CONCURRENCY = 10
 
 # Number of context cues on each side of the target. 5+5 gives enough
 # surrounding dialogue for the model to resolve pronouns / speaker
