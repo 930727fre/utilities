@@ -19,11 +19,7 @@ BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 # Retry behavior: short, bounded. Real outages should surface, not be papered over.
 MAX_RETRIES = 3
-# Aggressive backoff was costing throughput when transient 503s hit
-# bursty traffic — Google's overload recovers within ~1 s in practice,
-# so 0.3/0.8/2.0 is plenty of breathing room while letting threads get
-# back to work much faster than the original 1/3/8 cadence.
-RETRY_BACKOFF_SEC = (0.3, 0.8, 2.0)  # one per attempt
+RETRY_BACKOFF_SEC = (1.0, 3.0, 8.0)  # one per attempt
 
 
 def _api_key() -> str:
@@ -76,18 +72,12 @@ def generate(prompt: str, *, response_schema: Optional[dict] = None,
             r = s.post(url, json=body, timeout=timeout)
             if r.status_code == 429 or 500 <= r.status_code < 600:
                 last_exc = RuntimeError(f"Gemini {r.status_code}: {r.text[:200]}")
-                print(f"[gemini-client] {r.status_code} on attempt {attempt+1}/{MAX_RETRIES}, "
-                      f"sleeping {RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)]}s",
-                      flush=True)
                 time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])
                 continue
             r.raise_for_status()
             return _extract_text(r.json())
         except requests.RequestException as e:
             last_exc = e
-            print(f"[gemini-client] exception on attempt {attempt+1}/{MAX_RETRIES} ({type(e).__name__}): "
-                  f"sleeping {RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)]}s",
-                  flush=True)
             time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])
 
     raise RuntimeError(f"Gemini call failed after {MAX_RETRIES} attempts: {last_exc}")
