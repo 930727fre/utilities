@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh } from '../api'
+import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh, upgradeEnglishTorrent } from '../api'
 
 // bt tab has two regions: the magnet form + active-torrent list at the
 // top (each row = one wrapper folder, phase derived from filesystem + an
@@ -87,6 +87,25 @@ export default function Bt() {
     }
   }
 
+  async function handleUpgradeEnglish(wrapper, count) {
+    const ok = confirm(
+      `Retry OpenSubtitles for ${count} video${count === 1 ? '' : 's'} in this torrent?\n\n` +
+      `These SRTs were produced by whisper after OS missed (likely quota-exhausted). ` +
+      `Retrying deletes each affected SRT and re-runs the full cascade — including a ` +
+      `fresh Claude annotation pass (~$0.05 each).`
+    )
+    if (!ok) return
+    try {
+      const res = await upgradeEnglishTorrent(wrapper)
+      if (res.deleted === 0) {
+        alert('Nothing was upgraded — videos may have moved out of the os-failed state already.')
+      }
+      await refresh()
+    } catch (err) {
+      alert('Upgrade failed: ' + err.message)
+    }
+  }
+
   async function handleTranslate(wrapper, count) {
     const ok = confirm(`Translate ${count} video${count === 1 ? '' : 's'} in this torrent to 繁體中文?\n\n` +
       `Gemini Flash Lite — ~$0.01 and ~1 minute per video.`)
@@ -112,6 +131,23 @@ export default function Bt() {
     if (!torrentName) continue
     if (!itemsByTorrent.has(torrentName)) itemsByTorrent.set(torrentName, [])
     itemsByTorrent.get(torrentName).push(item)
+  }
+
+  function upgradeEnglishStatus(torrent) {
+    if (torrent.phase === 'downloading') {
+      return { ready: false, count: 0, reason: 'Torrent still downloading' }
+    }
+    const myItems = itemsByTorrent.get(torrent.name) || []
+    const candidates = myItems.filter(it => it.os_failed && !it.in_flight_job_id)
+    if (candidates.length === 0) {
+      return { ready: false, count: 0, reason: 'No whisper-fallback videos to upgrade' }
+    }
+    return {
+      ready: true,
+      count: candidates.length,
+      reason: `Retry OpenSubtitles for ${candidates.length} video${candidates.length === 1 ? '' : 's'} ` +
+              `that fell back to whisper (will re-annotate, ~$0.05 each)`,
+    }
   }
 
   function translateStatus(torrent) {
@@ -198,9 +234,14 @@ export default function Bt() {
                 </div>
                 {isExpanded && (() => {
                   const ts = translateStatus(t)
+                  const ues = upgradeEnglishStatus(t)
                   return (
                     <div style={styles.actionRow}>
                       <div style={{ flex: 1 }} />
+                      <button style={{ ...styles.translateBtn, ...(ues.ready ? {} : styles.disabledBtn) }}
+                        title={ues.reason}
+                        disabled={!ues.ready}
+                        onClick={e => { e.stopPropagation(); handleUpgradeEnglish(t.name, ues.count) }}>→ E</button>
                       <button style={{ ...styles.translateBtn, ...(ts.ready ? {} : styles.disabledBtn) }}
                         title={ts.reason}
                         disabled={!ts.ready}
@@ -234,12 +275,6 @@ function RowItem({ item, onRetry }) {
   const engState = deriveEngState(item)
   const zhState = deriveZhState(item)
   const engErrMsg = item.whisper_error || item.annotate_error || ''
-  // `※ os failed:` means OS lookup missed and whisper took over. The
-  // English SRT is fine, but the user may want to retry to get a
-  // human-translated OS sub now that the daily quota has reset.
-  // Only surface when whisper had to step in (the marker only appears
-  // on whisper-produced SRTs, never on bundled/OS-success paths).
-  const osFailed = item.os_failed
   return (
     <div className="fade-in" style={styles.row}>
       <div style={styles.name}>{item.name}</div>
@@ -249,11 +284,6 @@ function RowItem({ item, onRetry }) {
         )}
         {engState === 'done' && (
           <span style={{ ...styles.glyph, color: '#636366' }} title="Annotated">✓</span>
-        )}
-        {engState === 'done' && osFailed && (
-          <button style={styles.retryBtn}
-            title={`OS missed (${osFailed}) — whisper produced this SRT. Click to retry the OpenSubtitles lookup (deletes the SRT and re-runs the full pipeline, including re-annotation).`}
-            onClick={() => onRetry(item.path)}>E</button>
         )}
         {engState === 'failed' && (
           <>

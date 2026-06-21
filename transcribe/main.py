@@ -494,6 +494,66 @@ class BtTranslateZhRequest(BaseModel):
     wrapper: str
 
 
+class BtUpgradeEnglishRequest(BaseModel):
+    wrapper: str
+
+
+@app.post("/api/bt/upgrade-english", status_code=200)
+async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
+    """Delete every SRT in `wrapper` that carries `※ os failed:` so the
+    next scan tick re-runs the full cascade (srt-matcher → OS → whisper)
+    against today's OpenSubtitles quota. Useful when a torrent was
+    processed during a quota-exhaustion window and the user wants to
+    pull human-translated subs now that quota has reset.
+
+    Refuses if torrent still downloading. Skips videos currently in
+    flight (annotation queue / job). Each successful delete will cost
+    a fresh Sonnet annotation pass when the new SRT arrives — call
+    confirms this in the UI dialog."""
+    bt_root = BT_ROOTS[0]
+    src = (bt_root / req.wrapper).resolve()
+    try:
+        src.relative_to(bt_root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="wrapper not under /bt")
+    if not src.is_dir():
+        raise HTTPException(status_code=404, detail=f"wrapper not found: {req.wrapper}")
+    if any(src.rglob("*.aria2")):
+        raise HTTPException(status_code=409, detail="torrent still downloading")
+
+    in_flight_paths = set()
+    for j in read_jobs():
+        if j.get("source") != "bt":
+            continue
+        if j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING"):
+            in_flight_paths.add(j.get("source_path"))
+
+    deleted = 0
+    for video in src.rglob("*"):
+        if not video.is_file():
+            continue
+        if video.suffix.lower() not in VIDEO_EXTS:
+            continue
+        if video.name.startswith("."):
+            continue
+        if str(video) in in_flight_paths:
+            continue
+        srt = video.with_suffix(".srt")
+        if not srt.exists():
+            continue
+        try:
+            if OS_FAILED_MARKER.encode("utf-8") not in srt.read_bytes():
+                continue
+        except OSError:
+            continue
+        try:
+            srt.unlink()
+            deleted += 1
+        except OSError as e:
+            print(f"[upgrade-english] unlink failed for {srt.name!r}: {e}", flush=True)
+    return {"ok": True, "deleted": deleted}
+
+
 @app.post("/api/bt/translate-zh", status_code=200)
 async def bt_translate_zh(req: BtTranslateZhRequest):
     """Submit every video in `wrapper` to the Chinese-translation worker.

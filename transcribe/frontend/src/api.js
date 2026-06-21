@@ -84,3 +84,16 @@ export async function translateTorrentZh(wrapper) {
   }
   return r.json()
 }
+
+export async function upgradeEnglishTorrent(wrapper) {
+  const r = await fetch(`${BASE}/api/bt/upgrade-english`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ wrapper }),
+  })
+  if (!r.ok) {
+    const detail = await r.json().catch(() => null)
+    throw new Error(detail?.detail || 'Upgrade failed')
+  }
+  return r.json()
+}
