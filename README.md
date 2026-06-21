@@ -19,6 +19,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 | [webdav](./webdav) | Read-only WebDAV server exposing transcribe's library — Infuse on iPhone / Mac connects here for playback, handles codec + iCloud progress sync |
+| [samba](./samba) | Read-only SMB server exposing the same transcribe library — alternative to webdav for macOS Finder / IINA / VLC where Apple's native webdavfs is buggy with large videos |
 
 ## Notes
 

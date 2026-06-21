@@ -1,0 +1,38 @@
+services:
+  samba:
+    image: dperson/samba
+    container_name: samba
+    restart: unless-stopped
+    ports:
+      # SMB protocol port. macOS / iOS / AppleTV / Windows all expect 445.
+      # We skip 139 (NetBIOS) since clients connect by Tailnet IP, not by
+      # workgroup hostname.
+      - "445:445"
+    volumes:
+      # Read-only mounts mirroring webdav's exposure surface. Share names
+      # match the WebDAV path segments (bt / yt) so the only thing changing
+      # for the user is the protocol scheme:
+      #   webdav:  http://<host>:8081/bt/...
+      #   smb:     smb://<host>/bt/...
+      - ../transcribe/data/bt:/mount/bt:ro
+      - ../transcribe/data/downloads:/mount/yt:ro
+    # dperson/samba uses CLI flags via `command:` to configure shares.
+    # -p              : no password — guest browsing is allowed (Tailscale
+    #                   gates network access upstream, so a password we'd
+    #                   never rely on is cosmetic security)
+    # -s "<name>;<path>;<browse>;<readonly>;<guest>"
+    #     browse=yes    : share visible in network listings
+    #     readonly=yes  : enforce read-only at the SMB layer (and the
+    #                     bind mount's :ro flag is a second line of defence)
+    #     guest=yes     : no auth required
+    command: >
+      -p
+      -s "bt;/mount/bt;yes;yes;yes"
+      -s "yt;/mount/yt;yes;yes;yes"
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true
