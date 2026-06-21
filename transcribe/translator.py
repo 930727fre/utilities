@@ -68,7 +68,7 @@ _BATCH_CONCURRENCY = 10
 _CONTEXT_BEFORE = 3
 _CONTEXT_AFTER = 3
 
-_MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-2.5-flash-lite")
+_MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-3.1-flash-lite")
 
 # Shared HTTP session with an enlarged connection pool. The default
 # `requests` module-level session caps at 10 connections per host,
