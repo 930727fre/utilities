@@ -234,6 +234,12 @@ function RowItem({ item, onRetry }) {
   const engState = deriveEngState(item)
   const zhState = deriveZhState(item)
   const engErrMsg = item.whisper_error || item.annotate_error || ''
+  // `※ os failed:` means OS lookup missed and whisper took over. The
+  // English SRT is fine, but the user may want to retry to get a
+  // human-translated OS sub now that the daily quota has reset.
+  // Only surface when whisper had to step in (the marker only appears
+  // on whisper-produced SRTs, never on bundled/OS-success paths).
+  const osFailed = item.os_failed
   return (
     <div className="fade-in" style={styles.row}>
       <div style={styles.name}>{item.name}</div>
@@ -243,6 +249,11 @@ function RowItem({ item, onRetry }) {
         )}
         {engState === 'done' && (
           <span style={{ ...styles.glyph, color: '#636366' }} title="Annotated">✓</span>
+        )}
+        {engState === 'done' && osFailed && (
+          <button style={styles.retryBtn}
+            title={`OS missed (${osFailed}) — whisper produced this SRT. Click to retry the OpenSubtitles lookup (deletes the SRT and re-runs the full pipeline, including re-annotation).`}
+            onClick={() => onRetry(item.path)}>E</button>
         )}
         {engState === 'failed' && (
           <>

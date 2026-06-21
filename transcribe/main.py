@@ -39,6 +39,7 @@ VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 ANNOTATION_MARKER = "※ annotated"
 WHISPER_FAILED_MARKER = "※ whisper failed:"
 ANNOTATE_FAILED_MARKER = "※ annotate failed:"
+OS_FAILED_MARKER = "※ os failed:"
 MTIME_GRACE_SECONDS = 60
 BT_SCAN_INTERVAL = 30
 
@@ -387,6 +388,7 @@ def _scan_bt() -> list[dict]:
             has_srt = srt.exists()
             whisper_error = _read_srt_marker(srt, WHISPER_FAILED_MARKER) if has_srt else None
             annotate_error = _read_srt_marker(srt, ANNOTATE_FAILED_MARKER) if has_srt else None
+            os_failed = _read_srt_marker(srt, OS_FAILED_MARKER) if has_srt else None
             # An SRT carrying only the whisper-failed sentinel isn't a real
             # transcript — for everything downstream of whisper we treat it
             # as "no SRT yet, but don't retry."
@@ -420,6 +422,7 @@ def _scan_bt() -> list[dict]:
                 "has_annotation": has_annotation,
                 "whisper_error": whisper_error,
                 "annotate_error": annotate_error,
+                "os_failed": os_failed,
                 "has_zh_srt": has_zh_srt,
                 "zh_in_flight": zh_in_flight,
                 "zh_error": zh_error,
