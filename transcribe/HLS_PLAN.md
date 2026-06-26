@@ -359,7 +359,16 @@ Net effort: ~1 day. No "1.5" or "2" phase to chase.
 
 ## Out of scope (worth noting why)
 
-- **HW accel (NVENC)**: host has NVIDIA GPU, but it's shared with whisper via gpu-broker. CPU encode side-steps coordination. Only add if CPU encode is visibly slow.
+- **HW accel (NVENC)**: host has NVIDIA GPU. Adding NVENC is ~half a day:
+  swap ffmpeg for `jellyfin-ffmpeg` binary (NVENC-enabled), add GPU
+  reservation in compose, change argv to `-hwaccel cuda
+  -hwaccel_output_format cuda -c:v h264_nvenc -preset p4`. Yields ~3-5x
+  speedup (1080p HEVC: ~10 min → ~3 min per episode). **HDR sources stay
+  on the CPU path** — `tonemap_cuda` adds complexity for a workload we
+  rarely hit; the `is_hdr()` branch chooses CPU vs GPU. Only add when
+  queue wait actually hurts (e.g., user wants to watch something that's
+  4+ hours deep in the queue). NVENC's encode ASIC is hardware-independent
+  of CUDA cores, so it can run alongside whisper without contention.
 - **Multi-audio track UI**: rare in BT releases. Pick first audio track; if user hits a release with directors-commentary-as-track-0, add `-map 0:a:1` manually.
 - **Live transcoding fallback**: by deciding to pre-compute everything, we accept "click ▸ before transcode finishes = wait for it". Don't reintroduce live transcoding.
 - **Adaptive bitrate (ABR)**: LAN-only playback doesn't need it.
