@@ -1,0 +1,34 @@
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    ports:
+      # 8096 HTTP — Apple TV / iOS Jellyfin clients on the LAN talk directly
+      # to host:8096 (faster than going through cloudflared for in-house
+      # playback). External access (off-LAN) goes via cloudflared →
+      # jellyfin.930727fre.dev → container port 8096 on my_network.
+      # Skipping 8920 (HTTPS) — cloudflared terminates TLS upstream.
+      # Skipping 7359/udp + 1900/udp (autodiscovery) — single-user setup
+      # doesn't need broadcast; clients are pointed at the URL directly.
+      - "8096:8096"
+    volumes:
+      # /config — everything that needs to persist across rebuilds: users,
+      # libraries, API keys, watch progress, metadata cache, plugins.
+      # Backing this up = backing up the entire Jellyfin state.
+      - ./data/config:/config
+      # /cache — transcoding temp + image cache. Regenerable, OK to lose on
+      # rebuild but kept on disk to avoid re-fetching posters.
+      - ./data/cache:/cache
+      # Media mounts — read-only, matching the webdav / samba exposure
+      # surface. Jellyfin only needs to read for playback / metadata scan;
+      # deletes happen via transcribe UI or shell on the host.
+      - ../transcribe/data/bt:/media/bt:ro
+      - ../transcribe/data/downloads:/media/yt:ro
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true

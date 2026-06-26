@@ -97,3 +97,34 @@ export async function upgradeEnglishTorrent(wrapper) {
   }
   return r.json()
 }
+
+export async function resolvePlay(path) {
+  const r = await fetch(`${BASE}/api/play/resolve`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) {
+    const detail = await r.json().catch(() => null)
+    throw new Error(detail?.detail || 'Resolve failed')
+  }
+  return r.json()
+}
+
+// Fire-and-forget; we don't await or surface errors to the UI because a
+// dropped progress beat just means the resume point is a few seconds
+// stale — not worth interrupting playback over.
+export function reportProgress({ itemId, positionSeconds, event, playSessionId, isPaused = false }) {
+  return fetch(`${BASE}/api/play/progress`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      item_id: itemId,
+      position_seconds: positionSeconds,
+      event,
+      play_session_id: playSessionId,
+      is_paused: isPaused,
+    }),
+    keepalive: true,  // lets the "stopped" beat fire during page unload
+  }).catch(() => {})
+}

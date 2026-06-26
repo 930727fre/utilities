@@ -1,6 +1,1 @@
 __pycache__/
-
-# Jellyfin was dropped in favor of webdav + Infuse. The host-side
-# `jellyfin/data/` may still exist until manually cleaned up; keep it
-# untracked so it doesn't get accidentally committed again.
-jellyfin/

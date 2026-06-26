@@ -9,10 +9,11 @@ from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 import bt_torrents
@@ -26,6 +27,19 @@ from translator import translate_video_zh, translator_executor
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
+JELLYFIN_URL = os.environ.get("JELLYFIN_URL", "http://jellyfin:8096").rstrip("/")
+JELLYFIN_API_KEY = os.environ.get("JELLYFIN_API_KEY", "")
+# Filled at startup from /Users (picks first admin). All progress
+# reporting + resume lookups happen against this user — keeps watch
+# history aligned across transcribe / Apple TV / iOS Jellyfin clients.
+_jellyfin_user_id: str | None = None
+# transcribe sees BT files at /bt; Jellyfin sees the same bytes at
+# /media/bt. The two compose files mount the same host folder under
+# different container paths. Use this prefix swap to map a transcribe
+# path to the path Jellyfin stamped in its Items index, so we can look
+# up the Jellyfin item id by exact path match.
+_JELLYFIN_BT_PREFIX = "/media/bt"
+_TRANSCRIBE_BT_PREFIX = "/bt"
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
 # bt mode scans only /bt. yt-tab files in DOWNLOADS_DIR show up in the yt
@@ -93,6 +107,25 @@ async def lifespan(app: FastAPI):
 
     ensure_jobs_file()
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Find the Jellyfin user we'll attribute playback to. Skipped silently
+    # if api key isn't set yet — the play endpoints handle the missing
+    # config case with their own 503.
+    if JELLYFIN_API_KEY:
+        try:
+            global _jellyfin_user_id
+            async with httpx.AsyncClient(timeout=10.0) as c:
+                r = await c.get(
+                    f"{JELLYFIN_URL}/Users",
+                    headers={"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'},
+                )
+                r.raise_for_status()
+                users = r.json()
+            admin = next((u for u in users if u.get("Policy", {}).get("IsAdministrator")), None)
+            _jellyfin_user_id = (admin or users[0])["Id"] if users else None
+            print(f"[startup] jellyfin user resolved: {_jellyfin_user_id}", flush=True)
+        except Exception as e:
+            print(f"[startup] jellyfin user lookup failed: {e}", flush=True)
 
     # Any job mid-flight (or queued) at startup is orphaned from a prior crash.
     # Mark FAILED so the UI surfaces ! / ↻ instead of an eternal ○.
@@ -667,6 +700,307 @@ async def transcribe_bt_file(req: BtTranscribeRequest):
     upsert_job(job)
     executor.submit(process_bt_file, job_id)
     return {"job_id": job_id, "status": "PENDING"}
+
+
+# ── Jellyfin play proxy ───────────────────────────────────────────────────
+#
+# A small reverse proxy in front of Jellyfin's HLS endpoints so the
+# browser never sees the API key, plus a sidecar that serves transcribe's
+# own SRT files as WebVTT for the <video><track> element.
+#
+# Flow per click:
+#   1. Frontend POSTs /api/play/resolve with the bt path of the video.
+#   2. We translate transcribe's /bt/... → Jellyfin's /media/bt/... and
+#      look up the item id via the cached Jellyfin Items index.
+#   3. Return { master_url, subtitles[] } pointing back at our proxy
+#      endpoints so the frontend never holds the JELLYFIN_API_KEY.
+#   4. <video src={master_url}> via hls.js (or Safari native). Subtitle
+#      tracks come from our /api/play/sub endpoint, converted to VTT.
+
+_jellyfin_index_lock = threading.Lock()
+_jellyfin_index: dict[str, str] = {}  # Jellyfin Path → Jellyfin Item.Id
+_jellyfin_index_at: float = 0.0
+_JELLYFIN_INDEX_TTL = 60.0  # seconds; invalidate on cache miss too
+
+
+def _video_root_for(path_str: str) -> Path | None:
+    """Return the media root a path lives under, or None if it's outside."""
+    p = Path(path_str).resolve()
+    for root in [Path(_TRANSCRIBE_BT_PREFIX), DOWNLOADS_DIR]:
+        try:
+            p.relative_to(root.resolve())
+            return root
+        except ValueError:
+            continue
+    return None
+
+
+def _transcribe_path_to_jellyfin_path(path: Path) -> str:
+    """Swap the bt prefix so the result matches Jellyfin's Path field."""
+    s = str(path)
+    if s.startswith(_TRANSCRIBE_BT_PREFIX + "/"):
+        return _JELLYFIN_BT_PREFIX + s[len(_TRANSCRIBE_BT_PREFIX):]
+    return s
+
+
+async def _refresh_jellyfin_index() -> None:
+    """Rebuild Path → Item.Id index. Called on cache miss / TTL expiry."""
+    if not JELLYFIN_API_KEY:
+        return
+    headers = {"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'}
+    async with httpx.AsyncClient(timeout=15.0) as c:
+        r = await c.get(
+            f"{JELLYFIN_URL}/Items",
+            params={"Recursive": "true", "IncludeItemTypes": "Video,Episode,Movie", "Fields": "Path"},
+            headers=headers,
+        )
+        r.raise_for_status()
+        data = r.json()
+    new_index: dict[str, str] = {}
+    for item in data.get("Items", []):
+        p = item.get("Path")
+        i = item.get("Id")
+        if p and i:
+            new_index[p] = i
+    with _jellyfin_index_lock:
+        global _jellyfin_index_at
+        _jellyfin_index.clear()
+        _jellyfin_index.update(new_index)
+        _jellyfin_index_at = time.time()
+
+
+async def _resolve_item_id(transcribe_path: Path) -> str:
+    """transcribe path → Jellyfin item id, refreshing the cache as needed."""
+    jellyfin_path = _transcribe_path_to_jellyfin_path(transcribe_path)
+    now = time.time()
+    with _jellyfin_index_lock:
+        stale = now - _jellyfin_index_at > _JELLYFIN_INDEX_TTL
+        hit = _jellyfin_index.get(jellyfin_path)
+    if hit and not stale:
+        return hit
+    await _refresh_jellyfin_index()
+    with _jellyfin_index_lock:
+        hit = _jellyfin_index.get(jellyfin_path)
+    if not hit:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Jellyfin has no item matching {jellyfin_path!r} — "
+                   f"library may not have scanned this file yet"
+        )
+    return hit
+
+
+class PlayResolveRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/play/resolve")
+async def play_resolve(req: PlayResolveRequest):
+    """Return everything the player modal needs: HLS master URL + subtitle
+    tracks. All URLs point back at our own proxy so the api key never
+    leaves the server."""
+    root = _video_root_for(req.path)
+    if root is None:
+        raise HTTPException(status_code=400, detail="Path not under a media root")
+    video = Path(req.path)
+    if not video.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    item_id = await _resolve_item_id(video)
+
+    # Read Jellyfin's stored playback position so we can resume across
+    # devices (Apple TV / iOS Jellyfin write to the same UserData).
+    resume_at_seconds = 0.0
+    if _jellyfin_user_id:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as c:
+                r = await c.get(
+                    f"{JELLYFIN_URL}/Users/{_jellyfin_user_id}/Items/{item_id}",
+                    headers={"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'},
+                )
+                if r.status_code == 200:
+                    ticks = r.json().get("UserData", {}).get("PlaybackPositionTicks", 0)
+                    resume_at_seconds = ticks / 10_000_000
+        except Exception as e:
+            print(f"[play_resolve] resume lookup failed for {item_id}: {e}", flush=True)
+
+    # HLS transcoding params. videoCodec/audioCodec=auto-h264/aac is the
+    # safest browser-compatible target; subtitleStreamIndex=-1 tells
+    # Jellyfin not to burn anything in (we ship sidecars via <track>).
+    # playSessionId omitted — Jellyfin auto-generates one per session.
+    #
+    # videoBitRate=8M + maxStreamingBitrate=10M aimed at 1080p h264:
+    # default (~2 Mbps) is visibly soft on 1080p source. h264 high@4.1 +
+    # 8 Mbps is roughly Netflix-1080p quality; both fit comfortably in
+    # browser playback budgets and your LAN bandwidth.
+    master_qs = (
+        f"mediaSourceId={item_id}"
+        "&videoCodec=h264"
+        "&audioCodec=aac"
+        "&maxAudioChannels=2"
+        "&audioBitRate=192000"
+        "&videoBitRate=8000000"
+        "&maxStreamingBitrate=10000000"
+        "&h264-profile=high"
+        "&h264-level=41"
+        "&subtitleStreamIndex=-1"
+    )
+
+    subtitles = []
+    en_srt = video.with_suffix(".srt")
+    if en_srt.exists():
+        subtitles.append({
+            "label": "English",
+            "srclang": "en",
+            "src": f"/api/play/sub?path={quote(str(en_srt), safe='')}",
+        })
+    zh_srt = video.parent / f"{video.stem}{ZH_SUFFIX}"
+    if zh_srt.exists():
+        subtitles.append({
+            "label": "繁體中文",
+            "srclang": "zh",
+            "src": f"/api/play/sub?path={quote(str(zh_srt), safe='')}",
+        })
+
+    return {
+        "item_id": item_id,
+        "name": video.stem,
+        "master_url": f"/api/play/proxy/{item_id}/master.m3u8?{master_qs}",
+        "subtitles": subtitles,
+        "resume_at_seconds": resume_at_seconds,
+    }
+
+
+class PlayProgressEvent(BaseModel):
+    item_id: str
+    position_seconds: float
+    event: str  # "started" | "progress" | "stopped"
+    play_session_id: str
+    is_paused: bool = False
+
+
+@app.post("/api/play/progress")
+async def play_progress(req: PlayProgressEvent):
+    """Persist playback position into Jellyfin's UserData so watch state
+    stays in sync across every device that talks to this Jellyfin
+    instance — Apple TV, iOS, and the browser modal we just opened all
+    share the same UserData.PlaybackPositionTicks.
+
+    Implementation note: Jellyfin's /Sessions/Playing/* endpoints want a
+    fully-registered client session (X-Emby-Authorization with stable
+    DeviceId, full DeviceProfile, etc.) before they propagate progress
+    into the user's data row. With just an api_key the session ends up
+    as a "headless" entry and progress reports never reach UserData.
+    Direct UserData writes bypass the whole session ceremony — slightly
+    less rich (no "now playing on transcribe" indicator on other
+    clients) but reliably mutates the field we actually care about.
+
+    Frontend keeps sending started/progress/stopped event types for
+    forward compatibility but we treat them uniformly here.
+    """
+    if not JELLYFIN_API_KEY or not _jellyfin_user_id:
+        raise HTTPException(status_code=503, detail="Jellyfin not configured")
+
+    ticks = int(req.position_seconds * 10_000_000)
+    body = {"PlaybackPositionTicks": ticks}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(
+                f"{JELLYFIN_URL}/UserItems/{req.item_id}/UserData",
+                params={"userId": _jellyfin_user_id},
+                json=body,
+                headers={"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'},
+            )
+        if r.status_code >= 400:
+            print(f"[play_progress] {req.event} → {r.status_code}: {r.text[:200]}", flush=True)
+            return {"ok": False, "status": r.status_code}
+    except Exception as e:
+        print(f"[play_progress] {req.event} failed: {e}", flush=True)
+        return {"ok": False}
+    return {"ok": True}
+
+
+def _srt_to_vtt(srt_text: str) -> str:
+    """Convert SRT to WebVTT. Only timestamp lines need the comma→dot fix;
+    cue text containing commas must stay untouched."""
+    out = ["WEBVTT", ""]
+    for line in srt_text.splitlines():
+        if " --> " in line:
+            out.append(line.replace(",", "."))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+@app.get("/api/play/sub")
+async def play_sub(path: str):
+    """Serve an SRT (next to the video) as WebVTT for <track>. Path is
+    validated against the same roots that own the videos themselves."""
+    root = _video_root_for(path)
+    if root is None:
+        raise HTTPException(status_code=400, detail="Path not under a media root")
+    p = Path(path)
+    if not p.exists() or p.suffix.lower() != ".srt":
+        raise HTTPException(status_code=404, detail="SRT not found")
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"read failed: {e}")
+    return Response(
+        content=_srt_to_vtt(raw),
+        media_type="text/vtt; charset=utf-8",
+        # Browsers cache <track> aggressively; allow short caching across
+        # the same playback session, force re-check next session.
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/api/play/proxy/{item_id}/{tail:path}")
+async def play_proxy(item_id: str, tail: str, request: Request):
+    """Stream HLS bytes (m3u8 + .ts segments) through us, injecting the
+    Jellyfin API key. Browser sees only same-origin URLs under /api/play
+    so the key never ends up in client JS / DevTools.
+
+    The HLS playlists Jellyfin emits use relative URLs (e.g. master.m3u8
+    references main.m3u8, which references hls1/main/N.ts), so once the
+    browser is pointed at /api/play/proxy/{id}/master.m3u8 every follow-
+    up segment fetch lands here naturally."""
+    if not JELLYFIN_API_KEY:
+        raise HTTPException(status_code=503, detail="JELLYFIN_API_KEY not configured")
+    upstream = f"{JELLYFIN_URL}/Videos/{item_id}/{tail}"
+    params = dict(request.query_params)
+    params["api_key"] = JELLYFIN_API_KEY
+
+    # Long timeout: master.m3u8 blocks on Jellyfin spinning up the
+    # ffmpeg transcoder (HEVC source can take 10s+ before the first
+    # segment is ready). 60s read covers worst case on this machine.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=60.0))
+    upstream_resp = await client.send(
+        client.build_request("GET", upstream, params=params),
+        stream=True,
+    )
+
+    # Drop hop-by-hop headers + anything that conflicts with the proxy
+    # rewrite (content-length is recomputed by Starlette).
+    drop = {"content-length", "transfer-encoding", "connection",
+            "keep-alive", "content-encoding"}
+    headers = {k: v for k, v in upstream_resp.headers.items() if k.lower() not in drop}
+
+    async def body():
+        try:
+            async for chunk in upstream_resp.aiter_raw():
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        body(),
+        status_code=upstream_resp.status_code,
+        headers=headers,
+        media_type=upstream_resp.headers.get("content-type"),
+    )
 
 
 # ── Background annotation loop ────────────────────────────────────────────
