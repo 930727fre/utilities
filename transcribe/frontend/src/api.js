@@ -98,6 +98,19 @@ export async function upgradeEnglishTorrent(wrapper) {
   return r.json()
 }
 
+export async function translateFileZh(path) {
+  const r = await fetch(`${BASE}/api/bt/translate-zh-file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  if (!r.ok) {
+    const detail = await r.json().catch(() => null)
+    throw new Error(detail?.detail || 'Translate failed')
+  }
+  return r.json()
+}
+
 export async function resolvePlay(path) {
   const r = await fetch(`${BASE}/api/play/resolve`, {
     method: 'POST',

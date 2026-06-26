@@ -1,6 +1,5 @@
 import asyncio
 import os
-import shutil
 import threading
 import time
 import traceback
@@ -18,8 +17,8 @@ from pydantic import BaseModel
 
 import bt_torrents
 from annotate import annotate_executor, annotate_job
+from bt_filter import SENTINEL_NAME as FILTER_SENTINEL, filter_wrapper
 from gpu_lock import release_all_held
-from srt_matcher import find_matching_srt
 from srt_source import stamp_source
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from subs_finder import find_subs
@@ -348,8 +347,9 @@ def _is_annotated_srt(srt_path: Path) -> bool:
 def _has_source_stamp(srt_path: Path) -> bool:
     """Whether the SRT carries any `※ source: …` sentinel cue. Used to
     detect strict-stem bundled SRTs (`<stem>.srt` sitting next to the
-    video, picked up by has_srt=True without ever invoking srt_matcher),
-    which otherwise carry no source attribution."""
+    video — manually dropped in by the user after bt_filter already
+    wrote its sentinel, so the filter never saw it), which otherwise
+    carry no source attribution."""
     try:
         with open(srt_path, "rb") as f:
             content = f.read()
@@ -656,6 +656,50 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
         _submit_translate(video)
         queued += 1
     return {"ok": True, "queued": queued, "total": len(videos)}
+
+
+class BtTranslateZhFileRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/bt/translate-zh-file", status_code=200)
+async def bt_translate_zh_file(req: BtTranslateZhFileRequest):
+    """Submit a single video for Chinese translation. Same worker pool
+    and idempotency rules as the per-torrent endpoint, just scoped to
+    one file — for when only an episode or two need a translation pass
+    rather than the whole season."""
+    path = _validate_bt_path(req.path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="video not found")
+    if path.suffix.lower() not in VIDEO_EXTS:
+        raise HTTPException(status_code=400, detail="not a video file")
+    srt = path.with_suffix(".srt")
+    if not srt.exists():
+        raise HTTPException(status_code=409, detail="no SRT yet — annotate first")
+    try:
+        if ANNOTATION_MARKER.encode("utf-8") not in srt.read_bytes():
+            raise HTTPException(status_code=409, detail="SRT not annotated yet")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"reading SRT failed: {e}")
+
+    zh_path = path.parent / f"{path.stem}{ZH_SUFFIX}"
+    if zh_path.exists():
+        return {"ok": True, "queued": 0, "reason": "already translated"}
+
+    with _translating_lock:
+        in_flight = str(path) in _translating and not _translating[str(path)].done()
+    if in_flight:
+        return {"ok": True, "queued": 0, "reason": "already in flight"}
+
+    err_path = Path(str(zh_path) + ".error")
+    if err_path.exists():
+        try:
+            err_path.unlink()
+        except OSError:
+            pass
+
+    _submit_translate(path)
+    return {"ok": True, "queued": 1}
 
 
 class BtRetryRequest(BaseModel):
@@ -1005,6 +1049,30 @@ async def play_proxy(item_id: str, tail: str, request: Request):
 
 # ── Background annotation loop ────────────────────────────────────────────
 
+def _run_pending_filter():
+    """For every wrapper that has finished downloading (no `.aria2`) and
+    hasn't been filtered yet, run the LLM cleanup + SRT-match pass.
+
+    Idempotent at the bt_filter.filter_wrapper level (sentinel skip),
+    so an interrupted-restart still gets one clean attempt.
+    """
+    for root in BT_ROOTS:
+        if not root.exists():
+            continue
+        for wrapper in root.iterdir():
+            if not wrapper.is_dir():
+                continue
+            # In-flight torrent — wait until aria2 has verified all pieces.
+            if any(wrapper.rglob("*.aria2")):
+                continue
+            if (wrapper / FILTER_SENTINEL).exists():
+                continue
+            try:
+                filter_wrapper(wrapper)
+            except Exception:
+                traceback.print_exc()
+
+
 def _queue_pending_bt_work():
     """For every bt video without SRT, enqueue whisper; for every SRT without ※,
     enqueue annotation. Files carrying a `※ whisper failed:` or
@@ -1012,6 +1080,7 @@ def _queue_pending_bt_work():
     that hit the error wrote the sentinel itself, and the user clears it
     via the UI ↻ button (which deletes the SRT).
     """
+    _run_pending_filter()
     items = _scan_bt()
     jobs = read_jobs()
     in_flight_paths = set()
@@ -1030,12 +1099,12 @@ def _queue_pending_bt_work():
         if item["whisper_error"]:
             continue
 
-        # If the SRT was simply sitting next to the video as a strict-stem
-        # sibling (the torrent shipped `<stem>.srt` flat next to `<stem>.mkv`,
-        # no Subs/ folder), srt_matcher never fired and nothing stamped a
-        # source on it. Stamp `bundled-strict-stem` retroactively so the
-        # playback flash + on-disk attribution stay consistent with every
-        # other path. Cheap substring check, idempotent.
+        # If the SRT was hand-dropped next to the video after bt_filter
+        # already wrote its sentinel for this wrapper, the filter never
+        # saw it and didn't stamp a source. Catch it retroactively as
+        # `bundled-strict-stem` so the playback flash + on-disk
+        # attribution stay consistent with every other path.
+        # Cheap substring check, idempotent.
         if item["has_srt"]:
             srt_path = Path(item["path"]).with_suffix(".srt")
             if not _has_source_stamp(srt_path):
@@ -1048,32 +1117,18 @@ def _queue_pending_bt_work():
         if not item["has_srt"]:
             video = Path(item["path"])
 
-            # 1. Cheap: any sibling .srt the LLM matcher recognizes (release-
-            #    bundled `.en.srt`, RARBG's `Subs/<stem>/N_English.srt`, etc.).
-            #    COPY (not move) so the torrent's original layout — and other
-            #    language tracks shipped alongside — stay intact. stage_tag
-            #    is "bundled-flat" or "bundled-agent" — stamped into the SRT
-            #    so the user can tell which path produced this transcript.
-            match_result = find_matching_srt(video)
-            if match_result is not None:
-                matched, stage_tag = match_result
-                target = video.with_suffix(".srt")
-                try:
-                    shutil.copy2(matched, target)
-                    stamp_source(target, stage_tag)
-                    print(f"[srt-matcher] {matched.relative_to(video.parent)!s} → {target.name!r} ({stage_tag})", flush=True)
-                except OSError as e:
-                    print(f"[srt-matcher] copy/stamp failed ({e}); continuing", flush=True)
-                else:
-                    continue
-
-            # 2. Try OpenSubtitles by file hash — human-translated subs are
+            # 1. OpenSubtitles by file hash — human-translated subs are
             #    better than whisper output and free at the API layer (subject
             #    to daily quota; misses are cached in-memory to avoid retries).
+            #    Note: bundled SRTs (release-shipped Subs/<lang>/*.srt etc.)
+            #    are already in place by this point — bt_filter.filter_wrapper
+            #    runs at the wrapper level when the torrent finishes and
+            #    copies bundled English subs to <stem>.srt before this loop
+            #    sees the video.
             if find_subs(video) is not None:
                 continue
 
-            # 3. Fallback: GPU whisper. If it fails, tasks.py stamps the
+            # 2. Fallback: GPU whisper. If it fails, tasks.py stamps the
             #    failure sentinel onto the SRT itself — we'll see it on the
             #    next tick and skip via the `whisper_error` branch above.
             job_id = str(uuid.uuid4())

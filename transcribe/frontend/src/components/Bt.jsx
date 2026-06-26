@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import Hls from 'hls.js'
-import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh, upgradeEnglishTorrent, resolvePlay, reportProgress } from '../api'
+import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh, translateFileZh, upgradeEnglishTorrent, resolvePlay, reportProgress } from '../api'
 
 const PROGRESS_REPORT_INTERVAL_SEC = 1
 
@@ -28,6 +28,7 @@ export default function Bt() {
   const [torrents, setTorrents] = useState([])
   const [magnet, setMagnet] = useState('')
   const [expanded, setExpanded] = useState(() => new Set())
+  const [expandedRows, setExpandedRows] = useState(() => new Set())
   const [playing, setPlaying] = useState(null)  // { path, name } when modal is open
   const submittingRef = useRef(false)
 
@@ -49,6 +50,15 @@ export default function Bt() {
 
   function toggleExpand(key) {
     setExpanded(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function toggleRowExpand(key) {
+    setExpandedRows(prev => {
       const next = new Set(prev)
       if (next.has(key)) next.delete(key)
       else next.add(key)
@@ -88,6 +98,15 @@ export default function Bt() {
       await refresh()
     } catch (err) {
       alert('Retry failed: ' + err.message)
+    }
+  }
+
+  async function handleTranslateFile(path) {
+    try {
+      await translateFileZh(path)
+      await refresh()
+    } catch (err) {
+      alert('Translate failed: ' + err.message)
     }
   }
 
@@ -268,11 +287,17 @@ export default function Bt() {
       {[...groups.entries()].map(([groupKey, rows]) => (
         <div key={groupKey || '__root__'} style={styles.group}>
           {groupKey && <div style={styles.groupHeader}>{groupKey}</div>}
-          {rows.map(item => (
-            <RowItem key={item.path} item={item}
-              onRetry={handleRetry}
-              onPlay={() => setPlaying({ path: item.path, name: item.name })} />
-          ))}
+          {rows.map(item => {
+            const rowExpanded = expandedRows.has(item.path)
+            return (
+              <RowItem key={`${item.path}-${rowExpanded}`} item={item}
+                isExpanded={rowExpanded}
+                onToggle={() => toggleRowExpand(item.path)}
+                onRetry={handleRetry}
+                onTranslate={handleTranslateFile}
+                onPlay={() => setPlaying({ path: item.path, name: item.name })} />
+            )
+          })}
         </div>
       ))}
 
@@ -415,46 +440,60 @@ function PlayerModal({ path, name, onClose }) {
   )
 }
 
-function RowItem({ item, onRetry, onPlay }) {
+function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate, onPlay }) {
   const engState = deriveEngState(item)
   const zhState = deriveZhState(item)
   const engErrMsg = item.whisper_error || item.annotate_error || ''
-  // Play button replaces the ✓ "annotated" glyph when the file is
-  // watchable — per design language, an action button IS the ready
-  // signal; redundant status indicator removed.
-  const canPlay = engState === 'done'
   return (
-    <div className="fade-in" style={styles.row}>
-      <div style={styles.name}>{item.name}</div>
-      <div style={styles.slot}>
-        {engState === 'working' && (
-          <span className="status-pulse" style={styles.glyph} title="Working / queued">○</span>
-        )}
-        {canPlay && (
-          <button style={styles.playBtn} title="Play in browser"
-            onClick={onPlay}>▸</button>
-        )}
-        {engState === 'failed' && (
-          <>
+    <div className="fade-in" style={styles.row} onClick={onToggle}>
+      <div style={styles.topRow}>
+        <div style={styles.name}>{item.name}</div>
+        <div style={styles.slot}>
+          {/* Compact status: ○ working / ✓ done / ! failed. Actions
+              live in the expanded action row below. */}
+          {engState === 'working' && (
+            <span className="status-pulse" style={styles.glyph} title="Working / queued">○</span>
+          )}
+          {engState === 'done' && (
+            <span style={{ ...styles.glyph, color: '#636366' }} title="Annotated">✓</span>
+          )}
+          {engState === 'failed' && (
             <span style={styles.glyph} title={engErrMsg}>!</span>
-            <button style={styles.retryBtn} title="Retry (deletes the SRT and re-runs the pipeline)"
-              onClick={() => onRetry(item.path)}>↻</button>
-          </>
-        )}
-        {/* zh state only meaningful after annotation is done */}
-        {engState === 'done' && zhState !== 'absent' && (
-          <span style={styles.zhDivider}>·</span>
-        )}
-        {engState === 'done' && zhState === 'translating' && (
-          <span className="status-pulse" style={styles.zhGlyph} title="Translating to 繁體中文">中</span>
-        )}
-        {engState === 'done' && zhState === 'done' && (
-          <span style={styles.zhGlyph} title="Chinese sub ready">中</span>
-        )}
-        {engState === 'done' && zhState === 'failed' && (
-          <span style={{ ...styles.zhGlyph, color: '#c79968' }} title={`中: ${item.zh_error}`}>!</span>
-        )}
+          )}
+          {engState === 'done' && zhState !== 'absent' && (
+            <span style={styles.zhDivider}>·</span>
+          )}
+          {engState === 'done' && zhState === 'translating' && (
+            <span className="status-pulse" style={styles.zhGlyph} title="Translating to 繁體中文">中</span>
+          )}
+          {engState === 'done' && zhState === 'done' && (
+            <span style={styles.zhGlyph} title="Chinese sub ready">中</span>
+          )}
+          {engState === 'done' && zhState === 'failed' && (
+            <span style={{ ...styles.zhGlyph, color: '#c79968' }} title={`中: ${item.zh_error}`}>!</span>
+          )}
+        </div>
       </div>
+      {isExpanded && (
+        <div style={styles.actionRow}>
+          <div style={{ flex: 1 }} />
+          {engState === 'done' && (
+            <button style={styles.translateBtn}
+              title="Play in browser"
+              onClick={e => { e.stopPropagation(); onPlay() }}>▸</button>
+          )}
+          {engState === 'done' && zhState === 'absent' && (
+            <button style={styles.translateBtn}
+              title="Translate this episode to 繁體中文"
+              onClick={e => { e.stopPropagation(); onTranslate(item.path) }}>中</button>
+          )}
+          {engState === 'failed' && (
+            <button style={styles.translateBtn}
+              title="Retry (deletes the SRT and re-runs the pipeline)"
+              onClick={e => { e.stopPropagation(); onRetry(item.path) }}>↻</button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -529,10 +568,11 @@ const styles = {
     padding: '8px 4px', textTransform: 'lowercase', letterSpacing: 0.3,
   },
   row: {
-    display: 'flex', alignItems: 'center', gap: 12,
     background: '#2c2c2e', borderRadius: 12, border: '1px solid #3a3a3c',
     boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
-    padding: '12px 20px', marginBottom: 8,
+    overflow: 'hidden',
+    cursor: 'pointer',
+    padding: '16px 20px', marginBottom: 12,
   },
   name: {
     flex: 1, minWidth: 0, fontSize: 14, color: '#e8e3d9',
@@ -558,6 +598,11 @@ const styles = {
   playBtn: {
     background: 'none', border: 'none', color: '#c79968',
     fontSize: 18, fontWeight: 700, lineHeight: 1, padding: 0, cursor: 'pointer',
+    fontFamily: MONO,
+  },
+  zhBtn: {
+    background: 'none', border: 'none', color: '#c79968',
+    fontSize: 14, fontWeight: 700, lineHeight: 1, padding: 0, cursor: 'pointer',
     fontFamily: MONO,
   },
 
