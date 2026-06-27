@@ -11,9 +11,17 @@ import yt_dlp
 
 from annotate import annotate_executor, annotate_job
 from gpu_lock import gpu_lock
-from srt_source import stamp_os_failed, stamp_source, stamp_whisper_failed
-from subs_finder import get_failure_reason
 from storage import get_job, upsert_job
+
+DERIVED_ROOT = Path("/app/data/derived")
+BT_ROOT = Path("/bt")
+
+
+def derived_dir_for_bt_video(video_path: Path) -> Path:
+    """video_path is under /bt/<wrapper>/...; return the corresponding
+    /app/data/derived/<wrapper>/<stem>/ for this video's pipeline products."""
+    wrapper = video_path.relative_to(BT_ROOT).parts[0]
+    return DERIVED_ROOT / wrapper / video_path.stem
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
@@ -190,8 +198,8 @@ def _run_whisper(job_id: str, media_path: Path, srt_path: Path):
     if not srt_text.strip():
         raise RuntimeError("Whisper service returned empty SRT")
 
+    srt_path.parent.mkdir(parents=True, exist_ok=True)
     srt_path.write_text(srt_text, encoding="utf-8")
-    stamp_source(srt_path, "whisper")
 
 
 def _queue_annotation(job_id: str):
@@ -251,8 +259,9 @@ def _run_transcription(job_id: str, staging_mp4: str):
 
 @_catch_unhandled
 def process_bt_file(job_id: str):
-    """bt path: whisper an existing file (e.g. /bt/show/ep01.mkv) in place
-    and write a sibling SRT. No download, no rename. Auto-queues annotation."""
+    """bt path: whisper an existing file under /bt/, write the English
+    transcript into data/derived/<wrapper>/<stem>/english.srt. bt/ is
+    never written to. Auto-queues annotation."""
     job = get_job(job_id)
     if not job or job["status"] in ("DELETED", "SUCCESS"):
         return
@@ -267,7 +276,9 @@ def process_bt_file(job_id: str):
         _fail(job_id, f"Source file missing: {source_path}")
         return
 
-    srt_path = media_path.with_suffix(".srt")
+    derived_dir = derived_dir_for_bt_video(media_path)
+    srt_path = derived_dir / "english.srt"
+    err_path = derived_dir / "english.srt.error"
 
     job["status"] = "TRANSCRIBING"
     job["updated_at"] = _now()
@@ -276,26 +287,16 @@ def process_bt_file(job_id: str):
     try:
         _run_whisper(job_id, media_path, srt_path)
     except Exception as exc:
-        # Stamp the failure onto disk so the background scan loop stops
-        # retrying whisper for this file. User clears via the UI ↻ (which
-        # deletes the SRT entirely).
+        # Failure surfaces as a sibling .error file so the scan loop stops
+        # retrying whisper for this video. User clears via the UI ↻ which
+        # deletes derived/<stem>/ entirely.
         try:
-            stamp_whisper_failed(srt_path, str(exc))
+            err_path.parent.mkdir(parents=True, exist_ok=True)
+            err_path.write_text(str(exc), encoding="utf-8")
         except OSError:
             pass
         _fail(job_id, str(exc))
         return
-
-    # We only reach whisper for a bt video after the OS lookup already
-    # missed (see _queue_pending_bt_work). Surface WHY OS missed so the
-    # user knows whether to retry tomorrow (quota), accept this whisper
-    # SRT as best-effort (no candidate), or hunt down a manual sub.
-    os_reason = get_failure_reason(media_path, "en")
-    if os_reason:
-        try:
-            stamp_os_failed(srt_path, os_reason)
-        except OSError:
-            pass
 
     job = get_job(job_id)
     if not job or job["status"] == "DELETED":

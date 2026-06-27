@@ -1,5 +1,7 @@
 import asyncio
+import json
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -8,70 +10,39 @@ from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, quote
+from urllib.parse import urlparse, parse_qs
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 import bt_torrents
+import hls_precompute
 from annotate import annotate_executor, annotate_job
-from bt_filter import SENTINEL_NAME as FILTER_SENTINEL, filter_wrapper
+from bt_filter import pair_wrapper
 from gpu_lock import release_all_held
-from srt_source import stamp_source
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from subs_finder import find_subs
 from translator import translate_video_zh, translator_executor
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
-JELLYFIN_URL = os.environ.get("JELLYFIN_URL", "http://jellyfin:8096").rstrip("/")
-JELLYFIN_API_KEY = os.environ.get("JELLYFIN_API_KEY", "")
-# Filled at startup from /Users (picks first admin). All progress
-# reporting + resume lookups happen against this user — keeps watch
-# history aligned across transcribe / Apple TV / iOS Jellyfin clients.
-_jellyfin_user_id: str | None = None
-# transcribe sees BT files at /bt; Jellyfin sees the same bytes at
-# /media/bt. The two compose files mount the same host folder under
-# different container paths. Use this prefix swap to map a transcribe
-# path to the path Jellyfin stamped in its Items index, so we can look
-# up the Jellyfin item id by exact path match.
-_JELLYFIN_BT_PREFIX = "/media/bt"
-_TRANSCRIBE_BT_PREFIX = "/bt"
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
-# bt mode scans only /bt. yt-tab files in DOWNLOADS_DIR show up in the yt
-# tab's job list — no reason to also list them under bt.
-BT_ROOTS = [Path("/bt")]
-# When the user clicks the "translate to zh" button on a bt torrent, we
-# write the Chinese sub as a sidecar next to the video — same folder, same
-# stem, .zh-tw.srt suffix. Infuse picks it up as a separate language track.
-ZH_SUFFIX = ".zh-tw.srt"
+DERIVED_ROOT = Path("/app/data/derived")
+BT_ROOT = Path("/bt")
+PROGRESS_FILE = Path("/app/data/progress.json")
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
-ANNOTATION_MARKER = "※ annotated"
-WHISPER_FAILED_MARKER = "※ whisper failed:"
-ANNOTATE_FAILED_MARKER = "※ annotate failed:"
-OS_FAILED_MARKER = "※ os failed:"
 MTIME_GRACE_SECONDS = 60
 BT_SCAN_INTERVAL = 30
 
-# No in-memory failure counters: "we tried this once" is recorded as a
-# sentinel cue inside the SRT itself (see srt_source.stamp_*), so the
-# scan loop reads it back on every tick and survives container restarts.
-# Auto-retry is gone; the UI ↻ button is the only path back into the
-# pipeline for a failed file.
-
-# In-flight translate-to-zh futures keyed by absolute video path. Set when
-# the translate-zh endpoint submits a worker, cleared (via a `finally` in
-# the submission wrapper) when the worker exits. The bt scan reads this
-# to expose `zh_in_flight` per video so the UI knows the "中" pulse is
-# alive — and the per-torrent "→ 中" button can disable while any of its
-# videos are still being translated. Container restart wipes the dict
-# along with the executor's threads, which is the right behaviour: any
-# half-finished translations get retried by the next button click.
+# In-flight translate-to-zh futures keyed by absolute video path.
 _translating: dict[str, Future] = {}
 _translating_lock = threading.Lock()
+
+# Progress JSON in-process lock (file IO is atomic temp+rename).
+_progress_lock = threading.Lock()
 
 
 def _submit_translate(video: Path) -> None:
@@ -91,10 +62,58 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _derived_dir_for(video: Path) -> Path:
+    """video at /bt/<wrapper>/...; return /app/data/derived/<wrapper>/<stem>/."""
+    wrapper = video.relative_to(BT_ROOT).parts[0]
+    return DERIVED_ROOT / wrapper / video.stem
+
+
+def _hls_complete(derived_dir: Path) -> bool:
+    return hls_precompute.is_complete(derived_dir)
+
+
+def _hls_in_flight(derived_dir: Path) -> bool:
+    return hls_precompute.is_in_flight(derived_dir)
+
+
+# ── Progress storage ──────────────────────────────────────────────────────
+
+def _read_progress() -> dict:
+    if not PROGRESS_FILE.exists():
+        return {}
+    try:
+        return json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_progress(d: dict) -> None:
+    PROGRESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PROGRESS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d), encoding="utf-8")
+    os.replace(tmp, PROGRESS_FILE)
+
+
+def _resume_at_seconds(wrapper: str, stem: str) -> float:
+    key = f"{wrapper}/{stem}"
+    with _progress_lock:
+        return float(_read_progress().get(key, {}).get("position_seconds", 0))
+
+
+def _store_progress(wrapper: str, stem: str, position_seconds: float) -> None:
+    key = f"{wrapper}/{stem}"
+    with _progress_lock:
+        d = _read_progress()
+        d[key] = {
+            "position_seconds": position_seconds,
+            "updated_at": _now(),
+        }
+        _write_progress(d)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Hard-fail fast if the shared whisper service isn't reachable. Failing loudly
-    # at startup beats silently dropping every whisper request later.
+    # Hard-fail fast if the shared whisper service isn't reachable.
     try:
         async with httpx.AsyncClient(timeout=5.0) as c:
             r = await c.get(f"{WHISPER_URL}/health")
@@ -106,32 +125,12 @@ async def lifespan(app: FastAPI):
 
     ensure_jobs_file()
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    DERIVED_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # Find the Jellyfin user we'll attribute playback to. Skipped silently
-    # if api key isn't set yet — the play endpoints handle the missing
-    # config case with their own 503.
-    if JELLYFIN_API_KEY:
-        try:
-            global _jellyfin_user_id
-            async with httpx.AsyncClient(timeout=10.0) as c:
-                r = await c.get(
-                    f"{JELLYFIN_URL}/Users",
-                    headers={"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'},
-                )
-                r.raise_for_status()
-                users = r.json()
-            admin = next((u for u in users if u.get("Policy", {}).get("IsAdministrator")), None)
-            _jellyfin_user_id = (admin or users[0])["Id"] if users else None
-            print(f"[startup] jellyfin user resolved: {_jellyfin_user_id}", flush=True)
-        except Exception as e:
-            print(f"[startup] jellyfin user lookup failed: {e}", flush=True)
-
-    # Any job mid-flight (or queued) at startup is orphaned from a prior crash.
-    # Mark FAILED so the UI surfaces ! / ↻ instead of an eternal ○.
+    # Reset orphaned mid-flight jobs from a prior crash.
     jobs = read_jobs()
     changed = False
     for job in jobs:
-        # Schema migration: source labels were renamed youtube→yt, library→qb→bt.
         src = job.get("source")
         if src == "youtube":
             job["source"] = "yt"
@@ -146,10 +145,6 @@ async def lifespan(app: FastAPI):
             changed = True
             print(f"[startup] orphaned {job['job_id']} -> FAILED", flush=True)
         elif job["status"] == "ANNOTATING":
-            # Annotation is optional; if it crashed mid-way, flip back to SUCCESS.
-            # The .srt may be partially overwritten — the background loop will
-            # pick it up again if it's a bt job, or the yt user re-runs the
-            # whole job.
             job["status"] = "SUCCESS"
             job["annotation_error"] = "Interrupted by restart"
             job["updated_at"] = _now()
@@ -158,22 +153,20 @@ async def lifespan(app: FastAPI):
     if changed:
         write_jobs(jobs)
 
-    # Re-spawn aria2c for any wrapper that has a half-finished download
-    # (a `.aria2` control file present from before the container restart).
+    # Re-spawn aria2c for any wrapper with a half-finished download.
     bt_torrents.resume_all()
 
-    annotation_loop_task = asyncio.create_task(_bt_work_loop())
+    bt_loop_task = asyncio.create_task(_bt_work_loop())
 
     try:
         yield
     finally:
-        annotation_loop_task.cancel()
+        bt_loop_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         annotate_executor.shutdown(wait=False, cancel_futures=True)
         translator_executor.shutdown(wait=False, cancel_futures=True)
+        hls_precompute.hls_executor.shutdown(wait=False, cancel_futures=True)
         bt_torrents.shutdown()
-        # Free any GPU leases still held — the broker has no TTL, so without
-        # this a SIGTERM mid-whisper leaves the next acquire blocked forever.
         release_all_held()
 
 
@@ -226,11 +219,6 @@ _YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.c
 
 
 def _is_playlist_url(url: str) -> bool:
-    """True only for canonical playlist URLs (`/playlist?list=…`).
-
-    `watch?v=…&list=…` is intentionally NOT treated as a playlist — the user
-    typically means the single video that happens to be inside one.
-    """
     try:
         u = urlparse(url)
     except Exception:
@@ -305,19 +293,12 @@ async def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail="Not found")
 
     if job.get("source", "yt") == "yt":
-        # Clean up the mp4 + srt we put under data/downloads/.
         base = job.get("basename")
         if base:
             for ext in ("mp4", "srt"):
                 (DOWNLOADS_DIR / f"{base}.{ext}").unlink(missing_ok=True)
-        # And the staging UUID-named files in case the job died mid-rename.
         (DOWNLOADS_DIR / f"{job_id}.mp4").unlink(missing_ok=True)
         (DOWNLOADS_DIR / f"{job_id}.srt").unlink(missing_ok=True)
-
-    # bt jobs reference files transcribe doesn't own through jobs.json (the
-    # legacy /api/bt/transcribe path) or are stale magnet-era entries from
-    # earlier schema versions. Either way: just drop the entry, leave the
-    # filesystem alone. Torrents are managed via /api/bt/torrent/{wrapper}.
 
     job["status"] = "DELETED"
     job["updated_at"] = _now()
@@ -331,149 +312,109 @@ class BtTranscribeRequest(BaseModel):
     path: str
 
 
-def _is_annotated_srt(srt_path: Path) -> bool:
-    """`※ annotated` anywhere in the SRT means annotation already ran.
-    Includes the 99:59:59 sentinel cue appended even on 0-note passes, so
-    this is a complete check — no need for a jobs.json overlay. (Producer
-    source sentinels use `※ source: …` which won't false-trigger this.)"""
-    try:
-        with open(srt_path, "rb") as f:
-            content = f.read()
-        return ANNOTATION_MARKER.encode("utf-8") in content
-    except OSError:
-        return False
-
-
-def _has_source_stamp(srt_path: Path) -> bool:
-    """Whether the SRT carries any `※ source: …` sentinel cue. Used to
-    detect strict-stem bundled SRTs (`<stem>.srt` sitting next to the
-    video — manually dropped in by the user after bt_filter already
-    wrote its sentinel, so the filter never saw it), which otherwise
-    carry no source attribution."""
-    try:
-        with open(srt_path, "rb") as f:
-            content = f.read()
-        return b"\xe2\x80\xbb source:" in content  # "※ source:" UTF-8
-    except OSError:
-        return False
-
-
-def _read_srt_marker(srt_path: Path, marker: str) -> str | None:
-    """If the SRT contains a sentinel cue starting with `marker`, return the
-    text that follows (the error message). Returns None if not present."""
-    try:
-        content = srt_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+def _read_error(p: Path) -> str | None:
+    if not p.exists():
         return None
-    for line in content.splitlines():
-        idx = line.find(marker)
-        if idx >= 0:
-            return line[idx + len(marker):].strip() or "(no message)"
-    return None
+    try:
+        return p.read_text(encoding="utf-8", errors="replace").strip() or "(empty error)"
+    except OSError:
+        return "(unreadable .error file)"
 
 
 def _scan_bt() -> list[dict]:
-    """Walk BT_ROOTS, return one entry per video file. Filesystem only,
-    plus the in-flight set of translate-zh futures for `zh_in_flight`."""
+    """Walk /bt, return one entry per video file. State per entry comes
+    from derived/<wrapper>/<stem>/."""
     out = []
     now = time.time()
     with _translating_lock:
-        in_flight = {p for p, f in _translating.items() if not f.done()}
-    for root in BT_ROOTS:
-        if not root.exists():
+        in_flight_translate = {p for p, f in _translating.items() if not f.done()}
+
+    if not BT_ROOT.exists():
+        return out
+
+    # Wrappers still being written by aria2 are skipped wholesale.
+    wrappers_in_flight = {
+        w.resolve()
+        for w in BT_ROOT.iterdir()
+        if w.is_dir() and any(w.rglob("*.aria2"))
+    }
+
+    for video in BT_ROOT.rglob("*"):
+        if not video.is_file():
             continue
-        # aria2c keeps ONE `.aria2` control file per torrent (not one per
-        # file inside a multi-file torrent), and only deletes it once every
-        # piece across every file has verified. So any `.aria2` anywhere
-        # under a wrapper means EVERY file in that wrapper is still being
-        # written / verified and unsafe to scan — far more reliable than
-        # the mtime check below for stalled-peer cases where individual
-        # file writes can pause for minutes.
-        wrappers_in_flight = {
-            w.resolve()
-            for w in root.iterdir()
-            if w.is_dir() and any(w.rglob("*.aria2"))
-        }
-        for video in root.rglob("*"):
-            if not video.is_file():
+        if video.suffix.lower() not in VIDEO_EXTS:
+            continue
+        if video.name.startswith("."):
+            continue
+        try:
+            wrapper = BT_ROOT / video.relative_to(BT_ROOT).parts[0]
+            if wrapper.resolve() in wrappers_in_flight:
                 continue
-            if video.suffix.lower() not in VIDEO_EXTS:
+            wrapper_name = wrapper.name
+        except (ValueError, IndexError):
+            continue
+        try:
+            if now - video.stat().st_mtime < MTIME_GRACE_SECONDS:
                 continue
-            if video.name.startswith("."):
-                continue
-            # Skip the whole wrapper if its torrent hasn't finished yet.
-            try:
-                wrapper = root / video.relative_to(root).parts[0]
-                if wrapper.resolve() in wrappers_in_flight:
-                    continue
-            except (ValueError, IndexError):
-                # video is directly at root with no wrapper; nothing to skip.
-                pass
-            # Belt-and-suspenders for non-aria2c writers (manual drops,
-            # webdav copies, rsync mid-flight): files whose mtime hasn't
-            # settled for 60 s aren't ready yet.
-            try:
-                if now - video.stat().st_mtime < MTIME_GRACE_SECONDS:
-                    continue
-            except OSError:
-                continue
-            srt = video.with_suffix(".srt")
-            has_srt = srt.exists()
-            whisper_error = _read_srt_marker(srt, WHISPER_FAILED_MARKER) if has_srt else None
-            annotate_error = _read_srt_marker(srt, ANNOTATE_FAILED_MARKER) if has_srt else None
-            os_failed = _read_srt_marker(srt, OS_FAILED_MARKER) if has_srt else None
-            # An SRT carrying only the whisper-failed sentinel isn't a real
-            # transcript — for everything downstream of whisper we treat it
-            # as "no SRT yet, but don't retry."
-            has_real_srt = has_srt and whisper_error is None
-            has_annotation = has_real_srt and _is_annotated_srt(srt)
-            # Chinese sub state (user-triggered translate-zh button output).
-            # `.zh-tw.srt` is the sidecar; `.zh-tw.srt.error` records a
-            # failure reason from the Chinese translator when it surfaces one.
-            zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
-            zh_err_path = Path(str(zh_path) + ".error")
-            has_zh_srt = zh_path.exists()
-            zh_in_flight = str(video) in in_flight
-            zh_error: str | None = None
-            if not has_zh_srt and zh_err_path.exists():
-                try:
-                    zh_error = zh_err_path.read_text(encoding="utf-8", errors="replace").strip() or "(empty error)"
-                except OSError:
-                    zh_error = "(unreadable .zh-tw.srt.error stamp)"
-            try:
-                parent_rel = str(video.parent.relative_to(root))
-            except ValueError:
-                parent_rel = ""
-            if parent_rel == ".":
-                parent_rel = ""
-            out.append({
-                "path": str(video),
-                "name": video.name,
-                "parent": parent_rel,
-                "root": str(root),
-                "has_srt": has_real_srt,
-                "has_annotation": has_annotation,
-                "whisper_error": whisper_error,
-                "annotate_error": annotate_error,
-                "os_failed": os_failed,
-                "has_zh_srt": has_zh_srt,
-                "zh_in_flight": zh_in_flight,
-                "zh_error": zh_error,
-            })
-    out.sort(key=lambda x: (x["root"], x["parent"], x["name"].lower()))
+        except OSError:
+            continue
+
+        derived = DERIVED_ROOT / wrapper_name / video.stem
+
+        english_srt = derived / "english.srt"
+        english_err = derived / "english.srt.error"
+        annotated_srt = derived / "annotated.srt"
+        annotated_err = derived / "annotated.srt.error"
+        zh_srt = derived / "zh.srt"
+        zh_err = derived / "zh.srt.error"
+
+        has_srt = english_srt.exists() or annotated_srt.exists()
+        has_annotation = annotated_srt.exists()
+        whisper_error = _read_error(english_err)
+        annotate_error = _read_error(annotated_err)
+
+        has_zh_srt = zh_srt.exists()
+        zh_error = _read_error(zh_err) if not has_zh_srt else None
+        zh_in_flight = str(video) in in_flight_translate
+
+        hls_ready = _hls_complete(derived)
+        hls_in_flight_flag = _hls_in_flight(derived)
+
+        try:
+            parent_rel = str(video.parent.relative_to(BT_ROOT))
+        except ValueError:
+            parent_rel = ""
+        if parent_rel == ".":
+            parent_rel = ""
+
+        out.append({
+            "path": str(video),
+            "name": video.name,
+            "parent": parent_rel,
+            "wrapper": wrapper_name,
+            "stem": video.stem,
+            "has_srt": has_srt,
+            "has_annotation": has_annotation,
+            "whisper_error": whisper_error,
+            "annotate_error": annotate_error,
+            "os_failed": None,
+            "has_zh_srt": has_zh_srt,
+            "zh_in_flight": zh_in_flight,
+            "zh_error": zh_error,
+            "hls_ready": hls_ready,
+            "hls_in_flight": hls_in_flight_flag,
+        })
+    out.sort(key=lambda x: (x["parent"], x["name"].lower()))
     return out
 
 
 def _validate_bt_path(path_str: str) -> Path:
-    """Reject paths outside the bt roots. Defense in depth."""
     path = Path(path_str).resolve()
-    for root in BT_ROOTS:
-        try:
-            path.relative_to(root.resolve())
-            return path
-        except ValueError:
-            continue
-    raise HTTPException(status_code=400, detail=f"Path not under a bt root: {path_str}")
+    try:
+        path.relative_to(BT_ROOT.resolve())
+        return path
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Path not under /bt: {path_str}")
 
 
 @app.get("/api/bt")
@@ -497,9 +438,6 @@ class BtMagnetRequest(BaseModel):
 
 @app.post("/api/bt/magnet", status_code=201)
 async def submit_magnet(req: BtMagnetRequest):
-    """Spawn a one-shot aria2c subprocess for this magnet. The torrent
-    lives entirely in the subprocess's lifetime + the per-torrent wrapper
-    folder under /bt; nothing is persisted in jobs.json."""
     if not req.magnet.startswith("magnet:"):
         raise HTTPException(status_code=400, detail="must be a magnet: URI")
     try:
@@ -511,15 +449,21 @@ async def submit_magnet(req: BtMagnetRequest):
 
 @app.get("/api/bt/torrents")
 async def list_torrents():
-    """One entry per wrapper folder under /bt, phase derived live from
-    aria2c's `.aria2` control file + the subprocess registry."""
     return bt_torrents.list_torrents()
 
 
 @app.delete("/api/bt/torrents/{wrapper}")
 async def delete_torrent(wrapper: str):
-    """Kill the subprocess (if running) + rmtree the wrapper folder."""
+    """Kill subprocess + rmtree the bt wrapper + drop its derived dir."""
     bt_torrents.delete(wrapper)
+    # Also clean the derived products for this wrapper — once bt/ is gone
+    # those segments are orphaned cache anyway.
+    derived = DERIVED_ROOT / wrapper
+    if derived.exists():
+        try:
+            shutil.rmtree(derived)
+        except OSError as e:
+            print(f"[delete-torrent] derived rmtree failed for {wrapper!r}: {e}", flush=True)
     return {"ok": True}
 
 
@@ -527,87 +471,15 @@ class BtTranslateZhRequest(BaseModel):
     wrapper: str
 
 
-class BtUpgradeEnglishRequest(BaseModel):
-    wrapper: str
-
-
-@app.post("/api/bt/upgrade-english", status_code=200)
-async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
-    """Delete every SRT in `wrapper` that carries `※ os failed:` so the
-    next scan tick re-runs the full cascade (srt-matcher → OS → whisper)
-    against today's OpenSubtitles quota. Useful when a torrent was
-    processed during a quota-exhaustion window and the user wants to
-    pull human-translated subs now that quota has reset.
-
-    Refuses if torrent still downloading. Skips videos currently in
-    flight (annotation queue / job). Each successful delete will cost
-    a fresh Sonnet annotation pass when the new SRT arrives — call
-    confirms this in the UI dialog."""
-    bt_root = BT_ROOTS[0]
-    src = (bt_root / req.wrapper).resolve()
-    try:
-        src.relative_to(bt_root.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="wrapper not under /bt")
-    if not src.is_dir():
-        raise HTTPException(status_code=404, detail=f"wrapper not found: {req.wrapper}")
-    if any(src.rglob("*.aria2")):
-        raise HTTPException(status_code=409, detail="torrent still downloading")
-
-    in_flight_paths = set()
-    for j in read_jobs():
-        if j.get("source") != "bt":
-            continue
-        if j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING"):
-            in_flight_paths.add(j.get("source_path"))
-
-    deleted = 0
-    for video in src.rglob("*"):
-        if not video.is_file():
-            continue
-        if video.suffix.lower() not in VIDEO_EXTS:
-            continue
-        if video.name.startswith("."):
-            continue
-        if str(video) in in_flight_paths:
-            continue
-        srt = video.with_suffix(".srt")
-        if not srt.exists():
-            continue
-        try:
-            if OS_FAILED_MARKER.encode("utf-8") not in srt.read_bytes():
-                continue
-        except OSError:
-            continue
-        try:
-            srt.unlink()
-            deleted += 1
-        except OSError as e:
-            print(f"[upgrade-english] unlink failed for {srt.name!r}: {e}", flush=True)
-    return {"ok": True, "deleted": deleted}
-
-
 @app.post("/api/bt/translate-zh", status_code=200)
 async def bt_translate_zh(req: BtTranslateZhRequest):
-    """Submit every video in `wrapper` to the Chinese-translation worker.
-    Each video uses per-cue Gemini Flash Lite (with sliding-window
-    context) to translate the sibling `<stem>.srt` into
-    `<stem>.zh-tw.srt`, or stamps `<stem>.zh-tw.srt.error` on failure.
+    """Translate every annotated video in `wrapper` to 繁體中文.
 
-    Refuses if:
-      - the wrapper isn't directly under /bt
-      - the torrent hasn't finished (any `.aria2` anywhere)
-      - any video lacks the `※ annotated` sentinel (i.e. bt pipeline not
-        done yet — without an annotated English SRT, the translator has
-        nothing to translate from)
-
-    Idempotent — videos that already have `<stem>.zh-tw.srt` get skipped
-    inside the worker. Calling again after a partial failure clears
-    `.error` stamps, so the button doubles as retry."""
-    bt_root = BT_ROOTS[0]
-    src = (bt_root / req.wrapper).resolve()
+    Refuses if torrent still downloading or any video lacks annotated.srt.
+    Idempotent (skips videos with zh.srt). Clears .error stamps so retry."""
+    src = (BT_ROOT / req.wrapper).resolve()
     try:
-        src.relative_to(bt_root.resolve())
+        src.relative_to(BT_ROOT.resolve())
     except ValueError:
         raise HTTPException(status_code=400, detail="wrapper not under /bt")
     if not src.is_dir():
@@ -623,36 +495,24 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
             continue
         if video.name.startswith("."):
             continue
-        srt = video.with_suffix(".srt")
-        if not srt.exists():
-            raise HTTPException(status_code=409, detail=f"{video.name} has no SRT yet")
-        try:
-            if ANNOTATION_MARKER.encode("utf-8") not in srt.read_bytes():
-                raise HTTPException(status_code=409, detail=f"{video.name} not annotated yet")
-        except OSError as e:
-            raise HTTPException(status_code=500, detail=f"reading SRT failed: {e}")
+        derived = _derived_dir_for(video)
+        annotated = derived / "annotated.srt"
+        if not annotated.exists():
+            raise HTTPException(status_code=409, detail=f"{video.name} not annotated yet")
         videos.append(video)
-    # rglob order is filesystem-dependent (inode order on ext4). Sort by
-    # name so a multi-episode pack like Sopranos S01 translates E01→E13 in
-    # order rather than whatever shape the seeder happened to land bytes in.
     videos.sort(key=lambda p: p.name)
 
     queued = 0
     with _translating_lock:
         in_flight = {p for p, f in _translating.items() if not f.done()}
     for video in videos:
-        zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
+        derived = _derived_dir_for(video)
+        zh_path = derived / "zh.srt"
         if zh_path.exists():
-            continue  # already translated
+            continue
         if str(video) in in_flight:
-            continue  # already submitted, worker hasn't finished
-        # Clear stale failure state so retry-via-button works as expected.
-        err_path = Path(str(zh_path) + ".error")
-        if err_path.exists():
-            try:
-                err_path.unlink()
-            except OSError:
-                pass
+            continue
+        (derived / "zh.srt.error").unlink(missing_ok=True)
         _submit_translate(video)
         queued += 1
     return {"ok": True, "queued": queued, "total": len(videos)}
@@ -664,25 +524,17 @@ class BtTranslateZhFileRequest(BaseModel):
 
 @app.post("/api/bt/translate-zh-file", status_code=200)
 async def bt_translate_zh_file(req: BtTranslateZhFileRequest):
-    """Submit a single video for Chinese translation. Same worker pool
-    and idempotency rules as the per-torrent endpoint, just scoped to
-    one file — for when only an episode or two need a translation pass
-    rather than the whole season."""
     path = _validate_bt_path(req.path)
     if not path.exists():
         raise HTTPException(status_code=404, detail="video not found")
     if path.suffix.lower() not in VIDEO_EXTS:
         raise HTTPException(status_code=400, detail="not a video file")
-    srt = path.with_suffix(".srt")
-    if not srt.exists():
-        raise HTTPException(status_code=409, detail="no SRT yet — annotate first")
-    try:
-        if ANNOTATION_MARKER.encode("utf-8") not in srt.read_bytes():
-            raise HTTPException(status_code=409, detail="SRT not annotated yet")
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"reading SRT failed: {e}")
+    derived = _derived_dir_for(path)
+    annotated = derived / "annotated.srt"
+    if not annotated.exists():
+        raise HTTPException(status_code=409, detail="not annotated yet")
 
-    zh_path = path.parent / f"{path.stem}{ZH_SUFFIX}"
+    zh_path = derived / "zh.srt"
     if zh_path.exists():
         return {"ok": True, "queued": 0, "reason": "already translated"}
 
@@ -691,13 +543,7 @@ async def bt_translate_zh_file(req: BtTranslateZhFileRequest):
     if in_flight:
         return {"ok": True, "queued": 0, "reason": "already in flight"}
 
-    err_path = Path(str(zh_path) + ".error")
-    if err_path.exists():
-        try:
-            err_path.unlink()
-        except OSError:
-            pass
-
+    (derived / "zh.srt.error").unlink(missing_ok=True)
     _submit_translate(path)
     return {"ok": True, "queued": 1}
 
@@ -708,21 +554,15 @@ class BtRetryRequest(BaseModel):
 
 @app.post("/api/bt/retry", status_code=200)
 async def bt_retry(req: BtRetryRequest):
-    """Clear a failure sentinel so the scan loop picks the file up again.
-
-    Implementation: delete the SRT entirely. Yes that throws away a
-    successfully-transcribed transcript if the failure was only on the
-    annotation stage — but that's the trade-off for not having three
-    different retry buttons. Whisper's the expensive bit, and even then
-    it's <10 min on the GPU; cheaper than building partial-retry UI.
-    """
+    """Wipe the derived/<wrapper>/<stem>/ for this video so the scan loop
+    re-runs the whole pipeline. Resilient: missing dir is a no-op."""
     path = _validate_bt_path(req.path)
-    srt = path.with_suffix(".srt")
-    if srt.exists():
+    derived = _derived_dir_for(path)
+    if derived.exists():
         try:
-            srt.unlink()
+            shutil.rmtree(derived)
         except OSError as e:
-            raise HTTPException(status_code=500, detail=f"unlink failed: {e}")
+            raise HTTPException(status_code=500, detail=f"rmtree failed: {e}")
     return {"ok": True}
 
 
@@ -732,7 +572,6 @@ async def transcribe_bt_file(req: BtTranscribeRequest):
     if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    # Reject duplicate in-flight requests for the same path.
     for j in read_jobs():
         if (j.get("source") == "bt"
                 and j.get("source_path") == str(path)
@@ -746,93 +585,15 @@ async def transcribe_bt_file(req: BtTranscribeRequest):
     return {"job_id": job_id, "status": "PENDING"}
 
 
-# ── Jellyfin play proxy ───────────────────────────────────────────────────
-#
-# A small reverse proxy in front of Jellyfin's HLS endpoints so the
-# browser never sees the API key, plus a sidecar that serves transcribe's
-# own SRT files as WebVTT for the <video><track> element.
+# ── Playback endpoints ────────────────────────────────────────────────────
 #
 # Flow per click:
-#   1. Frontend POSTs /api/play/resolve with the bt path of the video.
-#   2. We translate transcribe's /bt/... → Jellyfin's /media/bt/... and
-#      look up the item id via the cached Jellyfin Items index.
-#   3. Return { master_url, subtitles[] } pointing back at our proxy
-#      endpoints so the frontend never holds the JELLYFIN_API_KEY.
-#   4. <video src={master_url}> via hls.js (or Safari native). Subtitle
-#      tracks come from our /api/play/sub endpoint, converted to VTT.
-
-_jellyfin_index_lock = threading.Lock()
-_jellyfin_index: dict[str, str] = {}  # Jellyfin Path → Jellyfin Item.Id
-_jellyfin_index_at: float = 0.0
-_JELLYFIN_INDEX_TTL = 60.0  # seconds; invalidate on cache miss too
-
-
-def _video_root_for(path_str: str) -> Path | None:
-    """Return the media root a path lives under, or None if it's outside."""
-    p = Path(path_str).resolve()
-    for root in [Path(_TRANSCRIBE_BT_PREFIX), DOWNLOADS_DIR]:
-        try:
-            p.relative_to(root.resolve())
-            return root
-        except ValueError:
-            continue
-    return None
-
-
-def _transcribe_path_to_jellyfin_path(path: Path) -> str:
-    """Swap the bt prefix so the result matches Jellyfin's Path field."""
-    s = str(path)
-    if s.startswith(_TRANSCRIBE_BT_PREFIX + "/"):
-        return _JELLYFIN_BT_PREFIX + s[len(_TRANSCRIBE_BT_PREFIX):]
-    return s
-
-
-async def _refresh_jellyfin_index() -> None:
-    """Rebuild Path → Item.Id index. Called on cache miss / TTL expiry."""
-    if not JELLYFIN_API_KEY:
-        return
-    headers = {"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'}
-    async with httpx.AsyncClient(timeout=15.0) as c:
-        r = await c.get(
-            f"{JELLYFIN_URL}/Items",
-            params={"Recursive": "true", "IncludeItemTypes": "Video,Episode,Movie", "Fields": "Path"},
-            headers=headers,
-        )
-        r.raise_for_status()
-        data = r.json()
-    new_index: dict[str, str] = {}
-    for item in data.get("Items", []):
-        p = item.get("Path")
-        i = item.get("Id")
-        if p and i:
-            new_index[p] = i
-    with _jellyfin_index_lock:
-        global _jellyfin_index_at
-        _jellyfin_index.clear()
-        _jellyfin_index.update(new_index)
-        _jellyfin_index_at = time.time()
-
-
-async def _resolve_item_id(transcribe_path: Path) -> str:
-    """transcribe path → Jellyfin item id, refreshing the cache as needed."""
-    jellyfin_path = _transcribe_path_to_jellyfin_path(transcribe_path)
-    now = time.time()
-    with _jellyfin_index_lock:
-        stale = now - _jellyfin_index_at > _JELLYFIN_INDEX_TTL
-        hit = _jellyfin_index.get(jellyfin_path)
-    if hit and not stale:
-        return hit
-    await _refresh_jellyfin_index()
-    with _jellyfin_index_lock:
-        hit = _jellyfin_index.get(jellyfin_path)
-    if not hit:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Jellyfin has no item matching {jellyfin_path!r} — "
-                   f"library may not have scanned this file yet"
-        )
-    return hit
-
+#   1. POST /api/play/resolve with the bt path. We compute wrapper+stem,
+#      report HLS readiness + subtitle URLs + resume position.
+#   2. <video src> hits /api/play/proxy/{wrapper}/{stem}/master.m3u8 which
+#      FileResponse's straight from derived/. hls.js follows along for
+#      seg_*.ts under the same prefix.
+#   3. POST /api/play/progress every ~1s — writes data/progress.json.
 
 class PlayResolveRequest(BaseModel):
     path: str
@@ -840,83 +601,49 @@ class PlayResolveRequest(BaseModel):
 
 @app.post("/api/play/resolve")
 async def play_resolve(req: PlayResolveRequest):
-    """Return everything the player modal needs: HLS master URL + subtitle
-    tracks. All URLs point back at our own proxy so the api key never
-    leaves the server."""
-    root = _video_root_for(req.path)
-    if root is None:
-        raise HTTPException(status_code=400, detail="Path not under a media root")
-    video = Path(req.path)
-    if not video.exists():
+    path = _validate_bt_path(req.path)
+    if not path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    item_id = await _resolve_item_id(video)
+    derived = _derived_dir_for(path)
+    wrapper = path.relative_to(BT_ROOT).parts[0]
+    stem = path.stem
+    item_key = f"{wrapper}/{stem}"
 
-    # Read Jellyfin's stored playback position so we can resume across
-    # devices (Apple TV / iOS Jellyfin write to the same UserData).
-    resume_at_seconds = 0.0
-    if _jellyfin_user_id:
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as c:
-                r = await c.get(
-                    f"{JELLYFIN_URL}/Users/{_jellyfin_user_id}/Items/{item_id}",
-                    headers={"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'},
-                )
-                if r.status_code == 200:
-                    ticks = r.json().get("UserData", {}).get("PlaybackPositionTicks", 0)
-                    resume_at_seconds = ticks / 10_000_000
-        except Exception as e:
-            print(f"[play_resolve] resume lookup failed for {item_id}: {e}", flush=True)
-
-    # HLS transcoding params. videoCodec/audioCodec=auto-h264/aac is the
-    # safest browser-compatible target; subtitleStreamIndex=-1 tells
-    # Jellyfin not to burn anything in (we ship sidecars via <track>).
-    # playSessionId omitted — Jellyfin auto-generates one per session.
-    #
-    # videoBitRate=8M + maxStreamingBitrate=10M aimed at 1080p h264:
-    # default (~2 Mbps) is visibly soft on 1080p source. h264 high@4.1 +
-    # 8 Mbps is roughly Netflix-1080p quality; both fit comfortably in
-    # browser playback budgets and your LAN bandwidth.
-    master_qs = (
-        f"mediaSourceId={item_id}"
-        "&videoCodec=h264"
-        "&audioCodec=aac"
-        "&maxAudioChannels=2"
-        "&audioBitRate=192000"
-        "&videoBitRate=8000000"
-        "&maxStreamingBitrate=10000000"
-        "&h264-profile=high"
-        "&h264-level=41"
-        "&subtitleStreamIndex=-1"
-    )
+    ready = _hls_complete(derived)
 
     subtitles = []
-    en_srt = video.with_suffix(".srt")
+    en_srt = derived / "annotated.srt"
+    if not en_srt.exists():
+        en_srt = derived / "english.srt"
     if en_srt.exists():
         subtitles.append({
             "label": "English",
             "srclang": "en",
-            "src": f"/api/play/sub?path={quote(str(en_srt), safe='')}",
+            "src": f"/api/play/sub?wrapper={wrapper}&stem={stem}&lang=en",
         })
-    zh_srt = video.parent / f"{video.stem}{ZH_SUFFIX}"
+    zh_srt = derived / "zh.srt"
     if zh_srt.exists():
         subtitles.append({
             "label": "繁體中文",
             "srclang": "zh",
-            "src": f"/api/play/sub?path={quote(str(zh_srt), safe='')}",
+            "src": f"/api/play/sub?wrapper={wrapper}&stem={stem}&lang=zh",
         })
 
     return {
-        "item_id": item_id,
-        "name": video.stem,
-        "master_url": f"/api/play/proxy/{item_id}/master.m3u8?{master_qs}",
+        "item_id": item_key,
+        "wrapper": wrapper,
+        "stem": stem,
+        "name": stem,
+        "master_url": f"/api/play/proxy/{wrapper}/{stem}/master.m3u8",
         "subtitles": subtitles,
-        "resume_at_seconds": resume_at_seconds,
+        "resume_at_seconds": _resume_at_seconds(wrapper, stem),
+        "ready": ready,
     }
 
 
 class PlayProgressEvent(BaseModel):
-    item_id: str
+    item_id: str  # "<wrapper>/<stem>"
     position_seconds: float
     event: str  # "started" | "progress" | "stopped"
     play_session_id: str
@@ -925,49 +652,19 @@ class PlayProgressEvent(BaseModel):
 
 @app.post("/api/play/progress")
 async def play_progress(req: PlayProgressEvent):
-    """Persist playback position into Jellyfin's UserData so watch state
-    stays in sync across every device that talks to this Jellyfin
-    instance — Apple TV, iOS, and the browser modal we just opened all
-    share the same UserData.PlaybackPositionTicks.
-
-    Implementation note: Jellyfin's /Sessions/Playing/* endpoints want a
-    fully-registered client session (X-Emby-Authorization with stable
-    DeviceId, full DeviceProfile, etc.) before they propagate progress
-    into the user's data row. With just an api_key the session ends up
-    as a "headless" entry and progress reports never reach UserData.
-    Direct UserData writes bypass the whole session ceremony — slightly
-    less rich (no "now playing on transcribe" indicator on other
-    clients) but reliably mutates the field we actually care about.
-
-    Frontend keeps sending started/progress/stopped event types for
-    forward compatibility but we treat them uniformly here.
-    """
-    if not JELLYFIN_API_KEY or not _jellyfin_user_id:
-        raise HTTPException(status_code=503, detail="Jellyfin not configured")
-
-    ticks = int(req.position_seconds * 10_000_000)
-    body = {"PlaybackPositionTicks": ticks}
-
+    """Persist playback position in data/progress.json keyed by wrapper/stem."""
+    if "/" not in req.item_id:
+        return {"ok": False, "reason": "bad item_id"}
+    wrapper, stem = req.item_id.split("/", 1)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as c:
-            r = await c.post(
-                f"{JELLYFIN_URL}/UserItems/{req.item_id}/UserData",
-                params={"userId": _jellyfin_user_id},
-                json=body,
-                headers={"Authorization": f'MediaBrowser Token="{JELLYFIN_API_KEY}"'},
-            )
-        if r.status_code >= 400:
-            print(f"[play_progress] {req.event} → {r.status_code}: {r.text[:200]}", flush=True)
-            return {"ok": False, "status": r.status_code}
-    except Exception as e:
-        print(f"[play_progress] {req.event} failed: {e}", flush=True)
+        _store_progress(wrapper, stem, req.position_seconds)
+    except OSError as e:
+        print(f"[play_progress] write failed: {e}", flush=True)
         return {"ok": False}
     return {"ok": True}
 
 
 def _srt_to_vtt(srt_text: str) -> str:
-    """Convert SRT to WebVTT. Only timestamp lines need the comma→dot fix;
-    cue text containing commas must stay untouched."""
     out = ["WEBVTT", ""]
     for line in srt_text.splitlines():
         if " --> " in line:
@@ -978,14 +675,20 @@ def _srt_to_vtt(srt_text: str) -> str:
 
 
 @app.get("/api/play/sub")
-async def play_sub(path: str):
-    """Serve an SRT (next to the video) as WebVTT for <track>. Path is
-    validated against the same roots that own the videos themselves."""
-    root = _video_root_for(path)
-    if root is None:
-        raise HTTPException(status_code=400, detail="Path not under a media root")
-    p = Path(path)
-    if not p.exists() or p.suffix.lower() != ".srt":
+async def play_sub(wrapper: str, stem: str, lang: str = "en"):
+    """Serve derived/<wrapper>/<stem>/<file>.srt as WebVTT for <track>."""
+    if "/" in wrapper or "/" in stem:
+        raise HTTPException(status_code=400, detail="bad wrapper/stem")
+    derived = DERIVED_ROOT / wrapper / stem
+    if lang == "en":
+        # Prefer annotated.srt over the raw english.srt.
+        candidates = [derived / "annotated.srt", derived / "english.srt"]
+    elif lang == "zh":
+        candidates = [derived / "zh.srt"]
+    else:
+        raise HTTPException(status_code=400, detail="bad lang")
+    p = next((c for c in candidates if c.exists()), None)
+    if p is None:
         raise HTTPException(status_code=404, detail="SRT not found")
     try:
         raw = p.read_text(encoding="utf-8", errors="replace")
@@ -994,94 +697,98 @@ async def play_sub(path: str):
     return Response(
         content=_srt_to_vtt(raw),
         media_type="text/vtt; charset=utf-8",
-        # Browsers cache <track> aggressively; allow short caching across
-        # the same playback session, force re-check next session.
         headers={"Cache-Control": "no-cache"},
     )
 
 
-@app.get("/api/play/proxy/{item_id}/{tail:path}")
-async def play_proxy(item_id: str, tail: str, request: Request):
-    """Stream HLS bytes (m3u8 + .ts segments) through us, injecting the
-    Jellyfin API key. Browser sees only same-origin URLs under /api/play
-    so the key never ends up in client JS / DevTools.
+@app.get("/api/play/proxy/{wrapper}/{stem}/{filename}")
+async def play_proxy(wrapper: str, stem: str, filename: str):
+    """Serve derived/<wrapper>/<stem>/<filename> straight from disk.
 
-    The HLS playlists Jellyfin emits use relative URLs (e.g. master.m3u8
-    references main.m3u8, which references hls1/main/N.ts), so once the
-    browser is pointed at /api/play/proxy/{id}/master.m3u8 every follow-
-    up segment fetch lands here naturally."""
-    if not JELLYFIN_API_KEY:
-        raise HTTPException(status_code=503, detail="JELLYFIN_API_KEY not configured")
-    upstream = f"{JELLYFIN_URL}/Videos/{item_id}/{tail}"
-    params = dict(request.query_params)
-    params["api_key"] = JELLYFIN_API_KEY
-
-    # Long timeout: master.m3u8 blocks on Jellyfin spinning up the
-    # ffmpeg transcoder (HEVC source can take 10s+ before the first
-    # segment is ready). 60s read covers worst case on this machine.
-    client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=60.0))
-    upstream_resp = await client.send(
-        client.build_request("GET", upstream, params=params),
-        stream=True,
+    Used for both master.m3u8 and seg_*.ts — same prefix, hls.js / Safari
+    follows the playlist's relative segment refs back here. FileResponse
+    handles Range requests natively (HLS doesn't really need them but
+    they're free with Starlette's StaticFiles infrastructure)."""
+    if "/" in wrapper or "/" in stem or "/" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="bad path component")
+    # Allow only the artifacts ffmpeg writes — never expose .srt etc. via
+    # this endpoint (subtitle is /api/play/sub).
+    if filename != "master.m3u8" and not (filename.startswith("seg_") and filename.endswith(".ts")):
+        raise HTTPException(status_code=400, detail="bad filename")
+    fp = DERIVED_ROOT / wrapper / stem / filename
+    if not fp.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    media_type = (
+        "application/vnd.apple.mpegurl" if filename.endswith(".m3u8")
+        else "video/mp2t"
     )
+    return FileResponse(fp, media_type=media_type)
 
-    # Drop hop-by-hop headers + anything that conflicts with the proxy
-    # rewrite (content-length is recomputed by Starlette).
-    drop = {"content-length", "transfer-encoding", "connection",
-            "keep-alive", "content-encoding"}
-    headers = {k: v for k, v in upstream_resp.headers.items() if k.lower() not in drop}
 
-    async def body():
+# ── Background bt loop ────────────────────────────────────────────────────
+
+def _ensure_english(video: Path, eng_srt_path: Path | None,
+                    derived_dir: Path, in_flight_paths: set[str]) -> None:
+    """Make derived/<stem>/english.srt exist (or stamp the error file).
+
+    Order: bundled BT srt (free) → OpenSubtitles (cheap) → whisper (expensive).
+    """
+    english = derived_dir / "english.srt"
+    english_err = derived_dir / "english.srt.error"
+    if english.exists() or english_err.exists():
+        return
+    if str(video) in in_flight_paths:
+        return  # whisper job already submitted on a prior tick
+
+    derived_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Bundled BT srt — fastest, no API calls.
+    if eng_srt_path is not None and eng_srt_path.exists():
         try:
-            async for chunk in upstream_resp.aiter_raw():
-                yield chunk
-        finally:
-            await upstream_resp.aclose()
-            await client.aclose()
+            shutil.copyfile(eng_srt_path, english)
+            return
+        except OSError as e:
+            print(f"[english] bundled copy failed for {video.name}: {e}", flush=True)
 
-    return StreamingResponse(
-        body(),
-        status_code=upstream_resp.status_code,
-        headers=headers,
-        media_type=upstream_resp.headers.get("content-type"),
-    )
+    # 2. OpenSubtitles. find_subs caches misses; subsequent ticks are cheap.
+    try:
+        if find_subs(video, out_path=english) is not None:
+            return
+    except Exception as e:
+        print(f"[english] find_subs raised for {video.name}: {e}", flush=True)
 
-
-# ── Background annotation loop ────────────────────────────────────────────
-
-def _run_pending_filter():
-    """For every wrapper that has finished downloading (no `.aria2`) and
-    hasn't been filtered yet, run the LLM cleanup + SRT-match pass.
-
-    Idempotent at the bt_filter.filter_wrapper level (sentinel skip),
-    so an interrupted-restart still gets one clean attempt.
-    """
-    for root in BT_ROOTS:
-        if not root.exists():
-            continue
-        for wrapper in root.iterdir():
-            if not wrapper.is_dir():
-                continue
-            # In-flight torrent — wait until aria2 has verified all pieces.
-            if any(wrapper.rglob("*.aria2")):
-                continue
-            if (wrapper / FILTER_SENTINEL).exists():
-                continue
-            try:
-                filter_wrapper(wrapper)
-            except Exception:
-                traceback.print_exc()
+    # 3. Whisper.
+    job_id = str(uuid.uuid4())
+    job = _new_bt_job(job_id, str(video))
+    upsert_job(job)
+    executor.submit(process_bt_file, job_id)
 
 
-def _queue_pending_bt_work():
-    """For every bt video without SRT, enqueue whisper; for every SRT without ※,
-    enqueue annotation. Files carrying a `※ whisper failed:` or
-    `※ annotate failed:` sentinel in their SRT are skipped — the worker
-    that hit the error wrote the sentinel itself, and the user clears it
-    via the UI ↻ button (which deletes the SRT).
-    """
-    _run_pending_filter()
-    items = _scan_bt()
+def _ensure_annotated(video: Path, derived_dir: Path, in_flight_paths: set[str]) -> None:
+    """When english.srt exists but annotated.srt doesn't, queue annotation."""
+    english = derived_dir / "english.srt"
+    annotated = derived_dir / "annotated.srt"
+    if annotated.exists() or (derived_dir / "annotated.srt.error").exists():
+        return
+    if not english.exists():
+        return
+    if str(video) in in_flight_paths:
+        return  # in-flight whisper or annotate
+
+    job_id = str(uuid.uuid4())
+    job = _new_bt_job(job_id, str(video))
+    job["status"] = "ANNOTATING"
+    upsert_job(job)
+    annotate_executor.submit(annotate_job, job_id)
+
+
+def _scan_and_dispatch():
+    """Single scan tick: pair every ready wrapper, ensure derived dirs and
+    dispatch missing stages (english / annotated / hls). Translation
+    remains user-clicked."""
+    if not BT_ROOT.exists():
+        return
+
     jobs = read_jobs()
     in_flight_paths = set()
     for j in jobs:
@@ -1090,73 +797,31 @@ def _queue_pending_bt_work():
         if j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING"):
             in_flight_paths.add(j.get("source_path"))
 
-    for item in items:
-        if item["path"] in in_flight_paths:
+    for wrapper in BT_ROOT.iterdir():
+        if not wrapper.is_dir():
             continue
-
-        # whisper-failed SRTs read as `has_srt=False` from _scan_bt, but the
-        # sentinel is still present on disk — skip so we don't re-fire.
-        if item["whisper_error"]:
+        if any(wrapper.rglob("*.aria2")):
             continue
-
-        # If the SRT was hand-dropped next to the video after bt_filter
-        # already wrote its sentinel for this wrapper, the filter never
-        # saw it and didn't stamp a source. Catch it retroactively as
-        # `bundled-strict-stem` so the playback flash + on-disk
-        # attribution stay consistent with every other path.
-        # Cheap substring check, idempotent.
-        if item["has_srt"]:
-            srt_path = Path(item["path"]).with_suffix(".srt")
-            if not _has_source_stamp(srt_path):
-                try:
-                    stamp_source(srt_path, "bundled-strict-stem")
-                except OSError as e:
-                    print(f"[srt-matcher] strict-stem source stamp failed for "
-                          f"{srt_path.name!r}: {e}", flush=True)
-
-        if not item["has_srt"]:
-            video = Path(item["path"])
-
-            # 1. OpenSubtitles by file hash — human-translated subs are
-            #    better than whisper output and free at the API layer (subject
-            #    to daily quota; misses are cached in-memory to avoid retries).
-            #    Note: bundled SRTs (release-shipped Subs/<lang>/*.srt etc.)
-            #    are already in place by this point — bt_filter.filter_wrapper
-            #    runs at the wrapper level when the torrent finishes and
-            #    copies bundled English subs to <stem>.srt before this loop
-            #    sees the video.
-            if find_subs(video) is not None:
-                continue
-
-            # 2. Fallback: GPU whisper. If it fails, tasks.py stamps the
-            #    failure sentinel onto the SRT itself — we'll see it on the
-            #    next tick and skip via the `whisper_error` branch above.
-            job_id = str(uuid.uuid4())
-            job = _new_bt_job(job_id, item["path"])
-            upsert_job(job)
-            executor.submit(process_bt_file, job_id)
+        try:
+            pairings = pair_wrapper(wrapper)
+        except Exception:
+            traceback.print_exc()
             continue
-
-        # Has SRT — check if annotation is needed. Skip annotated-once-
-        # failed cases via the sentinel.
-        if item["has_annotation"]:
-            continue
-        if item["annotate_error"]:
-            continue
-        job_id = str(uuid.uuid4())
-        job = _new_bt_job(job_id, item["path"])
-        job["status"] = "ANNOTATING"
-        upsert_job(job)
-        annotate_executor.submit(annotate_job, job_id)
+        for p in pairings:
+            derived_dir = DERIVED_ROOT / wrapper.name / p.stem
+            try:
+                derived_dir.mkdir(parents=True, exist_ok=True)
+                _ensure_english(p.video_path, p.eng_srt_path, derived_dir, in_flight_paths)
+                _ensure_annotated(p.video_path, derived_dir, in_flight_paths)
+                hls_precompute.ensure(p.video_path, derived_dir)
+            except Exception:
+                traceback.print_exc()
 
 
 async def _bt_work_loop():
-    """Periodically scan /bt for files needing whisper or annotation, and queue them."""
     while True:
         try:
-            await asyncio.to_thread(_queue_pending_bt_work)
+            await asyncio.to_thread(_scan_and_dispatch)
         except Exception:
             traceback.print_exc()
         await asyncio.sleep(BT_SCAN_INTERVAL)
-
-

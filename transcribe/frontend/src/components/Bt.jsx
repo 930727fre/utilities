@@ -329,7 +329,7 @@ function PlayerModal({ path, name, onClose }) {
 
   // Attach HLS to <video>. Safari plays HLS natively; everything else needs hls.js.
   useEffect(() => {
-    if (!resolved || !videoRef.current) return
+    if (!resolved || !resolved.ready || !videoRef.current) return
     const video = videoRef.current
     const url = resolved.master_url
     let hls = null
@@ -343,9 +343,9 @@ function PlayerModal({ path, name, onClose }) {
       setError('HLS not supported by this browser')
     }
 
-    // Resume to the position Jellyfin stored from prior playback (any
-    // device). Set on loadedmetadata so currentTime is honored — setting
-    // it before metadata loads is a no-op in some browsers.
+    // Resume to the position stored from prior playback. Set on loadedmetadata
+    // so currentTime is honored — setting before metadata loads is a no-op
+    // in some browsers.
     function onLoaded() {
       if (resolved.resume_at_seconds > 0 && video.duration > resolved.resume_at_seconds + 2) {
         video.currentTime = resolved.resume_at_seconds
@@ -364,7 +364,7 @@ function PlayerModal({ path, name, onClose }) {
   // a final stopped beat with the last currentTime — keepalive=true
   // makes it survive page nav too.
   useEffect(() => {
-    if (!resolved || !videoRef.current) return
+    if (!resolved || !resolved.ready || !videoRef.current) return
     const video = videoRef.current
     const itemId = resolved.item_id
     const sessionId = playSessionId.current
@@ -427,7 +427,10 @@ function PlayerModal({ path, name, onClose }) {
         </div>
         {error && <div style={styles.modalError}>{error}</div>}
         {!resolved && !error && <div style={styles.modalLoading}>Resolving…</div>}
-        {resolved && (
+        {resolved && !resolved.ready && (
+          <div style={styles.modalLoading}>Preparing playback — HLS transcode in progress…</div>
+        )}
+        {resolved && resolved.ready && (
           <video ref={videoRef} controls autoPlay crossOrigin="anonymous" style={styles.video}>
             {resolved.subtitles.map((s, i) => (
               <track key={s.src} kind="subtitles" label={s.label} srcLang={s.srclang}
@@ -477,10 +480,15 @@ function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate, onPlay }) {
       {isExpanded && (
         <div style={styles.actionRow}>
           <div style={{ flex: 1 }} />
-          {engState === 'done' && (
+          {item.hls_ready && (
             <button style={styles.translateBtn}
               title="Play in browser"
               onClick={e => { e.stopPropagation(); onPlay() }}>▸</button>
+          )}
+          {!item.hls_ready && (
+            <span style={styles.hlsHint} title={item.hls_in_flight ? 'Transcoding for playback' : 'Queued for transcoding'}>
+              {item.hls_in_flight ? 'transcoding…' : 'queued'}
+            </span>
           )}
           {engState === 'done' && zhState === 'absent' && (
             <button style={styles.translateBtn}
@@ -489,7 +497,7 @@ function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate, onPlay }) {
           )}
           {engState === 'failed' && (
             <button style={styles.translateBtn}
-              title="Retry (deletes the SRT and re-runs the pipeline)"
+              title="Retry (wipes the derived/<wrapper>/<stem>/ for this video)"
               onClick={e => { e.stopPropagation(); onRetry(item.path) }}>↻</button>
           )}
         </div>
@@ -558,6 +566,9 @@ const styles = {
   },
   disabledBtn: {
     opacity: 0.3, cursor: 'not-allowed',
+  },
+  hlsHint: {
+    color: '#636366', fontSize: 12, fontFamily: MONO, cursor: 'default',
   },
 
   empty: { color: '#636366', textAlign: 'center', marginTop: 60, fontSize: 14 },

@@ -39,9 +39,9 @@ from requests.adapters import HTTPAdapter
 
 from annotate import parse_srt, render_srt  # reuse the same parser/renderer
 from gemini_client import generate_json
-from srt_source import stamp_source
 
-ZH_SUFFIX = ".zh-tw.srt"
+DERIVED_ROOT = Path("/app/data/derived")
+BT_ROOT = Path("/bt")
 
 # Two workers — Gemini Flash Lite is fast and Tier 2 limits are generous,
 # but two parallel episodes is plenty given the batch-level concurrency
@@ -285,39 +285,43 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
         if new_lines:
             c["lines"] = new_lines
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render_srt(cues), encoding="utf-8")
-    stamp_source(out_path, "llm-translated")
+
+
+def _derived_dir_for(video: Path) -> Path:
+    wrapper = video.relative_to(BT_ROOT).parts[0]
+    return DERIVED_ROOT / wrapper / video.stem
 
 
 def translate_video_zh(video: Path) -> None:
     """Top-level worker submitted by the bt translate-zh endpoint. Translate
-    the sibling `<stem>.srt` (the English transcript bt left in place) to
-    繁體中文 via 10-cue Gemini Flash Lite batches with sliding-window context.
+    `derived/<wrapper>/<stem>/annotated.srt` to `derived/<wrapper>/<stem>/zh.srt`
+    via 10-cue Gemini Flash Lite batches with sliding-window context.
 
     OpenSubtitles is NOT consulted — Chinese-sub uploads on OS are sparse
     and frequently mistagged for releases the user actually watches.
 
-    Output: `<stem>.zh-tw.srt` next to the video on success, or
-    `<stem>.zh-tw.srt.error` with the failure reason if translation fails
-    or the English SRT is missing.
-
-    Idempotent: skips if `<stem>.zh-tw.srt` already exists. The endpoint
-    pre-clears `.error` stamps before submitting, so calling the endpoint
-    again counts as a retry.
+    Failure: writes `derived/<wrapper>/<stem>/zh.srt.error`. Idempotent:
+    skips if `zh.srt` already exists. The endpoint pre-clears `.error`
+    stamps before submitting, so calling the endpoint again counts as
+    a retry.
     """
-    zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
-    err_path = Path(str(zh_path) + ".error")
-    eng_srt = video.with_suffix(".srt")
+    derived = _derived_dir_for(video)
+    zh_path = derived / "zh.srt"
+    err_path = derived / "zh.srt.error"
+    src_srt = derived / "annotated.srt"
 
     if zh_path.exists():
         return  # already done
 
-    if not eng_srt.exists():
+    if not src_srt.exists():
         reason = (
-            "no English SRT to translate from; the sibling <stem>.srt is "
-            "missing. Did the bt pipeline produce one for this video?"
+            f"no annotated SRT to translate from; expected {src_srt}. "
+            "Did annotation finish for this video?"
         )
         try:
+            err_path.parent.mkdir(parents=True, exist_ok=True)
             err_path.write_text(reason, encoding="utf-8")
         except OSError as e:
             print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
@@ -325,11 +329,12 @@ def translate_video_zh(video: Path) -> None:
 
     print(f"[translate-zh] translating {video.name!r} via Gemini (10-cue batches)", flush=True)
     try:
-        translate_to_zh(eng_srt, zh_path)
-        print(f"[translate-zh] wrote {zh_path.name!r}", flush=True)
+        translate_to_zh(src_srt, zh_path)
+        print(f"[translate-zh] wrote {zh_path}", flush=True)
     except Exception as exc:
         traceback.print_exc()
         try:
+            err_path.parent.mkdir(parents=True, exist_ok=True)
             err_path.write_text(f"translation failed: {exc}", encoding="utf-8")
         except OSError as e:
             print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
