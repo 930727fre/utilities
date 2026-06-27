@@ -125,9 +125,12 @@ def _transcode(video: Path, derived_dir: Path) -> None:
         if proc.returncode == 0 and is_complete(derived_dir):
             print(f"[hls] done {video.name}", flush=True)
         else:
-            err = stderr_bytes.decode("utf-8", errors="replace").strip().splitlines()[-3:]
-            print(f"[hls] FAILED rc={proc.returncode} {video.name}: {' | '.join(err)}",
-                  flush=True)
+            # Capture more stderr context — codec/hwaccel errors often show
+            # up well above the trailing "Conversion failed!" line.
+            err = stderr_bytes.decode("utf-8", errors="replace").strip().splitlines()[-25:]
+            print(f"[hls] FAILED rc={proc.returncode} {video.name}:", flush=True)
+            for line in err:
+                print(f"[hls]   {line}", flush=True)
     finally:
         with _lock:
             _hls_jobs.pop(key, None)
