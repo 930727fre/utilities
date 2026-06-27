@@ -374,7 +374,6 @@ def _ffmpeg_argv(session: HlsSession, start_seg: int) -> list[str]:
         "-hls_time", str(session.segment_length),
         "-hls_list_size", "0",
         "-hls_playlist_type", "vod",
-        "-hls_flags", "split_by_time",
         "-hls_segment_filename", str(session.work_dir / "seg_%d.ts"),
         "-start_number", str(start_seg),
         str(session.work_dir / "internal.m3u8"),
