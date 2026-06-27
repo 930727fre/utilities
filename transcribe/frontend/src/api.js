@@ -124,20 +124,25 @@ export async function resolvePlay(path) {
   return r.json()
 }
 
-// Fire-and-forget; we don't await or surface errors to the UI because a
-// dropped progress beat just means the resume point is a few seconds
-// stale — not worth interrupting playback over.
-export function reportProgress({ itemId, positionSeconds, event, playSessionId, isPaused = false }) {
+// Fire-and-forget; a dropped progress beat just means the resume point
+// is a few seconds stale.
+export function reportProgress({ path, positionSeconds }) {
   return fetch(`${BASE}/api/play/progress`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      item_id: itemId,
+      path,
       position_seconds: positionSeconds,
-      event,
-      play_session_id: playSessionId,
-      is_paused: isPaused,
     }),
-    keepalive: true,  // lets the "stopped" beat fire during page unload
+    keepalive: true,  // lets the final beat fire during page unload
   }).catch(() => {})
+}
+
+// Tell live-hls to tear down a session (kill ffmpeg, rm work dir). Called
+// when the modal closes. live-hls's idle GC handles the case where this
+// never reaches it.
+export function endLiveHlsSession(baseUrl, sid) {
+  if (!baseUrl || !sid) return Promise.resolve()
+  return fetch(`${baseUrl}/api/${sid}`, { method: 'DELETE', keepalive: true })
+    .catch(() => {})
 }

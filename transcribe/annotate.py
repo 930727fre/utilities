@@ -8,11 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from claude_client import generate_json
+from srt_source import stamp_annotate_failed
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
-DERIVED_ROOT = Path("/app/data/derived")
-BT_ROOT = Path("/bt")
 
 # Single worker — annotation is API-bound, not time-critical. Keep predictable.
 annotate_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="annotate-worker")
@@ -189,50 +188,21 @@ def _is_sentinel_cue(cue: dict) -> bool:
 
 # ── Worker ────────────────────────────────────────────────────────────────
 
-def _bt_derived_dir(job: dict) -> Path | None:
-    """bt job → its derived/<wrapper>/<stem>/ directory, or None for yt jobs."""
-    if job.get("source") != "bt" or not job.get("source_path"):
-        return None
-    video = Path(job["source_path"])
-    wrapper = video.relative_to(BT_ROOT).parts[0]
-    return DERIVED_ROOT / wrapper / video.stem
-
-
-def _io_paths(job: dict) -> tuple[Path, Path, Path] | None:
-    """(input_srt, output_srt, error_file) for this job's annotation, or None if
-    the job has no resolvable target.
-
-    - bt: read derived/<stem>/english.srt, write derived/<stem>/annotated.srt,
-          failure stamp at derived/<stem>/annotated.srt.error.
-    - yt: read+write DOWNLOADS_DIR/<base>.srt in place (legacy behavior; the
-          yt tab still expects ※ markers inside the same file). Failure stamp
-          is a sibling .error file in DOWNLOADS_DIR.
-    """
-    derived = _bt_derived_dir(job)
-    if derived is not None:
-        return (derived / "english.srt",
-                derived / "annotated.srt",
-                derived / "annotated.srt.error")
-    base = job.get("basename")
-    if base:
-        srt = DOWNLOADS_DIR / f"{base}.srt"
-        return srt, srt, DOWNLOADS_DIR / f"{base}.srt.error"
-    return None
-
-
 def annotate_job(job_id: str):
     try:
         _do_annotate(job_id)
     except Exception as exc:
         traceback.print_exc()
         job = get_job(job_id)
+        # Drop a failure sentinel into the SRT itself so the background
+        # scan loop stops re-firing annotation for this file. The user
+        # clears it (and triggers a fresh annotate run) by pressing ↻ in
+        # the UI, which deletes the SRT and lets the whole pipeline rerun.
         if job:
-            paths = _io_paths(job)
-            if paths is not None:
-                _, _, err_path = paths
+            srt_path = _srt_path_for(job)
+            if srt_path is not None and srt_path.exists():
                 try:
-                    err_path.parent.mkdir(parents=True, exist_ok=True)
-                    err_path.write_text(str(exc), encoding="utf-8")
+                    stamp_annotate_failed(srt_path, str(exc))
                 except OSError:
                     pass
         if job and job["status"] == "ANNOTATING":
@@ -242,31 +212,46 @@ def annotate_job(job_id: str):
             upsert_job(job)
 
 
+def _srt_path_for(job: dict) -> Path | None:
+    if job.get("source") == "bt" and job.get("source_path"):
+        return Path(job["source_path"]).with_suffix(".srt")
+    base = job.get("basename")
+    if base:
+        return DOWNLOADS_DIR / f"{base}.srt"
+    return None
+
+
 def _do_annotate(job_id: str):
     job = get_job(job_id)
     if not job or job["status"] != "ANNOTATING":
         return
 
-    paths = _io_paths(job)
-    if paths is None:
-        raise RuntimeError("Job has no resolvable source/target SRT paths")
-    in_srt, out_srt, _err = paths
-
-    if not in_srt.exists():
-        raise RuntimeError(f"SRT file missing on disk: {in_srt}")
+    # bt jobs annotate the SRT sibling to the source video; yt jobs annotate
+    # the title-based SRT in DOWNLOADS_DIR.
+    if job.get("source") == "bt" and job.get("source_path"):
+        srt_path = Path(job["source_path"]).with_suffix(".srt")
+    else:
+        basename = job.get("basename")
+        if not basename:
+            raise RuntimeError("Job has no basename — was it transcribed before the schema migration?")
+        srt_path = DOWNLOADS_DIR / f"{basename}.srt"
+    if not srt_path.exists():
+        raise RuntimeError(f"SRT file missing on disk: {srt_path}")
 
     try:
-        raw = in_srt.read_text(encoding="utf-8")
+        raw = srt_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         # Western-release SRTs are often cp1252 / Latin-1. Latin-1 single-byte
         # decode never raises; result gets re-saved as UTF-8 below.
-        raw = in_srt.read_text(encoding="latin-1")
+        raw = srt_path.read_text(encoding="latin-1")
     cues = parse_srt(raw)
     if not cues:
         raise RuntimeError("SRT contained no parseable cues")
 
-    # Exclude legacy ※ sentinel cues (from pre-refactor SRTs the user
-    # migrated by hand) so Claude doesn't waste tokens on them.
+    # Exclude our own sentinel cues from what Claude sees — they sit at
+    # 00:00:00–05 with `※ source: …` / `※ whisper failed: …` text and
+    # would confuse the model into either annotating them or skipping
+    # neighbouring real cues. Re-render at the end still includes them.
     annotatable_cues = [c for c in cues if not _is_sentinel_cue(c)]
     if not annotatable_cues:
         raise RuntimeError("SRT had only sentinel cues, no dialogue to annotate")
@@ -275,7 +260,8 @@ def _do_annotate(job_id: str):
     seen_entities: set[str] = set()
 
     for start in range(0, len(annotatable_cues), CHUNK_SIZE):
-        # Check for cancellation between chunks.
+        # Check for cancellation between chunks — keeps annotation responsive
+        # to a Delete (frontend disables it, but other callers can DELETE).
         current = get_job(job_id)
         if not current or current["status"] == "DELETED":
             return
@@ -308,6 +294,22 @@ def _do_annotate(job_id: str):
         if note:
             c["lines"].append(f"※ {note}")
 
+    # Sentinel cue inserted at the start (00:00:02 → 00:00:04, just after
+    # the source sentinel's 0–2 s slot) so the user gets a 2-second
+    # "※ annotated" confirmation flash at playback start. Cue index 99999
+    # is well above any plausible real-content cue count.
+    cues.insert(0, {
+        "idx": 99999,
+        "time": "00:00:02,000 --> 00:00:04,000",
+        "lines": ["※ annotated"],
+    })
+
+    # stamp_source / stamp_os_failed / stamp_annotate_failed all APPEND to
+    # the file, so cues like `※ source: bundled-agent` (00:00:00) sit at
+    # the end of the cues list even though their timestamps belong at the
+    # start. Players sort by timestamp anyway, but anyone doing `head
+    # file.srt` sees a confusing order. Sort the cues list before render so
+    # file order = playback order and casual inspection is honest.
     cues.sort(key=_cue_start_seconds)
 
     # Re-check before writing
@@ -315,10 +317,10 @@ def _do_annotate(job_id: str):
     if not current or current["status"] == "DELETED":
         return
 
-    # bt jobs write a new file (annotated.srt distinct from english.srt);
-    # yt jobs still overwrite in place (in_srt == out_srt).
-    out_srt.parent.mkdir(parents=True, exist_ok=True)
-    out_srt.write_text(render_srt(cues), encoding="utf-8")
+    # Overwrite the SRT in place — downstream players (Infuse via webdav)
+    # pick up the annotated cues as the only sidecar. Re-annotation isn't
+    # supported; to get the plain transcript back the user re-runs the job.
+    srt_path.write_text(render_srt(cues), encoding="utf-8")
 
     job = get_job(job_id)
     if not job or job["status"] == "DELETED":

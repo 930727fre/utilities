@@ -18,6 +18,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -73,6 +74,18 @@ def _gc_pass():
 
 
 app = FastAPI(lifespan=lifespan)
+
+# Browser hits master.m3u8 + seg_N.ts directly across origin (it's served
+# by live-hls, the player is hosted by transcribe-frontend). Wide-open
+# CORS is fine: live-hls only emits public media bytes — no auth, no
+# private data — and runs LAN-only by default.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

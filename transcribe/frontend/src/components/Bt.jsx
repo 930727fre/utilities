@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import Hls from 'hls.js'
-import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh, translateFileZh, upgradeEnglishTorrent, resolvePlay, reportProgress } from '../api'
+import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh, translateFileZh, upgradeEnglishTorrent, resolvePlay, reportProgress, endLiveHlsSession } from '../api'
 
 const PROGRESS_REPORT_INTERVAL_SEC = 1
 
@@ -310,15 +310,11 @@ function PlayerModal({ path, name, onClose }) {
   const videoRef = useRef(null)
   const [resolved, setResolved] = useState(null)
   const [error, setError] = useState(null)
-  // One play session id per modal mount. Jellyfin uses this to dedupe
-  // "started" against later "progress" / "stopped" events on the same
-  // playback so the watch history doesn't list one episode twice.
-  const playSessionId = useRef(crypto.randomUUID())
-  // Track last-reported position so we throttle progress beats to ~10s
-  // even though the video element fires timeupdate every ~250ms.
+  // Throttle progress beats — timeupdate fires every ~250ms but we only
+  // want to persist once per second.
   const lastReportRef = useRef(0)
 
-  // Fetch the master.m3u8 URL + subtitle list from transcribe's resolver.
+  // Resolve the bt path to a live-hls session + subtitle list + resume pos.
   useEffect(() => {
     let cancelled = false
     resolvePlay(path)
@@ -327,25 +323,28 @@ function PlayerModal({ path, name, onClose }) {
     return () => { cancelled = true }
   }, [path])
 
-  // Attach HLS to <video>. Safari plays HLS natively; everything else needs hls.js.
+  // Attach HLS. Safari plays HLS natively; everyone else needs hls.js.
   useEffect(() => {
-    if (!resolved || !resolved.ready || !videoRef.current) return
+    if (!resolved || !videoRef.current) return
     const video = videoRef.current
     const url = resolved.master_url
     let hls = null
     if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = url
     } else if (Hls.isSupported()) {
-      hls = new Hls()
+      hls = new Hls({
+        // Be patient with the live transcoder — cold start can take 5-10s
+        // on a long HEVC source before the first segment is ready.
+        manifestLoadingTimeOut: 20000,
+        levelLoadingTimeOut: 20000,
+        fragLoadingTimeOut: 30000,
+      })
       hls.loadSource(url)
       hls.attachMedia(video)
     } else {
       setError('HLS not supported by this browser')
     }
 
-    // Resume to the position stored from prior playback. Set on loadedmetadata
-    // so currentTime is honored — setting before metadata loads is a no-op
-    // in some browsers.
     function onLoaded() {
       if (resolved.resume_at_seconds > 0 && video.duration > resolved.resume_at_seconds + 2) {
         video.currentTime = resolved.resume_at_seconds
@@ -359,57 +358,49 @@ function PlayerModal({ path, name, onClose }) {
     }
   }, [resolved])
 
-  // Playback event reporting. "started" once on first play, "progress"
-  // every 10s while playing, "stopped" on close / ended. unmount sends
-  // a final stopped beat with the last currentTime — keepalive=true
-  // makes it survive page nav too.
+  // Tear down live-hls session when the modal unmounts. live-hls's idle GC
+  // catches the case where this never reaches it.
   useEffect(() => {
-    if (!resolved || !resolved.ready || !videoRef.current) return
+    if (!resolved) return
+    return () => {
+      endLiveHlsSession(resolved.live_hls_base, resolved.session_id)
+    }
+  }, [resolved])
+
+  // Periodic progress beats keyed by the bt path. Persists into
+  // data/progress.json on the backend so the next resolve resumes here.
+  useEffect(() => {
+    if (!resolved || !videoRef.current) return
     const video = videoRef.current
-    const itemId = resolved.item_id
-    const sessionId = playSessionId.current
-    let started = false
+    const beatPath = resolved.path || path
 
-    function fire(event, isPaused = false) {
-      reportProgress({
-        itemId,
-        positionSeconds: video.currentTime || 0,
-        event,
-        playSessionId: sessionId,
-        isPaused,
-      })
+    function fire() {
+      reportProgress({ path: beatPath, positionSeconds: video.currentTime || 0 })
     }
 
-    function onPlay() {
-      if (!started) { fire('started'); started = true }
-      else { fire('progress', false) }
-    }
-    function onPause() { if (started) fire('progress', true) }
     function onTimeUpdate() {
-      if (!started) return
       const now = video.currentTime
       if (Math.abs(now - lastReportRef.current) >= PROGRESS_REPORT_INTERVAL_SEC) {
         lastReportRef.current = now
-        fire('progress', video.paused)
+        fire()
       }
     }
-    function onEnded() { if (started) fire('stopped') }
+    function onPause() { fire() }
+    function onEnded() { fire() }
 
-    video.addEventListener('play', onPlay)
-    video.addEventListener('pause', onPause)
     video.addEventListener('timeupdate', onTimeUpdate)
+    video.addEventListener('pause', onPause)
     video.addEventListener('ended', onEnded)
 
     return () => {
-      video.removeEventListener('play', onPlay)
-      video.removeEventListener('pause', onPause)
       video.removeEventListener('timeupdate', onTimeUpdate)
+      video.removeEventListener('pause', onPause)
       video.removeEventListener('ended', onEnded)
-      // Final stopped beat — modal close, route change, or page unload
-      // all land here. keepalive in reportProgress() ensures it ships.
-      if (started) fire('stopped')
+      // Final beat on unmount (modal close / page nav). keepalive in
+      // reportProgress() ensures it ships during unload too.
+      fire()
     }
-  }, [resolved])
+  }, [resolved, path])
 
   // Esc to close.
   useEffect(() => {
@@ -427,10 +418,7 @@ function PlayerModal({ path, name, onClose }) {
         </div>
         {error && <div style={styles.modalError}>{error}</div>}
         {!resolved && !error && <div style={styles.modalLoading}>Resolving…</div>}
-        {resolved && !resolved.ready && (
-          <div style={styles.modalLoading}>Preparing playback — HLS transcode in progress…</div>
-        )}
-        {resolved && resolved.ready && (
+        {resolved && (
           <video ref={videoRef} controls autoPlay crossOrigin="anonymous" style={styles.video}>
             {resolved.subtitles.map((s, i) => (
               <track key={s.src} kind="subtitles" label={s.label} srcLang={s.srclang}
@@ -480,15 +468,10 @@ function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate, onPlay }) {
       {isExpanded && (
         <div style={styles.actionRow}>
           <div style={{ flex: 1 }} />
-          {item.hls_ready && (
+          {engState === 'done' && (
             <button style={styles.translateBtn}
               title="Play in browser"
               onClick={e => { e.stopPropagation(); onPlay() }}>▸</button>
-          )}
-          {!item.hls_ready && (
-            <span style={styles.hlsHint} title={item.hls_in_flight ? 'Transcoding for playback' : 'Queued for transcoding'}>
-              {item.hls_in_flight ? 'transcoding…' : 'queued'}
-            </span>
           )}
           {engState === 'done' && zhState === 'absent' && (
             <button style={styles.translateBtn}
@@ -497,7 +480,7 @@ function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate, onPlay }) {
           )}
           {engState === 'failed' && (
             <button style={styles.translateBtn}
-              title="Retry (wipes the derived/<wrapper>/<stem>/ for this video)"
+              title="Retry (deletes the SRT and re-runs the pipeline)"
               onClick={e => { e.stopPropagation(); onRetry(item.path) }}>↻</button>
           )}
         </div>
@@ -566,9 +549,6 @@ const styles = {
   },
   disabledBtn: {
     opacity: 0.3, cursor: 'not-allowed',
-  },
-  hlsHint: {
-    color: '#636366', fontSize: 12, fontFamily: MONO, cursor: 'default',
   },
 
   empty: { color: '#636366', textAlign: 'center', marginTop: 60, fontSize: 14 },
