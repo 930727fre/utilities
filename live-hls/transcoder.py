@@ -1,16 +1,25 @@
-"""HlsSession: live HLS transcode via NVENC + absolute segment numbering.
+"""HlsSession: live HLS transcode via NVENC + keyframe-aligned segments.
 
-Replicates the segment-request decision logic from Jellyfin's
-DynamicHlsController.GetDynamicSegment without the multi-client /
-multi-codec / DLNA / scanner ceremony.
+Replicates Jellyfin's DynamicHlsController + DynamicHlsPlaylistGenerator
+flow. Two pieces work together to make seek frame-precise:
 
-The key insight (from Jellyfin): the master playlist is generated up-front
-from the source duration. Segment K corresponds to source time
-[K * segment_length, (K+1) * segment_length), regardless of which ffmpeg
-process produced it. When a new ffmpeg is spawned (initial play or seek),
-it gets `-start_number K` so its output filenames continue from K — the
-player sees a continuous, consistent sequence even across respawns.
+  1. **Keyframe-aware segmentation** (DynamicHlsPlaylistGenerator.cs):
+     ffprobe extracts every source video keyframe up-front. Segments are
+     packed `target_seconds` worth of source between keyframes, so every
+     segment boundary IS a keyframe. master.m3u8 has variable EXTINF
+     durations reflecting actual keyframe gaps.
+
+  2. **Force keyframes in NVENC output** (-force_key_frames): ffmpeg gets
+     the same boundary times so its output has keyframes at exactly the
+     same positions. The HLS muxer breaks output segments at those
+     keyframes, lining up with the playlist.
+
+Result: when the player seeks to time T, hls.js requests segment K (the
+one declared to cover T in master.m3u8). Backend respawns ffmpeg with
+`-ss {segments[K].start}` which IS a source keyframe → no snap, no Δ.
 """
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -21,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-SEGMENT_LENGTH = 6  # seconds; matches Jellyfin's default
+SEGMENT_LENGTH = 6  # seconds; target segment length, actual lengths vary with keyframes
 
 # 24-second gap (Jellyfin's `24 / SegmentLength`): if the requested segment
 # is more than this many segments ahead of the current ffmpeg position,
@@ -29,6 +38,7 @@ SEGMENT_LENGTH = 6  # seconds; matches Jellyfin's default
 GAP_THRESHOLD = 24 // SEGMENT_LENGTH
 
 SESSION_DIR = Path(os.environ.get("SESSION_DIR", "/tmp/live-hls"))
+KEYFRAME_CACHE_DIR = SESSION_DIR / "_keyframe_cache"
 MEDIA_ROOTS = [Path(p.strip()) for p in os.environ.get("MEDIA_ROOTS", "/media").split(",")]
 SESSION_IDLE_TIMEOUT = float(os.environ.get("SESSION_IDLE_TIMEOUT", "60"))
 
@@ -46,6 +56,11 @@ class HlsSession:
     duration_seconds: float
     work_dir: Path
     segment_length: int = SEGMENT_LENGTH
+    # Keyframe-aligned segments: list of (start_time_seconds, duration_seconds).
+    # Each segment's start_time IS a source video keyframe — so when ffmpeg
+    # respawns from segments[K].start, fast seek lands exactly on a keyframe,
+    # no Δ snap, no drift. master.m3u8 EXTINF lines reflect these durations.
+    segments: list[tuple[float, float]] = field(default_factory=list)
     # Detected once at session creation. Drives NVENC vs CPU-tonemap argv
     # selection in _ffmpeg_argv; never changes mid-session.
     is_hdr: bool = False
@@ -97,6 +112,124 @@ def probe_duration(path: Path) -> Optional[float]:
     return d if d > 0 else None
 
 
+def _cache_path_for(source_path: Path) -> Path:
+    """Cache file location for source's keyframe data. Keyed by full path
+    hash so different wrappers with the same filename don't collide."""
+    key = hashlib.sha1(str(source_path).encode("utf-8")).hexdigest()[:16]
+    return KEYFRAME_CACHE_DIR / f"{key}.json"
+
+
+def probe_keyframes(source_path: Path) -> Optional[list[float]]:
+    """Extract every video keyframe's PTS time (seconds) via ffprobe. Uses
+    Jellyfin's exact incantation — `-skip_frame nokey` makes the demuxer
+    walk packet headers without decoding, which keeps the scan fast even
+    on multi-hour HEVC sources.
+
+    Cached on disk by source path + size + mtime; first call on a fresh
+    source takes 1-15 seconds, subsequent calls are instant.
+    """
+    try:
+        st = source_path.stat()
+    except OSError:
+        return None
+    cache_path = _cache_path_for(source_path)
+    # Cache hit
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text())
+            if data.get("size") == st.st_size and abs(data.get("mtime", 0) - st.st_mtime) < 1:
+                return list(data["keyframes"])
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            pass  # stale / corrupt → re-probe
+
+    # Cache miss — actually probe.
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-fflags", "+genpts", "-v", "error",
+             "-skip_frame", "nokey",
+             "-show_entries", "packet=pts_time,flags",
+             "-select_streams", "v",
+             "-of", "csv=p=0",
+             str(source_path)],
+            capture_output=True, text=True, timeout=180,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"[keyframe-probe] ffprobe failed for {source_path.name}: {e}", flush=True)
+        return None
+    if result.returncode != 0:
+        print(f"[keyframe-probe] ffprobe rc={result.returncode}: {result.stderr[:200]}", flush=True)
+        return None
+
+    keyframes: list[float] = []
+    for line in result.stdout.splitlines():
+        # Format: "pts_time,flags" where flags contains "K" for keyframes.
+        # With -skip_frame nokey, every emitted packet IS a keyframe, but
+        # the K flag check is cheap belt-and-suspenders.
+        parts = line.strip().split(",")
+        if len(parts) < 2:
+            continue
+        if "K" not in parts[1]:
+            continue
+        try:
+            kf = float(parts[0])
+        except ValueError:
+            continue
+        keyframes.append(kf)
+    keyframes.sort()
+
+    # Persist for next session on the same source.
+    try:
+        KEYFRAME_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps({
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+            "keyframes": keyframes,
+        }))
+    except OSError as e:
+        print(f"[keyframe-probe] cache write failed: {e}", flush=True)
+
+    return keyframes
+
+
+def compute_segments(keyframes: list[float], total_duration: float,
+                     target_seconds: float = SEGMENT_LENGTH) -> list[tuple[float, float]]:
+    """Group keyframes into segments aiming for `target_seconds` each.
+    Replicates Jellyfin's ComputeSegments. Each output (start, duration)
+    has start = a source keyframe, duration = gap to next chosen keyframe.
+
+    Falls back to fixed-length segments if keyframes are missing or sparse
+    (e.g. ffprobe failed, or source has bizarre GOP) so playback still works,
+    just with the original snap behaviour.
+    """
+    if not keyframes:
+        # Fallback: equal-length segments
+        whole = int(total_duration // target_seconds)
+        remainder = total_duration - (whole * target_seconds)
+        out = [(float(i * target_seconds), float(target_seconds)) for i in range(whole)]
+        if remainder > 0.001:
+            out.append((float(whole * target_seconds), remainder))
+        return out
+
+    # Ensure the keyframe list starts at (or near) 0; some sources don't
+    # emit a keyframe with pts=0, but pretty much always have one within
+    # the first second.
+    if keyframes[0] > 0.1:
+        keyframes = [0.0] + keyframes
+
+    segments: list[tuple[float, float]] = []
+    last_kf = 0.0
+    desired_cut = target_seconds
+    for kf in keyframes:
+        if kf >= desired_cut:
+            segments.append((last_kf, kf - last_kf))
+            last_kf = kf
+            desired_cut = kf + target_seconds
+    # Tail segment runs from last cut to end-of-source.
+    if total_duration - last_kf > 0.1:
+        segments.append((last_kf, total_duration - last_kf))
+    return segments
+
+
 def probe_is_hdr(path: Path) -> bool:
     """True iff the source video's transfer characteristic is PQ
     (`smpte2084`, HDR10) or HLG (`arib-std-b67`). NVENC + no tone-mapping
@@ -118,25 +251,25 @@ def probe_is_hdr(path: Path) -> bool:
     return transfer in {"smpte2084", "arib-std-b67"}
 
 
-def generate_master_playlist(duration: float, segment_length: int = SEGMENT_LENGTH) -> str:
-    """VOD playlist listing every segment up-front. Player sees the full
-    timeline; segments are populated on demand by ffmpeg."""
-    whole = int(duration // segment_length)
-    remainder = duration - (whole * segment_length)
+def generate_master_playlist(segments: list[tuple[float, float]]) -> str:
+    """VOD playlist with variable-duration segments aligned to keyframes.
+    Each segment's EXTINF reflects the actual keyframe gap."""
+    if not segments:
+        return "#EXTM3U\n#EXT-X-ENDLIST\n"
+
+    # TARGETDURATION must be >= the largest segment duration (rounded up).
+    target_duration = max(int(d + 0.999) for _, d in segments)
 
     lines = [
         "#EXTM3U",
         "#EXT-X-PLAYLIST-TYPE:VOD",
         "#EXT-X-VERSION:3",
-        f"#EXT-X-TARGETDURATION:{segment_length}",
+        f"#EXT-X-TARGETDURATION:{target_duration}",
         "#EXT-X-MEDIA-SEQUENCE:0",
     ]
-    for i in range(whole):
-        lines.append(f"#EXTINF:{float(segment_length):.6f}, nodesc")
+    for i, (_, duration) in enumerate(segments):
+        lines.append(f"#EXTINF:{duration:.6f}, nodesc")
         lines.append(f"seg_{i}.ts")
-    if remainder > 0.001:
-        lines.append(f"#EXTINF:{remainder:.6f}, nodesc")
-        lines.append(f"seg_{whole}.ts")
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines) + "\n"
 
@@ -144,11 +277,18 @@ def generate_master_playlist(duration: float, segment_length: int = SEGMENT_LENG
 # ── Session lifecycle ─────────────────────────────────────────────────────
 
 def create_session(path: Path) -> HlsSession:
-    """Probe duration, mkdir work_dir, write master.m3u8, return session.
-    No ffmpeg is spawned yet — that happens on the first segment request."""
+    """Probe duration + keyframes, compute segments, write master.m3u8, return
+    session. No ffmpeg is spawned yet — that happens on the first segment
+    request. The keyframe probe is cached on disk, so the second time the
+    same source is opened, this returns instantly."""
     duration = probe_duration(path)
     if duration is None:
         raise ValueError(f"could not probe duration for {path}")
+
+    keyframes = probe_keyframes(path) or []
+    segments = compute_segments(keyframes, duration, target_seconds=SEGMENT_LENGTH)
+    if not segments:
+        raise ValueError(f"could not compute segments for {path}")
 
     sid = uuid.uuid4().hex[:8]
     work_dir = SESSION_DIR / sid
@@ -159,11 +299,12 @@ def create_session(path: Path) -> HlsSession:
         source_path=path,
         duration_seconds=duration,
         work_dir=work_dir,
+        segments=segments,
         is_hdr=probe_is_hdr(path),
     )
-    (work_dir / "master.m3u8").write_text(
-        generate_master_playlist(duration, session.segment_length)
-    )
+    (work_dir / "master.m3u8").write_text(generate_master_playlist(segments))
+    print(f"[hls {sid}] created: duration={duration:.1f}s segs={len(segments)} "
+          f"keyframes={len(keyframes)} hdr={session.is_hdr}", flush=True)
     return session
 
 
@@ -204,20 +345,36 @@ def _ffmpeg_argv(session: HlsSession, start_seg: int) -> list[str]:
     sources go through CPU libx264 with Hable tone-mapping (slow but
     correct — NVENC has no clean tone-map path).
 
-    Segment filenames are numbered from `start_seg` onwards so the player
-    sees a continuous sequence across respawns. See PLAN.md for the
-    absolute segment numbering rationale.
+    `start_seconds` is the start of segment `start_seg` from the
+    keyframe-aligned segments table — i.e. always a source keyframe, so
+    ffmpeg's fast seek lands exactly there with no Δ snap. `-force_key_frames`
+    pins output keyframes at every subsequent segment boundary so the HLS
+    muxer breaks output where we want, not where NVENC's GOP would.
     """
-    start_seconds = start_seg * session.segment_length
+    start_seconds, _ = session.segments[start_seg]
+    # Force keyframes at every boundary from this segment forward. Times are
+    # source-time absolute since we use -copyts.
+    force_kf_times = ",".join(
+        f"{seg_start:.3f}"
+        for seg_start, _ in session.segments[start_seg + 1:]
+    )
+    force_kf_flag = ["-force_key_frames", force_kf_times] if force_kf_times else []
+
     common_tail = [
         "-c:a", "aac", "-b:a", "192k", "-ac", "2",
         # Keep timestamps coherent across respawns so the player doesn't
         # see discontinuity gaps at seg boundaries.
         "-copyts", "-avoid_negative_ts", "disabled",
+        # Pin output keyframes to our segment boundaries (no-op when this
+        # is the last segment of the source).
+        *force_kf_flag,
         "-f", "hls",
+        # hls_time is an upper hint; force_key_frames + the muxer's
+        # split-on-keyframe behaviour determines the real cut points.
         "-hls_time", str(session.segment_length),
         "-hls_list_size", "0",
         "-hls_playlist_type", "vod",
+        "-hls_flags", "split_by_time",
         "-hls_segment_filename", str(session.work_dir / "seg_%d.ts"),
         "-start_number", str(start_seg),
         str(session.work_dir / "internal.m3u8"),
