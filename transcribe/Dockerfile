@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates xz-utils \
         aria2 gcc g++ python3-dev \
     && curl -fsSL \
-        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" \
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz" \
         -o /tmp/ffmpeg.tar.xz \
     && mkdir -p /tmp/ffmpeg \
     && tar xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1 \
