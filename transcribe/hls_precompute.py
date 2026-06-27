@@ -70,17 +70,21 @@ def _transcode(video: Path, derived_dir: Path) -> None:
         str(derived_dir / "master.m3u8"),
     ]
     print(f"[hls] start {video.name} → {derived_dir}", flush=True)
+    # stderr MUST be drained continuously — ffmpeg writes a progress line
+    # every second and the 64 KB kernel pipe buffer fills around 15-25
+    # minutes in, at which point the next stderr write blocks ffmpeg
+    # entirely. communicate() reads the pipe in parallel with proc.wait(),
+    # so the buffer never backs up.
     proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     key = str(derived_dir)
     with _lock:
         _hls_jobs[key] = proc
     try:
-        proc.wait()
+        _, stderr_bytes = proc.communicate()
         if proc.returncode == 0 and is_complete(derived_dir):
             print(f"[hls] done {video.name}", flush=True)
         else:
-            err = (proc.stderr.read().decode("utf-8", errors="replace").strip()
-                   .splitlines()[-3:] if proc.stderr else [])
+            err = stderr_bytes.decode("utf-8", errors="replace").strip().splitlines()[-3:]
             print(f"[hls] FAILED rc={proc.returncode} {video.name}: {' | '.join(err)}",
                   flush=True)
     finally:
