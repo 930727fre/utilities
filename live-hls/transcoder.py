@@ -398,11 +398,6 @@ def _ffmpeg_argv(session: HlsSession, start_seg: int) -> list[str]:
         "-vf", _SDR_NVENC_VF,
         "-c:v", "h264_nvenc", "-preset", "p4",
         "-b:v", "8M", "-profile:v", "high",
-        # Stop NVENC inserting its own keyframes — auto-GOP every ~30 frames
-        # would override our -force_key_frames alignment. With huge -g and
-        # no-scenecut disabled, force_key_frames is the only IDR trigger.
-        "-g", "99999",
-        "-no-scenecut", "1",
         *common_tail,
     ]
 
