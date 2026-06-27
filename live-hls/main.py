@@ -157,6 +157,7 @@ async def status(sid: str):
         "source": str(s.source_path),
         "duration_seconds": s.duration_seconds,
         "segment_length": s.segment_length,
+        "is_hdr": s.is_hdr,
         "proc_alive": proc is not None and proc.poll() is None,
         "proc_pid": proc.pid if (proc is not None and proc.poll() is None) else None,
         "proc_start_seg": s.proc_start_seg,

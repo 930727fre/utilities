@@ -45,6 +45,9 @@ class HlsSession:
     duration_seconds: float
     work_dir: Path
     segment_length: int = SEGMENT_LENGTH
+    # Detected once at session creation. Drives NVENC vs CPU-tonemap argv
+    # selection in _ffmpeg_argv; never changes mid-session.
+    is_hdr: bool = False
     proc: Optional[subprocess.Popen] = None
     proc_start_seg: int = 0
     last_request_at: float = field(default_factory=time.time)
@@ -93,6 +96,27 @@ def probe_duration(path: Path) -> Optional[float]:
     return d if d > 0 else None
 
 
+def probe_is_hdr(path: Path) -> bool:
+    """True iff the source video's transfer characteristic is PQ
+    (`smpte2084`, HDR10) or HLG (`arib-std-b67`). NVENC + no tone-mapping
+    would emit washed-out / over-bright output for these; we route them
+    through the CPU `tonemap=hable` path instead. SDR (BT.709 / unknown)
+    returns False."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-select_streams", "v:0",
+             "-show_entries", "stream=color_transfer",
+             "-of", "default=nw=1:nk=1",
+             str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    transfer = (result.stdout or "").strip().lower()
+    return transfer in {"smpte2084", "arib-std-b67"}
+
+
 def generate_master_playlist(duration: float, segment_length: int = SEGMENT_LENGTH) -> str:
     """VOD playlist listing every segment up-front. Player sees the full
     timeline; segments are populated on demand by ffmpeg."""
@@ -134,6 +158,7 @@ def create_session(path: Path) -> HlsSession:
         source_path=path,
         duration_seconds=duration,
         work_dir=work_dir,
+        is_hdr=probe_is_hdr(path),
     )
     (work_dir / "master.m3u8").write_text(
         generate_master_playlist(duration, session.segment_length)
@@ -154,19 +179,36 @@ def destroy_session(session: HlsSession) -> None:
 
 # ── ffmpeg process management ─────────────────────────────────────────────
 
+_HDR_TONEMAP_VF = (
+    # PQ/HLG → linear light → BT.709 primaries → Hable tone-mapping → BT.709
+    # SDR. Same chain Jellyfin's CPU tone-map path uses. Slap a scale at
+    # the end so 4K HDR gets downscaled to 1080p like everything else.
+    "zscale=t=linear:npl=100,"
+    "format=gbrpf32le,"
+    "zscale=p=bt709,"
+    "tonemap=hable,"
+    "zscale=t=bt709:m=bt709:r=tv,"
+    "scale=-2:1080,"
+    "format=yuv420p"
+)
+
+# Cap output at 1080p — user doesn't care about 4K detail, this keeps
+# segment sizes / NVENC throughput tractable. NV12 is the 8-bit format
+# h264_nvenc requires; the implicit-from-source 10-bit gets coerced here.
+_SDR_NVENC_VF = "scale_cuda=-2:1080:format=nv12"
+
+
 def _ffmpeg_argv(session: HlsSession, start_seg: int) -> list[str]:
-    """Build the ffmpeg argv for an SDR NVENC HLS transcode starting at
-    source time `start_seg * segment_length`, with segment filenames
-    numbered from `start_seg` onwards."""
+    """Build the ffmpeg argv. SDR sources go through NVENC (fast); HDR
+    sources go through CPU libx264 with Hable tone-mapping (slow but
+    correct — NVENC has no clean tone-map path).
+
+    Segment filenames are numbered from `start_seg` onwards so the player
+    sees a continuous sequence across respawns. See PLAN.md for the
+    absolute segment numbering rationale.
+    """
     start_seconds = start_seg * session.segment_length
-    return [
-        "ffmpeg", "-y",
-        "-ss", f"{start_seconds}",
-        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
-        "-i", str(session.source_path),
-        "-vf", "scale_cuda=format=nv12",
-        "-c:v", "h264_nvenc", "-preset", "p4",
-        "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
+    common_tail = [
         "-c:a", "aac", "-b:a", "192k", "-ac", "2",
         # Keep timestamps coherent across respawns so the player doesn't
         # see discontinuity gaps at seg boundaries.
@@ -178,6 +220,28 @@ def _ffmpeg_argv(session: HlsSession, start_seg: int) -> list[str]:
         "-hls_segment_filename", str(session.work_dir / "seg_%d.ts"),
         "-start_number", str(start_seg),
         str(session.work_dir / "internal.m3u8"),
+    ]
+
+    if session.is_hdr:
+        return [
+            "ffmpeg", "-y",
+            "-ss", f"{start_seconds}",
+            "-i", str(session.source_path),
+            "-vf", _HDR_TONEMAP_VF,
+            "-c:v", "libx264", "-preset", "veryfast",
+            "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
+            *common_tail,
+        ]
+
+    return [
+        "ffmpeg", "-y",
+        "-ss", f"{start_seconds}",
+        "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+        "-i", str(session.source_path),
+        "-vf", _SDR_NVENC_VF,
+        "-c:v", "h264_nvenc", "-preset", "p4",
+        "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
+        *common_tail,
     ]
 
 
@@ -194,7 +258,8 @@ def _spawn(session: HlsSession, start_seg: int) -> None:
         stderr=log_fp,
     )
     session.proc_start_seg = start_seg
-    print(f"[hls {session.sid}] spawn pid={session.proc.pid} from seg={start_seg}",
+    path_tag = "HDR/CPU" if session.is_hdr else "NVENC"
+    print(f"[hls {session.sid}] spawn pid={session.proc.pid} from seg={start_seg} [{path_tag}]",
           flush=True)
 
 
