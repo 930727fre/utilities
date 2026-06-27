@@ -732,10 +732,15 @@ def _ensure_english(video: Path, eng_srt_path: Path | None,
     """Make derived/<stem>/english.srt exist (or stamp the error file).
 
     Order: bundled BT srt (free) → OpenSubtitles (cheap) → whisper (expensive).
+
+    If annotated.srt already exists (manually migrated by the user, or
+    produced by a prior pipeline run), english.srt is not needed — playback
+    serves annotated.srt as the English track. Skip the whole stage.
     """
     english = derived_dir / "english.srt"
     english_err = derived_dir / "english.srt.error"
-    if english.exists() or english_err.exists():
+    annotated = derived_dir / "annotated.srt"
+    if english.exists() or english_err.exists() or annotated.exists():
         return
     if str(video) in in_flight_paths:
         return  # whisper job already submitted on a prior tick
