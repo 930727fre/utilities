@@ -12,8 +12,8 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs, quote
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 import bt_torrents
@@ -836,8 +836,12 @@ async def play_resolve(req: PlayResolveRequest):
 
     return {
         "session_id": sid,
-        "live_hls_base": LIVE_HLS_PUBLIC_URL,
-        "master_url": f"{LIVE_HLS_PUBLIC_URL}/api/{sid}/master.m3u8",
+        # All HLS traffic is proxied through transcribe (same-origin) so
+        # iOS Safari's mixed-content blocker doesn't refuse a cross-origin
+        # http:// load. live_hls_base is the same proxy prefix — the
+        # frontend uses it for the session-end DELETE.
+        "live_hls_base": "/api/live-hls",
+        "master_url": f"/api/live-hls/{sid}/master.m3u8",
         "name": video.stem,
         "subtitles": subtitles,
         "resume_at_seconds": _resume_at_seconds(str(video)),
@@ -846,6 +850,65 @@ async def play_resolve(req: PlayResolveRequest):
         "path": str(video),
         "duration_seconds": data.get("duration_seconds"),
     }
+
+
+# ── live-hls reverse proxy ─────────────────────────────────────────────────
+#
+# Same-origin path-based proxy so the browser hits transcribe (HTTPS via
+# cloudflared) instead of a cross-origin http://live-hls. Required for
+# iOS Safari, which strictly blocks mixed-content media even when the
+# user navigated to an explicit hostname.
+#
+# Maps:
+#   GET    /api/live-hls/<sid>/master.m3u8 → GET    live-hls/api/<sid>/master.m3u8
+#   GET    /api/live-hls/<sid>/seg_N.ts    → GET    live-hls/api/<sid>/seg_N.ts
+#   DELETE /api/live-hls/<sid>             → DELETE live-hls/api/<sid>
+#   (status endpoint not proxied — only the player needs the others)
+
+@app.get("/api/live-hls/{tail:path}")
+async def live_hls_proxy_get(tail: str, request: Request):
+    upstream = f"{LIVE_HLS_URL}/api/{tail}"
+    params = dict(request.query_params)
+    # Long read timeout — live-hls's _wait_for_seg can block ~60s while
+    # NVENC spins up on a cold seek.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=90.0))
+    upstream_resp = await client.send(
+        client.build_request("GET", upstream, params=params),
+        stream=True,
+    )
+    drop = {"content-length", "transfer-encoding", "connection",
+            "keep-alive", "content-encoding"}
+    headers = {k: v for k, v in upstream_resp.headers.items() if k.lower() not in drop}
+
+    async def body():
+        try:
+            async for chunk in upstream_resp.aiter_raw():
+                yield chunk
+        finally:
+            await upstream_resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        body(),
+        status_code=upstream_resp.status_code,
+        headers=headers,
+        media_type=upstream_resp.headers.get("content-type"),
+    )
+
+
+@app.delete("/api/live-hls/{tail:path}")
+async def live_hls_proxy_delete(tail: str):
+    """Session cleanup on modal close. Forward the DELETE so live-hls
+    kills the ffmpeg + rmtree the work dir."""
+    upstream = f"{LIVE_HLS_URL}/api/{tail}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.delete(upstream)
+        return Response(status_code=r.status_code, content=r.content,
+                        media_type=r.headers.get("content-type"))
+    except httpx.HTTPError:
+        # idle GC will reap it eventually if this fails
+        return {"ok": False}
 
 
 class PlayProgressEvent(BaseModel):

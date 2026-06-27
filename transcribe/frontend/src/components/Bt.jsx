@@ -419,7 +419,7 @@ function PlayerModal({ path, name, onClose }) {
         {error && <div style={styles.modalError}>{error}</div>}
         {!resolved && !error && <div style={styles.modalLoading}>Resolving…</div>}
         {resolved && (
-          <video ref={videoRef} controls autoPlay crossOrigin="anonymous" style={styles.video}>
+          <video ref={videoRef} controls autoPlay playsInline crossOrigin="anonymous" style={styles.video}>
             {resolved.subtitles.map((s, i) => (
               <track key={s.src} kind="subtitles" label={s.label} srcLang={s.srclang}
                 src={s.src} default={i === 0} />
