@@ -89,11 +89,17 @@
   </span>
 </div>
 
-<h3>Auto test suite</h3>
+<h3>Auto test suites</h3>
 <div class="ctrl">
-  <button onclick="runSuite()">Run full suite</button>
+  <button onclick="runSuite()">Suite A: linear + cached seeks</button>
   <span style="color: var(--muted); font-size: 11px;">
-    seg_0 → seg_5 → seg_50 → seg_500 → seg_100 → status checks between each
+    seg_0 → 5 → 50 → 500 → 100 → 101. cached cases hit fast path.
+  </span>
+</div>
+<div class="ctrl">
+  <button onclick="runUncachedSuite()">Suite B: uncached backward seek</button>
+  <span style="color: var(--muted); font-size: 11px;">
+    fresh session → seg_500 → seg_50 (no cache). proves real respawn-on-backward.
   </span>
 </div>
 
@@ -237,6 +243,60 @@ async function runSuite() {
   for (const r of results) {
     const tag = r.status === 200 ? 'ok' : 'err';
     log(`  ${r.label.padEnd(34)} seg_${String(r.seg).padStart(3)} ${r.status} ${r.ms}ms`, tag);
+  }
+}
+
+async function runUncachedSuite() {
+  // Hard reset so we know nothing is cached: delete current session,
+  // start a fresh one, never request seg_0..seg_499 so they can't sit on
+  // disk and cover for a broken respawn.
+  if (sid) await stopSession();
+  log('starting fresh session for uncached suite…', 'info');
+  await start();
+  if (!sid) return;
+  log('━━━ uncached suite begin ━━━', 'info');
+
+  log('• jump straight to seg_500 (no segments cached yet)', 'info');
+  const r1 = await reqSeg(500);
+  const s1 = await getStatusReturn();
+  const respawnedTo500 = s1 && s1.proc_start_seg === 500;
+  log(`  proc_start_seg after seg_500: ${s1?.proc_start_seg} (expected 500)`,
+      respawnedTo500 ? 'ok' : 'err');
+
+  log('• now seg_50 — real backward seek to uncached position', 'info');
+  const r2 = await reqSeg(50);
+  const s2 = await getStatusReturn();
+  const respawnedTo50 = s2 && s2.proc_start_seg === 50;
+  log(`  proc_start_seg after seg_50: ${s2?.proc_start_seg} (expected 50)`,
+      respawnedTo50 ? 'ok' : 'err');
+
+  log('• one more, seg_51 — should be continuation (no respawn)', 'info');
+  const r3 = await reqSeg(51);
+  const s3 = await getStatusReturn();
+  const stayedAt50 = s3 && s3.proc_start_seg === 50;
+  log(`  proc_start_seg after seg_51: ${s3?.proc_start_seg} (expected still 50)`,
+      stayedAt50 ? 'ok' : 'err');
+
+  log('━━━ uncached suite end ━━━', 'info');
+  log('summary:', 'info');
+  log(`  seg_500 cold jump  ${r1?.status} ${r1?.ms}ms  respawn→500: ${respawnedTo500 ? 'PASS' : 'FAIL'}`,
+      respawnedTo500 ? 'ok' : 'err');
+  log(`  seg_50 backward    ${r2?.status} ${r2?.ms}ms  respawn→50: ${respawnedTo50 ? 'PASS' : 'FAIL'}`,
+      respawnedTo50 ? 'ok' : 'err');
+  log(`  seg_51 cont        ${r3?.status} ${r3?.ms}ms  stayed@50: ${stayedAt50 ? 'PASS' : 'FAIL'}`,
+      stayedAt50 ? 'ok' : 'err');
+}
+
+async function getStatusReturn() {
+  if (!sid) return null;
+  try {
+    const r = await fetch('/api/' + sid + '/status');
+    if (!r.ok) return null;
+    const data = await r.json();
+    setStat(data);
+    return data;
+  } catch (e) {
+    return null;
   }
 }
 </script>
