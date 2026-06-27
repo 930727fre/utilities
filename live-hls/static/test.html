@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>live-hls API test runner</title>
+<style>
+  :root {
+    --bg: #1c1c1e;
+    --surface: #2c2c2e;
+    --border: #3a3a3c;
+    --text: #e8e3d9;
+    --muted: #aeaeb2;
+    --accent: #c79968;
+    --ok: #6bc46d;
+    --err: #ff6b6b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: var(--mono); background: var(--bg); color: var(--text);
+    margin: 0; padding: 20px; max-width: 1200px;
+    margin-left: auto; margin-right: auto;
+  }
+  h2 { font-size: 16px; color: var(--muted); margin-top: 0; }
+  h3 { font-size: 13px; color: var(--accent); margin: 20px 0 8px; }
+  input.path {
+    width: 100%; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); padding: 8px 12px;
+    font-family: var(--mono); font-size: 13px; outline: none;
+    margin-bottom: 8px;
+  }
+  input.path:focus { border-color: var(--accent); }
+  button {
+    background: var(--accent); color: var(--bg); border: none;
+    padding: 8px 16px; cursor: pointer; font-family: var(--mono);
+    font-size: 13px; font-weight: 700;
+  }
+  button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: 0.3; cursor: not-allowed; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 12px 16px; font-size: 12px; min-height: 100px;
+  }
+  .panel pre { margin: 0; white-space: pre-wrap; color: var(--muted); }
+  .log {
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 12px 16px; font-size: 11px; line-height: 1.5;
+    max-height: 500px; overflow-y: auto; margin-top: 16px;
+  }
+  .log .row { display: flex; gap: 12px; align-items: baseline; padding: 2px 0; }
+  .log .t { color: var(--muted); flex-shrink: 0; min-width: 80px; }
+  .log .msg { color: var(--text); flex: 1; }
+  .log .ok { color: var(--ok); }
+  .log .err { color: var(--err); }
+  .log .info { color: var(--accent); }
+  .ctrl { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
+  .ctrl label { font-size: 12px; color: var(--muted); }
+  .ctrl input.n {
+    width: 80px; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); padding: 4px 8px;
+    font-family: var(--mono); font-size: 12px; outline: none;
+  }
+</style>
+</head>
+<body>
+<h2>live-hls API test runner</h2>
+<p style="color: var(--muted); font-size: 12px;">
+  Bypasses hls.js + network buffering — just fires HTTP requests directly
+  at the backend so you can verify backend logic on a flaky connection.
+</p>
+
+<input class="path" id="path" placeholder="/media/wrapper/episode.mkv">
+
+<h3>Quick actions</h3>
+<div class="ctrl">
+  <button onclick="start()">Start session</button>
+  <button class="secondary" onclick="stopSession()">Delete session</button>
+  <button class="secondary" onclick="getStatus()">Get status</button>
+</div>
+
+<h3>Manual segment request</h3>
+<div class="ctrl">
+  <label>seg #</label>
+  <input class="n" type="number" id="segN" value="0" min="0">
+  <button onclick="reqSeg()">Request seg_N.ts</button>
+  <span style="color: var(--muted); font-size: 11px;">
+    timing only — body discarded
+  </span>
+</div>
+
+<h3>Auto test suite</h3>
+<div class="ctrl">
+  <button onclick="runSuite()">Run full suite</button>
+  <span style="color: var(--muted); font-size: 11px;">
+    seg_0 → seg_5 → seg_50 → seg_500 → seg_100 → status checks between each
+  </span>
+</div>
+
+<div class="grid">
+  <div>
+    <h3 style="margin-top: 8px;">Session</h3>
+    <div class="panel"><pre id="sess">no session</pre></div>
+  </div>
+  <div>
+    <h3 style="margin-top: 8px;">Last status</h3>
+    <div class="panel"><pre id="stat">—</pre></div>
+  </div>
+</div>
+
+<h3>Log</h3>
+<div class="log" id="log"></div>
+
+<script>
+let sid = null;
+
+const $ = id => document.getElementById(id);
+
+function log(msg, cls = '') {
+  const row = document.createElement('div');
+  row.className = 'row';
+  const t = document.createElement('div');
+  t.className = 't';
+  t.textContent = new Date().toLocaleTimeString('en-US', { hour12: false }) + '.' +
+                  String(new Date().getMilliseconds()).padStart(3, '0');
+  const m = document.createElement('div');
+  m.className = 'msg ' + cls;
+  m.textContent = msg;
+  row.appendChild(t);
+  row.appendChild(m);
+  $('log').appendChild(row);
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+function setSess(data) {
+  $('sess').textContent = data ? JSON.stringify(data, null, 2) : 'no session';
+}
+
+function setStat(data) {
+  $('stat').textContent = data ? JSON.stringify(data, null, 2) : '—';
+}
+
+async function start() {
+  const path = $('path').value.trim();
+  if (!path) { log('paste a path first', 'err'); return; }
+  if (sid) await stopSession();
+
+  log('POST /api/start ' + path, 'info');
+  const t0 = performance.now();
+  const r = await fetch('/api/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path })
+  });
+  const dt = (performance.now() - t0).toFixed(0);
+  if (!r.ok) {
+    log('start FAILED ' + r.status + ' ' + (await r.text()), 'err');
+    return;
+  }
+  const data = await r.json();
+  sid = data.session_id;
+  setSess(data);
+  log(`session created sid=${sid} duration=${data.duration_seconds.toFixed(0)}s [${dt}ms]`, 'ok');
+}
+
+async function stopSession() {
+  if (!sid) return;
+  log('DELETE /api/' + sid, 'info');
+  try { await fetch('/api/' + sid, { method: 'DELETE' }); } catch (e) {}
+  log('session deleted', 'ok');
+  sid = null;
+  setSess(null);
+  setStat(null);
+}
+
+async function getStatus() {
+  if (!sid) { log('no session', 'err'); return; }
+  const r = await fetch('/api/' + sid + '/status');
+  if (!r.ok) { log('status ' + r.status, 'err'); return; }
+  const data = await r.json();
+  setStat(data);
+  log(`status: proc_alive=${data.proc_alive} start_seg=${data.proc_start_seg} current=${data.current_seg} idle=${data.idle_seconds}s`);
+}
+
+async function reqSeg(n) {
+  if (!sid) { log('no session', 'err'); return null; }
+  const segN = n ?? parseInt($('segN').value, 10);
+  log(`GET seg_${segN}.ts`, 'info');
+  const t0 = performance.now();
+  let r;
+  try {
+    r = await fetch(`/api/${sid}/seg_${segN}.ts`);
+  } catch (e) {
+    log(`seg_${segN} fetch FAILED: ${e.message}`, 'err');
+    return null;
+  }
+  const dt = (performance.now() - t0).toFixed(0);
+  // Drain body so connection closes / cache headers handle properly
+  if (r.ok) {
+    const blob = await r.blob();
+    log(`seg_${segN}.ts ${r.status} ${(blob.size/1024).toFixed(0)}KiB [${dt}ms]`, 'ok');
+  } else {
+    log(`seg_${segN}.ts ${r.status} [${dt}ms]`, 'err');
+  }
+  return { status: r.status, ms: parseFloat(dt) };
+}
+
+async function runSuite() {
+  if (!sid) {
+    log('starting session for suite…', 'info');
+    await start();
+    if (!sid) return;
+  }
+  log('━━━ suite begin ━━━', 'info');
+
+  const steps = [
+    { label: 'cold start (seg_0)',          seg: 0 },
+    { label: 'continuation (seg_5)',        seg: 5 },
+    { label: 'small forward seek (seg_50)', seg: 50 },
+    { label: 'large forward seek (seg_500)', seg: 500 },
+    { label: 'backward seek (seg_100)',     seg: 100 },
+    { label: 'continuation (seg_101)',      seg: 101 },
+  ];
+
+  const results = [];
+  for (const step of steps) {
+    log('• ' + step.label, 'info');
+    const r = await reqSeg(step.seg);
+    await getStatus();
+    results.push({ ...step, ...r });
+    // Small pause so backend state is observable
+    await new Promise(res => setTimeout(res, 200));
+  }
+
+  log('━━━ suite end ━━━', 'info');
+  log('summary:', 'info');
+  for (const r of results) {
+    const tag = r.status === 200 ? 'ok' : 'err';
+    log(`  ${r.label.padEnd(34)} seg_${String(r.seg).padStart(3)} ${r.status} ${r.ms}ms`, tag);
+  }
+}
+</script>
+</body>
+</html>
