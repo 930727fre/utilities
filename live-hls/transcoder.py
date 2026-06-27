@@ -230,7 +230,7 @@ def _ffmpeg_argv(session: HlsSession, start_seg: int) -> list[str]:
             "-i", str(session.source_path),
             "-vf", _HDR_TONEMAP_VF,
             "-c:v", "libx264", "-preset", "veryfast",
-            "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
+            "-b:v", "8M", "-profile:v", "high",
             *common_tail,
         ]
 
@@ -241,7 +241,7 @@ def _ffmpeg_argv(session: HlsSession, start_seg: int) -> list[str]:
         "-i", str(session.source_path),
         "-vf", _SDR_NVENC_VF,
         "-c:v", "h264_nvenc", "-preset", "p4",
-        "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
+        "-b:v", "8M", "-profile:v", "high",
         *common_tail,
     ]
 
