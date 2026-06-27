@@ -33,9 +33,10 @@ MEDIA_ROOTS = [Path(p.strip()) for p in os.environ.get("MEDIA_ROOTS", "/media").
 SESSION_IDLE_TIMEOUT = float(os.environ.get("SESSION_IDLE_TIMEOUT", "60"))
 
 # How long /api/{sid}/seg_N.ts waits for a not-yet-existing segment file
-# before returning 504. NVENC cold start on HEVC source is ~3-10 seconds;
-# 30s gives slack for slow seeks.
-WAIT_TIMEOUT = 30.0
+# before returning 504. NVENC cold start on a long HEVC source can hit
+# 15-30 seconds for far-in seeks (decoder has to keyframe-snap from the
+# requested -ss before any output appears). 60s gives plenty of slack.
+WAIT_TIMEOUT = 60.0
 
 
 @dataclass
@@ -389,4 +390,9 @@ def serve_segment(session: HlsSession, seg: int) -> Optional[Path]:
         # else: ffmpeg is close to or just behind seg; the wait below
         # will return as soon as ffmpeg catches up.
 
-    return _wait_for_seg(session, seg_path)
+    result = _wait_for_seg(session, seg_path)
+    if result is None:
+        cur = current_ffmpeg_index(session)
+        print(f"[hls {session.sid}] TIMEOUT waiting for seg_{seg} "
+              f"(current_idx={cur}, start_seg={session.proc_start_seg})", flush=True)
+    return result
