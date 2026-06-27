@@ -1,151 +1,157 @@
-# hls — Jellyfin replacement for transcribe playback
+# transcribe pipeline refactor: decouple bt/ from derived/
 
-A thin Python+ffmpeg HLS layer inside transcribe-app that **pre-computes**
-each video to HLS once (right after `bt_filter` finishes) and then serves
-from cache forever. Replaces Jellyfin's HLS endpoint + UserData KV
-without the ~2 GB Jellyfin container.
+The bt-tab pipeline today writes annotation / translation / playback artifacts
+back into `data/bt/<wrapper>/`, mixed in with the torrent's own files. This
+created the disaster where `bt_filter`'s cleanup pass deleted ~11 wrappers'
+worth of derived SRTs. The new architecture decouples the two:
 
-This file is a spec for a follow-up session. Read it cold — assume zero
-context from the prior conversation.
+- `data/bt/<wrapper>/` — **read-only** after aria2 finishes. Nothing in our
+  pipeline ever writes here again.
+- `data/derived/<wrapper>/<stem>/` — every pipeline product lives here:
+  annotated SRT, Chinese SRT, HLS playlist + segments.
 
-## Goal
+The HLS pre-compute layer (which replaces Jellyfin entirely) is one of the
+stages writing into `derived/`. This doc covers both the wider decoupling and
+the HLS specifics.
 
-transcribe's bt-tab ▸ button currently:
+Read this cold — assume zero prior conversation context.
 
-1. POST `/api/play/resolve` (transcribe) → looks up Jellyfin item id by file path
-2. GET `/api/play/proxy/{item_id}/master.m3u8` (transcribe → Jellyfin HLS)
-3. POST `/api/play/progress` (transcribe → Jellyfin UserData write) + read on resolve
+## Architectural rule
 
-Replace all three with: a static HLS cache directory + a small
-`progress.json`.
+Anyone touching the pipeline should keep these invariants:
+
+1. `data/bt/` is mounted read-only. The only writer is aria2c during download.
+2. `bt_filter` is a **scanner**, not a mover or deleter. It runs an LLM call
+   to pair videos with English SRTs, then ensures the corresponding
+   `derived/<wrapper>/<stem>/` directories exist. No `bt/` writes ever.
+3. Pairing lives **in memory only**. No `manifest.json`, no symlinks. The
+   wrapper-tree fingerprint is stable (BT is read-only), so the LLM gives
+   the same pairing on every tick. Re-pair on every tick (~$0.001 per call).
+4. Stage completion is signaled by **file presence in `derived/`**:
+   `annotated.srt` exists → annotation done; `master.m3u8` ends with
+   `#EXT-X-ENDLIST` → HLS done; `zh.srt` exists → translation done.
 
 ## Non-goals (explicit)
 
-- No Apple TV / iOS native Jellyfin app compatibility (user uses Infuse on iOS, SMB+IINA on Mac)
+- No Apple TV / iOS native Jellyfin app compatibility (user uses Infuse on iOS, SMB+IINA on Mac — both being replaced by the browser player)
 - No multi-user / auth (single-user)
 - No Jellyfin REST API surface compatibility
 - No DLNA / Chromecast / DVR / live TV
 - No library scanner / metadata scraping
-- No HW acceleration (CPU software encode only)
+- No HW acceleration (CPU software encode only — see "Out of scope" for NVENC notes)
 - No adaptive bitrate (single HLS rendition)
 - No on-demand live transcoding logic — everything is pre-computed
 
-## Why pre-compute (the architectural shift)
+## Derived data layout
 
-The prior version of this plan had three implementation phases: v1
-(stream as ffmpeg writes), v1.5 (mid-stream scrubber seek via absolute
-segment numbering), v2 (HW accel etc.). The scrubber-seek path alone
-was ~80% of the engineering complexity.
+```
+data/
+├── bt/<wrapper>/                              ← read-only
+│   ├── Season 1/episode01.mkv
+│   ├── Season 1/episode01.srt                 ← BT-bundled English (if present)
+│   └── ...
+└── derived/<wrapper>/<stem>/
+    ├── annotated.srt                          ← whisper + Claude ※ markers
+    ├── zh.srt                                  ← Gemini translation
+    ├── master.m3u8                            ← HLS playlist (ENDLIST = done)
+    └── seg_*.ts                                ← HLS segments
+```
 
-Pre-computing every video to HLS as part of the post-download pipeline
-**eliminates that entire complexity**:
-
-- All segments exist as static files → scrubber works for free
-- No `ffmpeg` lifecycle management → no kill / respawn / lock dance
-- No absolute segment numbering trick — playlist is static and complete
-- No session management — cache files outlive any single playback
-- Playback endpoint becomes "FileResponse if it exists, else 404"
-
-The cost is disk + upfront CPU. Both are fine for this setup:
-- 148 GB BT library × ~60% compression ratio → ~90 GB cache
-- Host disk has 502 GB free
-- CPU is idle most of the time; ffmpeg can transcode in background
+`<stem>` is the source video's filename without extension. Picking it
+straight from the video makes the cache human-debuggable (`ls derived/`
+tells you exactly which video is which).
 
 ## Pipeline integration
-
-The post-download workflow already runs as background stages keyed off
-filesystem state (`bt_filter` triggered by `.aria2` gone, annotation
-triggered by SRT without `※ annotated`, etc.). HLS pre-compute fits in
-as another stage:
 
 ```
 aria2 done (.aria2 gone)
     ↓
-bt_filter pass (~10 sec)
-  - LLM: srt_matches + bonus_dirs
-  - Flatten videos + pipeline siblings to root
-  - Whitelist delete
-  - Writes .filtered sentinel
+bt_filter scan tick (every 30s)
+  - For each wrapper in bt/:
+      LLM pair → in-memory [(stem, video_path, eng_srt_path), ...]
+      For each pairing:
+        mkdir -p derived/<wrapper>/<stem>/
+        Dispatch missing stages (skip if file already present)
     ↓
-whisper / OS / annotate              ┐
-hls_precompute (NEW, per video)      │  parallel background stages
-zh translate (per user click)        ┘
+Stages (parallel, each writing into derived/<wrapper>/<stem>/):
+  ┌─ whisper + annotate → annotated.srt
+  ├─ hls_precompute     → master.m3u8 + seg_*.ts
+  └─ zh translate       → zh.srt  (triggered by user click on row's 中 button)
 ```
 
-HLS pre-compute runs in its OWN executor / loop — does NOT block
-`bt_filter`. A 13-episode season's transcode is ~10 hours of CPU; that
-should never sit inline in the scan tick.
+`bt_filter` is the **single dispatch surface**. It doesn't transcode or
+annotate itself — it just identifies what work needs doing and submits
+to per-stage executors. Each executor's in-memory registry handles
+"in-flight" vs "queued" vs "done" so the scan tick can be idempotent.
 
-## Scope: 3 endpoints to deliver
+## bt_filter (rewritten shape)
 
-| transcribe needs | new endpoint | replaces |
-|------------------|--------------|----------|
-| video path → cache identifier | (none — derive from path itself) | `GET /Users` + `GET /Items` |
-| read last position | `GET /api/hls/progress?path=...` | `GET /Users/{u}/Items/{i}` |
-| write current position | `POST /api/hls/progress` | `POST /UserItems/{i}/UserData` |
-| HLS playlist + segments | `GET /api/hls/cache/{wrapper}/{stem}/{filename}` | `GET /Videos/{i}/master.m3u8` + proxy chain |
-
-`/api/play/resolve` keeps its shape but returns
-`master_url = /api/hls/cache/{wrapper}/{stem}/master.m3u8`.
-
-## Cache directory layout
-
-```
-transcribe/data/hls_cache/
-└── <wrapper>/
-    └── <video_stem>/
-        ├── master.m3u8        ← static when transcode finishes
-        ├── seg_0.ts
-        ├── seg_1.ts
-        └── ...
-```
-
-The wrapper / stem naming keeps the cache human-debuggable (you can
-`ls` and see which video is which). For the cache id we use the
-**transcribe-side relative path**: a video at
-`/bt/The.Sopranos.S05.../E01.mkv` maps to
-`hls_cache/The.Sopranos.S05.../E01/`. No hash, no opaque id.
-
-## "Is it done?" — no sentinel needed
-
-ffmpeg writes `#EXT-X-ENDLIST` at the end of `master.m3u8` only when
-the whole transcode completes. Use the playlist itself as the
-completion marker — no `.complete` file to write or race against:
+Old code did: LLM pair → flatten videos+srts to wrapper root → whitelist
+delete → write `.filtered` sentinel. **All gone.** New code:
 
 ```python
-def is_complete(cache_dir: Path) -> bool:
-    m = cache_dir / "master.m3u8"
+def scan_and_dispatch():
+    for wrapper in BT_ROOT.iterdir():
+        if not download_complete(wrapper):       # .aria2 still there
+            continue
+        pairings = pair_wrapper_via_llm(wrapper) # [(stem, video, eng_srt), ...]
+        for stem, video, eng_srt in pairings:
+            derived = DERIVED_ROOT / wrapper.name / stem
+            derived.mkdir(parents=True, exist_ok=True)
+            dispatch_missing_stages(video, eng_srt, derived)
+```
+
+`dispatch_missing_stages` looks at `derived/` for `annotated.srt`,
+`master.m3u8` (ENDLIST), `zh.srt` and only submits work for what's
+missing AND not currently in flight.
+
+Lines removed compared to old `bt_filter.py`:
+- `_pipeline_siblings()`: gone (no flatten, no sibling preservation worry)
+- The whitelist delete loop: gone
+- The `bonus_dirs` mis-classification guard: gone (no deletion = no risk)
+- `.filtered` sentinel write: gone (derived/<wrapper>/<stem>/ existence is the signal)
+
+## HLS pre-compute: "Is it done?" — no extra sentinel
+
+ffmpeg appends `#EXT-X-ENDLIST` to `master.m3u8` only after the entire
+transcode completes. Use that as the completion marker:
+
+```python
+def is_hls_complete(derived_dir: Path) -> bool:
+    m = derived_dir / "master.m3u8"
     if not m.exists():
         return False
     return b"#EXT-X-ENDLIST" in m.read_bytes()
 ```
 
-## Crash recovery: in-memory job registry
+No separate `.complete` file means no two-write atomicity issue.
 
-`is_complete()` distinguishes "done" from "not done", but not "in
-progress" from "crashed mid-write". For that, the precompute loop keeps
-an in-memory map:
+## Crash recovery: in-memory job registries
 
+Each stage owns its own:
 ```python
-_hls_jobs: dict[str, subprocess.Popen] = {}  # cache_dir str → ffmpeg proc
+_hls_jobs:      dict[str, subprocess.Popen] = {}   # derived_dir → ffmpeg
+_annotate_jobs: dict[str, Future]           = {}   # derived_dir → future
 ```
 
-Scan tick logic for each video in a `.filtered` wrapper:
+Scan tick logic per stage:
 
-| cache state | registry state | action |
-|-------------|----------------|--------|
-| `is_complete()` True | – | skip (done) |
-| dir doesn't exist | – | queue new ffmpeg |
-| dir exists, no ENDLIST | job in registry, proc alive | skip (in progress) |
-| dir exists, no ENDLIST | not in registry / proc dead | rmtree dir + queue new ffmpeg (debris from prior crash) |
+| derived state         | registry state         | action                                   |
+|-----------------------|------------------------|------------------------------------------|
+| stage product present | –                      | skip (done)                              |
+| product missing       | in registry, alive     | skip (in flight)                         |
+| product missing       | absent / proc dead     | rmtree partial debris if any, submit job |
 
-Container restart clears `_hls_jobs`; the next scan tick automatically
-re-queues anything that didn't get an `#EXT-X-ENDLIST`. Fully idempotent.
+Container restart clears registries; next tick re-dispatches whatever's
+incomplete. Fully idempotent.
 
-## ffmpeg argv
+## ffmpeg argv (validated on macOS 2026-06-27)
 
-Validated v1 args (Sopranos S05 HEVC 10-bit was the testbed; needs
-`-pix_fmt yuv420p` to coerce libx264 to 8-bit output):
+Tested working on: HBO 1080p (Sopranos/Wire), modern web-dl (Chernobyl,
+Spider-Verse), YIFY rip (Michael 2026). Plays cleanly in Safari native
+HLS and Chrome (which also turns out to support native HLS on macOS via
+AVFoundation). hls.js fallback path verified by code review only — will
+be exercised in production on Linux Chrome / Firefox / mobile.
 
 ```sh
 ffmpeg -y \
@@ -154,8 +160,8 @@ ffmpeg -y \
   -b:v 8M -profile:v high -level 4.1 -preset veryfast \
   -c:a aac -b:a 192k -ac 2 \
   -f hls -hls_time 6 -hls_list_size 0 -hls_playlist_type vod \
-  -hls_segment_filename '<cache_dir>/seg_%d.ts' \
-  '<cache_dir>/master.m3u8'
+  -hls_segment_filename '<derived_dir>/seg_%d.ts' \
+  '<derived_dir>/master.m3u8'
 ```
 
 Known edge cases and their fixes (only add when actually hit):
@@ -186,54 +192,45 @@ Known edge cases and their fixes (only add when actually hit):
 ```python
 # transcribe/hls_precompute.py
 
-import subprocess
-import threading
+import subprocess, threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-CACHE_ROOT = Path("/app/data/hls_cache")
-hls_executor = ThreadPoolExecutor(max_workers=1)  # one transcode at a time
+DERIVED_ROOT = Path("/app/data/derived")
+hls_executor = ThreadPoolExecutor(max_workers=1)
 _hls_jobs: dict[str, subprocess.Popen] = {}
 _lock = threading.Lock()
 
 
-def _cache_dir_for(video: Path) -> Path:
-    wrapper = video.relative_to("/bt").parts[0]
-    return CACHE_ROOT / wrapper / video.stem
-
-
-def is_complete(cache_dir: Path) -> bool:
-    m = cache_dir / "master.m3u8"
+def is_complete(derived_dir: Path) -> bool:
+    m = derived_dir / "master.m3u8"
     if not m.exists():
         return False
     return b"#EXT-X-ENDLIST" in m.read_bytes()
 
 
-def is_in_flight(cache_dir: Path) -> bool:
-    key = str(cache_dir)
+def is_in_flight(derived_dir: Path) -> bool:
     with _lock:
-        proc = _hls_jobs.get(key)
+        proc = _hls_jobs.get(str(derived_dir))
     return proc is not None and proc.poll() is None
 
 
-def transcode(video: Path) -> None:
-    """Run synchronously in the executor thread."""
-    cache_dir = _cache_dir_for(video)
-    cache_dir.mkdir(parents=True, exist_ok=True)
+def transcode(video: Path, derived_dir: Path) -> None:
+    """Synchronous; call inside the executor."""
+    derived_dir.mkdir(parents=True, exist_ok=True)
     args = [
-        "ffmpeg", "-y",
-        "-i", str(video),
+        "ffmpeg", "-y", "-i", str(video),
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
         "-preset", "veryfast",
         "-c:a", "aac", "-b:a", "192k", "-ac", "2",
         "-f", "hls", "-hls_time", "6", "-hls_list_size", "0",
         "-hls_playlist_type", "vod",
-        "-hls_segment_filename", str(cache_dir / "seg_%d.ts"),
-        str(cache_dir / "master.m3u8"),
+        "-hls_segment_filename", str(derived_dir / "seg_%d.ts"),
+        str(derived_dir / "master.m3u8"),
     ]
     proc = subprocess.Popen(args, stderr=subprocess.PIPE)
-    key = str(cache_dir)
+    key = str(derived_dir)
     with _lock:
         _hls_jobs[key] = proc
     try:
@@ -243,31 +240,28 @@ def transcode(video: Path) -> None:
             _hls_jobs.pop(key, None)
 
 
-def queue_pending() -> None:
-    """Called from main.py's bt scan loop. Walk filtered wrappers,
-    queue any videos whose cache isn't complete and isn't in flight.
-    Debris (no ENDLIST + no live proc) is rm-rf'd first."""
+def ensure(video: Path, derived_dir: Path) -> None:
+    """Called by bt_filter's dispatch loop. Idempotent."""
     import shutil
-    for wrapper in Path("/bt").iterdir():
-        if not (wrapper / ".filtered").exists():
-            continue
-        for video in wrapper.iterdir():
-            if video.suffix.lower() not in {".mkv", ".mp4", ".ts", ".avi", ".mov", ".webm"}:
-                continue
-            cache_dir = _cache_dir_for(video)
-            if is_complete(cache_dir):
-                continue
-            if is_in_flight(cache_dir):
-                continue
-            if cache_dir.exists():
-                shutil.rmtree(cache_dir)  # debris
-            hls_executor.submit(transcode, video)
+    if is_complete(derived_dir):
+        return
+    if is_in_flight(derived_dir):
+        return
+    # debris: derived dir exists with partial segments, no live proc
+    if derived_dir.exists() and any(derived_dir.glob("seg_*.ts")):
+        for f in derived_dir.glob("seg_*.ts"):
+            f.unlink()
+        (derived_dir / "master.m3u8").unlink(missing_ok=True)
+    hls_executor.submit(transcode, video, derived_dir)
 ```
 
-Plus 3 endpoints in main.py:
-- `GET /api/hls/cache/{wrapper}/{stem}/{filename}` → `FileResponse` from cache (404 if not there)
-- `GET /api/hls/progress?path=...` → read `progress.json`
-- `POST /api/hls/progress` → write `progress.json`
+Endpoints in `main.py`:
+- `GET /api/play/proxy/{wrapper}/{stem}/{filename}` → `FileResponse` from
+  `derived/<wrapper>/<stem>/<filename>` (404 if missing)
+- `GET /api/play/sub?wrapper=...&stem=...` → serve `derived/<wrapper>/<stem>/zh.srt`
+  converted to VTT (or 404)
+- `POST /api/play/resolve {path}` → returns `{master_url, subtitles, resume_at_seconds, ready}`
+- `POST /api/play/progress` → writes `data/progress.json`
 
 ## Progress storage
 
@@ -277,53 +271,67 @@ Plus 3 endpoints in main.py:
 {
   "/bt/The.Sopranos.S05.../E01.mkv": {
     "position_seconds": 412.7,
-    "updated_at": "2026-06-26T15:42:01Z"
+    "updated_at": "2026-06-27T15:42:01Z"
   }
 }
 ```
 
-- Write on every progress beat (1 s cadence, same as today)
+- Write on every progress beat (1 s cadence)
 - Read on `/api/play/resolve` to compute `resume_at_seconds`
 - Atomic via temp-file + `os.replace`
-- JSON is fine until ~10k entries — switch to SQLite if it ever matters
+- JSON until ~10k entries — switch to SQLite if it ever matters
 
 ## What changes in transcribe codebase
 
 **Remove**:
-- `JELLYFIN_URL`, `JELLYFIN_API_KEY`, `_jellyfin_user_id` and related env in `docker-compose.yml`
+- `JELLYFIN_URL`, `JELLYFIN_API_KEY`, `_jellyfin_user_id` env + helpers
 - `_jellyfin_index`, `_refresh_jellyfin_index`, `_resolve_item_id`, `_transcribe_path_to_jellyfin_path`
-- The httpx-based Jellyfin proxy in `play_proxy`
-- The `_jellyfin_index_lock`, `_jellyfin_index_at` machinery
+- httpx-based Jellyfin proxy in `play_proxy`
 - Jellyfin startup user-id lookup in `lifespan()`
+- `_pipeline_siblings()` + flatten/delete in `bt_filter`
+- `.filtered` sentinel reads/writes
 
 **Add**:
-- New module `transcribe/hls_precompute.py` (≈100 lines, see outline above)
-- New background loop in `lifespan()` calling `hls_precompute.queue_pending()` every 30 s
-- `/api/hls/...` endpoints in `main.py`
+- `transcribe/hls_precompute.py` (~100 lines)
+- `data/derived/` as the canonical pipeline output root
+- 30s scan loop in `lifespan()` driving `bt_filter.scan_and_dispatch()`
 - `progress.json` read/write helpers
-- ffmpeg in `transcribe/Dockerfile` if not already there
+- ffmpeg + ffprobe in `transcribe/Dockerfile`
 
 **Refactor**:
-- `/api/play/resolve` now reads progress.json + computes the cache URL
-- `/api/play/progress` writes progress.json
-- Subtitle endpoint `/api/play/sub` unchanged (sidecar SRT route already independent)
+- `bt_filter.py`: drop flatten/delete; LLM pair only; expose `scan_and_dispatch()`
+- `tasks.py` / `annotate.py`: write `annotated.srt` into `derived/<wrapper>/<stem>/`
+- `translator.py`: read `derived/.../annotated.srt`, write `derived/.../zh.srt`
+- `main.py` `/api/play/*`: read derived/ + progress.json (no Jellyfin)
+- `main.py` `/api/bt`: walk `derived/` to compute per-episode state
+- `Bt.jsx`: state from new `/api/bt`; `PlayerModal` handles `ready:false`
 
-**Frontend stays mostly the same**:
-- `resolvePlay(path)` returns the same shape; `master_url` just points elsewhere
-- `reportProgress(...)` payload unchanged
-- `Bt.jsx` PlayerModal unchanged
+## Migration steps
 
-## Migration steps (when implementing)
+User-driven manual migration (no migration code path — keep the codebase clean):
 
-1. Add ffmpeg to transcribe's Dockerfile if missing
-2. Implement `hls_precompute.py` + the new endpoints + progress.json
-3. Wire into `lifespan()` background loop
-4. Test against `data/bt/The.Sopranos.S05.../E01.mkv` (HEVC 10-bit — already validated the ffmpeg argv works on this)
-5. Leave Jellyfin running side-by-side at first; verify HLS cache fills + plays
-6. Once verified: rip Jellyfin client code from `main.py`, `docker compose down jellyfin`, remove env vars
-7. Delete `jellyfin/` from the repo
-8. Update root `README.md` table (remove jellyfin row)
-9. Update `transcribe/README.md` if it has a Jellyfin section
+```bash
+# For each existing wrapper that already has annotated/zh srt in bt/:
+mkdir -p data/derived/<wrapper>/<stem>/
+mv data/bt/<wrapper>/<stem>.zh-tw.srt           data/derived/<wrapper>/<stem>/zh.srt
+mv data/bt/<wrapper>/<stem>.srt                 data/derived/<wrapper>/<stem>/annotated.srt
+# (only move .srt if it contains ※; otherwise it's the BT-bundled English srt
+#  and should stay in bt/ as the source for the new pipeline)
+```
+
+Implementation order:
+
+1. Rewrite `bt_filter.py` (scanner only).
+2. Update `annotate.py` / `tasks.py` output paths → `derived/`.
+3. Update `translator.py` input + output paths → `derived/`.
+4. Add `hls_precompute.py` + register executor + scan loop in `main.py`.
+5. Refactor `main.py` play endpoints (drop Jellyfin client code entirely).
+6. Refactor `main.py /api/bt` to walk `derived/` for state.
+7. Update `Bt.jsx` for the new state shape + `ready:false` handling.
+8. Ensure `ffmpeg` + `ffprobe` in `Dockerfile`.
+9. User does the one-time manual migration above.
+10. `docker compose down jellyfin`, rebuild transcribe, rebuild test on one wrapper.
+11. Once verified for all wrappers: delete `jellyfin/` dir, drop Jellyfin env from compose, update root `README.md`.
 
 ## Risks (calibrated)
 
@@ -331,31 +339,31 @@ Plus 3 endpoints in main.py:
 |------|-----------|--------|------------|
 | ffmpeg HLS args have an edge case on a specific BT release | Medium | One bad file, easy to triage | Log + manual delete + retry |
 | HEVC 10-bit input without `-pix_fmt yuv420p` (already hit once) | Certain | Encoder errors | Always include the flag |
-| Disk fills if cache cap not added | Low (you have 502 G free) | Disk pressure | Add LRU GC if cache > 200 G (optional) |
+| HDR source looks washed-out (no tone-map filter) | Medium if any 4K BD HDR exists | Watchable but ugly | Add `is_hdr()` branch when first hit |
+| Disk fills if cache cap not added | Low (502 G free, ~90 G estimated cache) | Disk pressure | Add LRU GC if cache > 200 G (optional) |
 | ffmpeg crashes mid-transcode | Low | Partial dir | Registry-based debris detection handles this |
 | Container restart loses in-flight transcode progress | Certain on restart | Wasted CPU | Re-queue from scratch; idempotent |
-| User clicks ▸ on a video that isn't fully transcoded yet | Medium during first hours after download | Need to handle "not ready" UX | Frontend shows "preparing playback" if `master.m3u8` lacks ENDLIST |
+| User clicks ▸ before transcode finishes | Medium during the first hours after a download | Need "not ready" UX | Frontend shows "preparing playback" if `master.m3u8` lacks ENDLIST |
+| bt_filter LLM mispairs srt with video | Low | Wrong subtitle on playback | Manual rm of wrong derived dir + re-pair |
 
 ## "Not ready" UX
 
-`/api/play/resolve` for a video whose cache isn't `is_complete()` should
-return a flag like `{ready: false, eta_seconds: <derived from ffmpeg progress>}` so the modal can show "preparing — N% transcoded".
+`/api/play/resolve` for a video whose HLS isn't `is_complete()` returns
+`{ready: false, eta_seconds: <derived from ffmpeg progress or null>}`.
+Modal shows "preparing — transcoding".
 
 Two options for partial-cache playback:
-1. **Block** — show "preparing" until ENDLIST appears; cleanest UX
-2. **Stream as ready** — let the modal request `master.m3u8` even
-   without ENDLIST; hls.js will treat as a live stream (no scrubber
-   bar). The user can watch from start while transcode runs ahead.
+1. **Block** — show "preparing" until ENDLIST appears; cleanest UX.
+2. **Stream as ready** — let hls.js request `master.m3u8` even without
+   ENDLIST; it treats as live stream (no scrubber bar).
 
-Option 1 is the simpler implementation. Pick that for first cut.
+Option 1 for v1.
 
 ## Estimated total
 
-- ffmpeg argv validated (done in prior session — Sopranos S05E01 transcodes cleanly)
-- Implement + wire + test: **half day to a day** of focused work
-- Migrate off Jellyfin + verify: **half day**
-
-Net effort: ~1 day. No "1.5" or "2" phase to chase.
+- Refactor scope: ~6 hours of focused work (bt_filter rewrite, annotate / translate path changes, hls_precompute, main.py play endpoints, Bt.jsx)
+- Verification: ~1 hour (rebuild, watch derived/ fill, test playback)
+- Jellyfin removal: ~30 minutes (delete jellyfin/, env, README)
 
 ## Out of scope (worth noting why)
 
@@ -366,10 +374,20 @@ Net effort: ~1 day. No "1.5" or "2" phase to chase.
   speedup (1080p HEVC: ~10 min → ~3 min per episode). **HDR sources stay
   on the CPU path** — `tonemap_cuda` adds complexity for a workload we
   rarely hit; the `is_hdr()` branch chooses CPU vs GPU. Only add when
-  queue wait actually hurts (e.g., user wants to watch something that's
-  4+ hours deep in the queue). NVENC's encode ASIC is hardware-independent
+  queue wait actually hurts. NVENC's encode ASIC is hardware-independent
   of CUDA cores, so it can run alongside whisper without contention.
-- **Multi-audio track UI**: rare in BT releases. Pick first audio track; if user hits a release with directors-commentary-as-track-0, add `-map 0:a:1` manually.
-- **Live transcoding fallback**: by deciding to pre-compute everything, we accept "click ▸ before transcode finishes = wait for it". Don't reintroduce live transcoding.
-- **Adaptive bitrate (ABR)**: LAN-only playback doesn't need it.
-- **Multiple HLS renditions**: same reason.
+- **Multi-audio track UI**: rare in BT releases. Pick first audio track;
+  if a release has director's commentary as track 0, add `-map 0:a:1`
+  manually.
+- **Live transcoding fallback**: by pre-computing everything we accept
+  "click ▸ before transcode finishes = wait for it". Don't reintroduce
+  live transcoding.
+- **Adaptive bitrate (ABR) / multiple HLS renditions**: LAN-only playback
+  doesn't need it.
+- **4K → 1080p scale**: easy to add (`-vf scale='min(1920,iw)':-2`),
+  defer until a 4K source actually shows up.
+- **English audio track auto-selection**: defer until a wrong track is
+  picked (`-map 0:a:m:language:eng?` is the one-liner).
+- **VFR audio sync (`-fps_mode cfr`)**: defer until drift observed.
+- **bt_filter pairing cache**: re-pair every tick is cheap enough (~$0.03/day);
+  add cache only if cost becomes meaningful.
