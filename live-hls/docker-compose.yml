@@ -1,0 +1,33 @@
+services:
+  live-hls:
+    build: .
+    container_name: live-hls
+    ports:
+      # 8765 to avoid 8000 clash with transcribe-app.
+      - "8765:8000"
+    volumes:
+      # Mount transcribe's bt dir as /media for testing. Read-only so we
+      # can't accidentally corrupt sources while iterating.
+      - ../transcribe/data/bt:/media:ro
+    environment:
+      - MEDIA_ROOTS=/media
+      - SESSION_IDLE_TIMEOUT=60
+      - SESSION_DIR=/tmp/live-hls
+      # NVIDIA runtime env (matches transcribe-app pattern).
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true

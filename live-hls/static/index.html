@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>live-hls test</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<style>
+  :root {
+    --bg: #1c1c1e;
+    --surface: #2c2c2e;
+    --border: #3a3a3c;
+    --text: #e8e3d9;
+    --muted: #aeaeb2;
+    --accent: #c79968;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: var(--mono); background: var(--bg); color: var(--text);
+    margin: 0; padding: 20px; max-width: 1200px;
+    margin-left: auto; margin-right: auto;
+  }
+  h2 { margin-top: 0; font-size: 16px; color: var(--muted); }
+  .controls { display: flex; gap: 8px; margin-bottom: 16px; }
+  input.path {
+    flex: 1; background: var(--surface); color: var(--text);
+    border: 1px solid var(--border); padding: 8px 12px;
+    font-family: var(--mono); font-size: 13px; outline: none;
+  }
+  input.path:focus { border-color: var(--accent); }
+  button {
+    background: var(--accent); color: var(--bg); border: none;
+    padding: 8px 16px; cursor: pointer; font-family: var(--mono);
+    font-size: 13px; font-weight: 700;
+  }
+  button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: 0.3; cursor: not-allowed; }
+  video { width: 100%; background: #000; max-height: 70vh; display: block; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 12px 16px; margin-top: 16px; font-size: 12px;
+  }
+  .panel pre { margin: 0; white-space: pre-wrap; color: var(--muted); }
+  .err { color: var(--accent); margin-top: 8px; font-size: 12px; }
+</style>
+</head>
+<body>
+<h2>live-hls test</h2>
+<div class="controls">
+  <input class="path" id="path" placeholder="/media/wrapper/episode.mkv">
+  <button onclick="start()">Play</button>
+  <button class="secondary" onclick="stop()">Stop</button>
+</div>
+<video id="v" controls></video>
+<div id="err" class="err"></div>
+<div class="panel"><pre id="status">no session</pre></div>
+
+<script>
+let currentSid = null;
+let hls = null;
+let statusTimer = null;
+
+const $ = id => document.getElementById(id);
+
+function setErr(msg) { $('err').textContent = msg || ''; }
+function setStatus(obj) { $('status').textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2); }
+
+async function start() {
+  setErr('');
+  const path = $('path').value.trim();
+  if (!path) { setErr('paste a path first'); return; }
+  await stop();
+
+  try {
+    const r = await fetch('/api/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path}),
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      setErr('start ' + r.status + ': ' + text);
+      return;
+    }
+    const data = await r.json();
+    currentSid = data.session_id;
+
+    const v = $('v');
+    if (v.canPlayType('application/vnd.apple.mpegurl')) {
+      v.src = data.master_url;
+    } else if (Hls.isSupported()) {
+      hls = new Hls({
+        // Be patient with our backend — first segment can take 5-10s
+        // on a cold NVENC start for a long HEVC source.
+        manifestLoadingTimeOut: 20000,
+        levelLoadingTimeOut: 20000,
+        fragLoadingTimeOut: 30000,
+      });
+      hls.loadSource(data.master_url);
+      hls.attachMedia(v);
+      hls.on(Hls.Events.ERROR, (event, hlsErr) => {
+        if (hlsErr.fatal) setErr('hls.js fatal: ' + (hlsErr.details || hlsErr.type));
+      });
+    } else {
+      setErr('browser supports neither native HLS nor hls.js');
+      return;
+    }
+    v.play().catch(() => { /* user gesture required on some browsers */ });
+
+    statusTimer = setInterval(updateStatus, 1000);
+  } catch (e) {
+    setErr('start failed: ' + e.message);
+  }
+}
+
+async function stop() {
+  if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
+  if (hls) { hls.destroy(); hls = null; }
+  const v = $('v');
+  try { v.pause(); } catch (e) {}
+  v.removeAttribute('src');
+  v.load();
+  if (currentSid) {
+    try { await fetch('/api/' + currentSid, {method: 'DELETE'}); } catch (e) {}
+    currentSid = null;
+  }
+  setStatus('no session');
+}
+
+async function updateStatus() {
+  if (!currentSid) return;
+  try {
+    const r = await fetch('/api/' + currentSid + '/status');
+    if (!r.ok) return;
+    setStatus(await r.json());
+  } catch (e) { /* ignore polling errors */ }
+}
+
+// Clean up the session on tab close so we don't leak ffmpegs. If the
+// keepalive DELETE doesn't reach the server (rare), the idle GC reaps
+// the session a minute later.
+window.addEventListener('beforeunload', () => {
+  if (currentSid) {
+    fetch('/api/' + currentSid, { method: 'DELETE', keepalive: true })
+      .catch(() => {});
+  }
+});
+</script>
+</body>
+</html>
