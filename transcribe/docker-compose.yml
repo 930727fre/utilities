@@ -18,7 +18,18 @@ services:
       - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:?OPENSUBTITLES_API_KEY must be exported before docker compose up}
       - OPENSUBTITLES_USERNAME=${OPENSUBTITLES_USERNAME:?OPENSUBTITLES_USERNAME must be exported before docker compose up}
       - OPENSUBTITLES_PASSWORD=${OPENSUBTITLES_PASSWORD:?OPENSUBTITLES_PASSWORD must be exported before docker compose up}
+      # NVIDIA runtime env so the CUDA libs bundled with jellyfin-ffmpeg
+      # can find the host driver. Mirrors what whisper-container uses.
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
     restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     networks:
       - default
       - my_network

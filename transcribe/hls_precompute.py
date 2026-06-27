@@ -49,27 +49,68 @@ def is_in_flight(derived_dir: Path) -> bool:
     return proc is not None and proc.poll() is None
 
 
+def _is_hdr(video: Path) -> bool:
+    """ffprobe-detected PQ or HLG transfer = needs CPU tone-mapping path.
+    Caches nothing — single ffprobe call is ~50 ms, dwarfed by the
+    transcode itself."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=color_transfer",
+             "-of", "default=nw=1:nk=1", str(video)],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return out in {"smpte2084", "arib-std-b67"}  # PQ or HLG
+
+
 def _transcode(video: Path, derived_dir: Path) -> None:
     """Sync transcode — runs inside hls_executor thread.
 
-    Validated argv (see HLS_PLAN.md): libx264 + yuv420p + AAC stereo,
-    6-second HLS segments as a VOD playlist. Tested cleanly on Sopranos
-    S05 HEVC 10-bit (the bit-depth coerce needs -pix_fmt yuv420p), Wire
-    SDR, Chernobyl, Spider-Verse, modern YIFY rips.
+    Two paths:
+      - SDR: NVENC (~3-5x faster than libx264). `-hwaccel cuda` keeps the
+        decoded frames in GPU memory; `scale_cuda=format=nv12` coerces
+        10-bit HEVC down to 8-bit so h264_nvenc (which only emits 8-bit)
+        is happy. NVENC's encode block is separate hardware from the
+        CUDA cores whisper uses, so they don't fight for GPU resources.
+      - HDR: stay on CPU. tonemap_cuda exists but the filter graph gets
+        gnarly and HDR sources are rare in our library. CPU `zscale +
+        tonemap=hable` is the well-trodden Jellyfin recipe.
     """
     derived_dir.mkdir(parents=True, exist_ok=True)
-    args = [
-        "ffmpeg", "-y", "-i", str(video),
-        "-c:v", "libx264", "-pix_fmt", "yuv420p",
-        "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
-        "-preset", "veryfast",
-        "-c:a", "aac", "-b:a", "192k", "-ac", "2",
-        "-f", "hls", "-hls_time", "6", "-hls_list_size", "0",
-        "-hls_playlist_type", "vod",
-        "-hls_segment_filename", str(derived_dir / "seg_%d.ts"),
-        str(derived_dir / "master.m3u8"),
-    ]
-    print(f"[hls] start {video.name} → {derived_dir}", flush=True)
+    hdr = _is_hdr(video)
+    if hdr:
+        args = [
+            "ffmpeg", "-y", "-i", str(video),
+            "-vf",
+            "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+            "tonemap=hable,zscale=t=bt709:m=bt709:r=tv,format=yuv420p",
+            "-c:v", "libx264",
+            "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
+            "-preset", "veryfast",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+            "-f", "hls", "-hls_time", "6", "-hls_list_size", "0",
+            "-hls_playlist_type", "vod",
+            "-hls_segment_filename", str(derived_dir / "seg_%d.ts"),
+            str(derived_dir / "master.m3u8"),
+        ]
+    else:
+        args = [
+            "ffmpeg", "-y",
+            "-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+            "-i", str(video),
+            "-vf", "scale_cuda=format=nv12",
+            "-c:v", "h264_nvenc", "-preset", "p4",
+            "-b:v", "8M", "-profile:v", "high", "-level", "4.1",
+            "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+            "-f", "hls", "-hls_time", "6", "-hls_list_size", "0",
+            "-hls_playlist_type", "vod",
+            "-hls_segment_filename", str(derived_dir / "seg_%d.ts"),
+            str(derived_dir / "master.m3u8"),
+        ]
+    print(f"[hls] start{' [HDR/CPU]' if hdr else ' [NVENC]'} {video.name} → {derived_dir}",
+          flush=True)
     # stderr MUST be drained continuously — ffmpeg writes a progress line
     # every second and the 64 KB kernel pipe buffer fills around 15-25
     # minutes in, at which point the next stderr write blocks ffmpeg
