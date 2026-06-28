@@ -18,13 +18,11 @@ services:
       - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:?OPENSUBTITLES_API_KEY must be exported before docker compose up}
       - OPENSUBTITLES_USERNAME=${OPENSUBTITLES_USERNAME:?OPENSUBTITLES_USERNAME must be exported before docker compose up}
       - OPENSUBTITLES_PASSWORD=${OPENSUBTITLES_PASSWORD:?OPENSUBTITLES_PASSWORD must be exported before docker compose up}
-      # live-hls is the playback transcoder. Two URL views:
-      #   - LIVE_HLS_URL: this container → live-hls (container-to-container)
-      #   - LIVE_HLS_PUBLIC_URL: browser → live-hls (host port mapping in
-      #     dev, cloudflared subdomain in prod). master.m3u8 URLs handed
-      #     back to the player use the public one.
-      - LIVE_HLS_URL=${LIVE_HLS_URL:-http://live-hls:8000}
-      - LIVE_HLS_PUBLIC_URL=${LIVE_HLS_PUBLIC_URL:-http://localhost:8765}
+      # Jellyfin proxy for the bt-tab ▸ play button. URL defaults to the
+      # container name on my_network; API key must be exported (admin key
+      # generated via Jellyfin dashboard → API Keys → +).
+      - JELLYFIN_URL=${JELLYFIN_URL:-http://jellyfin:8096}
+      - JELLYFIN_API_KEY=${JELLYFIN_API_KEY:?JELLYFIN_API_KEY must be exported before docker compose up}
     restart: unless-stopped
     networks:
       - default
