@@ -38,6 +38,7 @@ SRT files are NOT overwritten (they're load-bearing for already-
 done whisper / ※ annotation / zh-translation work).
 """
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -54,6 +55,16 @@ SENTINEL_NAME = ".filtered"
 BT_ROOT = Path("/app/data/bt")
 ARTIFACT_ROOT = Path("/app/data/artifact")
 
+# Sentinels for "this bt wrapper has been LLM-filtered, skip" live here
+# rather than alongside the canonical Movies/TV output, because canonical
+# paths derive from LLM-decided titles and the bt-wrapper name doesn't
+# embed into them. One file per bt wrapper, named after the wrapper.
+PROCESSED_DIR = ARTIFACT_ROOT / "_processed"
+
+# Filesystem-unsafe characters that need stripping from LLM-returned
+# titles before they become path segments.
+_INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 
 # Cap prompt size so an absurdly large or hostile torrent layout can't
@@ -66,6 +77,21 @@ _MODEL = os.environ.get("ANTHROPIC_FILTER_MODEL", "claude-haiku-4-5-20251001")
 _SCHEMA = {
     "type": "object",
     "properties": {
+        "main_features": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "video": {"type": "string", "description": "relative path of the video file inside the wrapper"},
+                    "kind": {"type": "string", "enum": ["movie", "tv"]},
+                    "title": {"type": "string", "description": "canonical Jellyfin-friendly title, with release-group / quality / source junk stripped (e.g. 'The Sopranos', 'Spider-Man: Into the Spider-Verse')"},
+                    "year": {"type": "integer", "description": "original release year (movie: theatrical release year; tv: series first-air year, NOT the season's year)"},
+                    "season": {"type": "integer", "description": "TV only. Season number as a positive integer. Omit for movies."},
+                    "episode": {"type": "integer", "description": "TV only. Episode number within the season. Omit for movies."},
+                },
+                "required": ["video", "kind", "title", "year"],
+            },
+        },
         "srt_matches": {
             "type": "array",
             "items": {
@@ -81,20 +107,38 @@ _SCHEMA = {
             "type": "array",
             "items": {
                 "type": "string",
-                "description": "relative path of a directory whose video contents are bonus material (featurettes / behind-the-scenes / interviews / extras / trailers), not the main feature; videos inside will be skipped during flatten so they get removed with the directory",
+                "description": "relative path of a directory whose video contents are bonus material (featurettes / behind-the-scenes / interviews / extras / trailers), not the main feature; videos inside are excluded from main_features so they never land in /artifact and stay only on the bt side",
             },
         },
     },
-    "required": ["srt_matches", "bonus_dirs"],
+    "required": ["main_features", "srt_matches", "bonus_dirs"],
 }
 
 
 _PROMPT_TEMPLATE = """\
-A freshly-downloaded BT torrent. Two decisions:
+A freshly-downloaded BT torrent. Three decisions:
 
-A) For each MAIN-FEATURE video, pick the best English subtitle to \
-attach as its sibling. Omit a video from srt_matches if no usable \
-English SRT exists.
+A) For each MAIN-FEATURE video, provide its canonical Jellyfin-friendly \
+naming so the library entry doesn't depend on the release group's quirks:
+   - kind: "movie" or "tv"
+   - title: clean canonical title with release-group / quality / source \
+junk stripped. Use the form a media database (TMDB/Wikipedia) would use: \
+"Spider-Man: Into the Spider-Verse" not "Spider.Man.Into.The.Spider.Verse". \
+Keep the colon / apostrophe / ampersand if the canonical title has them — \
+filesystem sanitisation happens downstream.
+   - year: the original release year as an integer. For TV, this is the \
+SERIES FIRST-AIR year, not the season's year (e.g. The Sopranos season 3 \
+released 2001 but year=1999).
+   - For TV only: include `season` and `episode`. S01E01 → season=1, \
+episode=1. Always emit both for TV files.
+
+   Use your knowledge of mainstream titles; if a release is genuinely \
+unknown, do your best from the filename. Skip bonus / extras videos \
+(they're handled in C below).
+
+B) For each main-feature video, pick the best English subtitle to attach \
+as its sibling. Omit a video from srt_matches if no usable English SRT \
+exists.
 
    Each SRT entry includes:
      [N cues, START → END]   — coverage stats
@@ -112,9 +156,8 @@ they only subtitle foreign-language scenes / signs.
    - Match per episode by number when the torrent is a season pack \
 (S01E01.mkv ↔ Subs/01_English.srt etc.).
 
-B) Identify BONUS-CONTENT directories whose videos are NOT the main \
-feature and should be discarded with the directory itself. List their \
-relative paths in `bonus_dirs`. Typical names:
+C) Identify BONUS-CONTENT directories whose videos are NOT the main \
+feature. List their relative paths in `bonus_dirs`. Typical names:
    - Featurettes / Featurette
    - Extras / Bonus / Bonus Content / Bonus Features
    - Behind the Scenes / Making Of
@@ -198,6 +241,111 @@ def _build_tree(wrapper: Path) -> list[str]:
     return lines
 
 
+def _safe_title(title: str) -> str:
+    """Strip filesystem-unsafe characters from an LLM-returned title.
+    Colons / slashes / etc. get dropped; whitespace collapses. Returns a
+    fallback 'Untitled' if the result is empty so callers always have a
+    usable path segment."""
+    s = _INVALID_FS_CHARS.sub("", title).strip()
+    s = re.sub(r"\s+", " ", s)
+    return s or "Untitled"
+
+
+def _canonical_path(entry: dict, ext: str) -> Path | None:
+    """Build the /artifact canonical path for one main_features entry.
+    Returns None if the entry is malformed (missing required fields,
+    bad types, unknown kind).
+
+    Movies → /artifact/Movies/Title (Year)/Title (Year).ext
+    TV     → /artifact/TV/Title (Year)/Season NN/Title (Year) - SNNENN.ext
+    """
+    try:
+        kind = entry["kind"]
+        title = _safe_title(entry["title"])
+        year = int(entry["year"])
+    except (KeyError, ValueError, TypeError):
+        return None
+
+    base = f"{title} ({year})"
+
+    if kind == "movie":
+        return ARTIFACT_ROOT / "Movies" / base / f"{base}{ext}"
+
+    if kind == "tv":
+        try:
+            season = int(entry["season"])
+            episode = int(entry["episode"])
+        except (KeyError, ValueError, TypeError):
+            return None
+        return (
+            ARTIFACT_ROOT
+            / "TV"
+            / base
+            / f"Season {season:02d}"
+            / f"{base} - S{season:02d}E{episode:02d}{ext}"
+        )
+
+    return None
+
+
+def _sentinel_for(wrapper_name: str) -> Path:
+    """Sentinel file path for a bt wrapper, in /artifact/_processed/.
+    Wrapper-name sanitisation matches _safe_title's so different wrapper
+    names can't collide (rare in practice, defence in depth)."""
+    safe = _INVALID_FS_CHARS.sub("_", wrapper_name)[:180] or "wrapper"
+    return PROCESSED_DIR / f"{safe}.filtered"
+
+
+def load_manifest(wrapper_name: str) -> list[Path]:
+    """Return the absolute canonical /artifact paths bt_filter produced
+    for this bt wrapper, parsed from the sentinel file contents.
+
+    Used by per-torrent UI actions (translate-zh / upgrade-english) so a
+    click on a bt-side torrent name reaches the right canonical-named
+    files even though the canonical names don't carry wrapper info.
+
+    Returns an empty list if the sentinel doesn't exist or the wrapper
+    produced no canonical outputs (empty tree, LLM error, etc.)."""
+    sentinel = _sentinel_for(wrapper_name)
+    if not sentinel.is_file():
+        return []
+    try:
+        text = sentinel.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    out: list[Path] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Defensive: reject relative escapes (..) so a corrupted sentinel
+        # can't surface paths outside /artifact.
+        candidate = (ARTIFACT_ROOT / line).resolve()
+        try:
+            candidate.relative_to(ARTIFACT_ROOT.resolve())
+        except ValueError:
+            continue
+        out.append(candidate)
+    return out
+
+
+def _write_sentinel(wrapper_name: str, canonical_videos: list[Path]) -> None:
+    """Touch /artifact/_processed/<wrapper>.filtered with the canonical
+    video paths bt_filter just produced, one per line. Caller passes the
+    main-feature target paths (videos, not SRTs — SRTs are derivable
+    via with_suffix('.srt'))."""
+    sentinel = _sentinel_for(wrapper_name)
+    try:
+        PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+        body = "\n".join(
+            str(p.relative_to(ARTIFACT_ROOT))
+            for p in canonical_videos
+        )
+        sentinel.write_text(body + ("\n" if body else ""), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _safe_resolve(wrapper: Path, rel: str) -> Path | None:
     """Resolve `rel` strictly under wrapper. Returns None on path escape."""
     if not rel:
@@ -212,73 +360,43 @@ def _safe_resolve(wrapper: Path, rel: str) -> Path | None:
 
 def filter_wrapper(wrapper: Path) -> None:
     """One-shot LLM pass on a freshly-finished torrent. Reads from
-    `wrapper` (under /bt/), writes to /artifact/<wrapper.name>/. The
-    bt-side wrapper is NEVER modified.
+    `wrapper` (under /bt/), writes to canonical paths under /artifact/:
 
-    Idempotent — writes /artifact/<wrapper.name>/.filtered on completion
-    so subsequent calls bail. Delete the sentinel to force a re-run;
-    existing hardlinks + SRTs are preserved (annotation work survives)."""
+      Movies → /artifact/Movies/Title (Year)/Title (Year).ext
+      TV     → /artifact/TV/Title (Year)/Season NN/Title (Year) - SNNENN.ext
+
+    The bt-side wrapper is NEVER modified.
+
+    Idempotent — writes /artifact/_processed/<wrapper>.filtered on
+    completion so subsequent calls bail. Delete that sentinel to force a
+    re-run; existing canonical hardlinks + SRTs are preserved
+    (annotation work survives)."""
     if not wrapper.is_dir():
         return
 
-    artifact_dir = ARTIFACT_ROOT / wrapper.name
-    sentinel = artifact_dir / SENTINEL_NAME
+    sentinel = _sentinel_for(wrapper.name)
     if sentinel.exists():
         return
 
     short = wrapper.name[:40]
     tree = _build_tree(wrapper)
     if not tree:
-        try:
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            sentinel.touch()
-        except OSError:
-            pass
+        _write_sentinel(wrapper.name, [])
         return
 
-    # ── 1. LLM: pick SRT for each video + flag bonus dirs ──────────────
+    # ── 1. LLM: canonical naming + SRT matching ───────────────────────
     prompt = _PROMPT_TEMPLATE.format(wrapper_name=wrapper.name, tree="\n".join(tree))
     try:
         result = generate_json(prompt, _SCHEMA, model=_MODEL, temperature=0.0)
     except Exception as e:
         print(f"[filter {short}] LLM call failed ({e}); writing sentinel to avoid retry storm", flush=True)
-        try:
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            sentinel.touch()
-        except OSError:
-            pass
+        _write_sentinel(wrapper.name, [])
         return
 
-    # Bonus directories — featurettes / extras / behind-the-scenes etc.
-    # Videos inside these get SKIPPED during hardlink so the main feature
-    # is what Jellyfin sees. The bonus videos stay in /bt/ where they
-    # came from; the user can clean up the whole wrapper later.
-    bonus_dirs: list[Path] = []
-    for rel in result.get("bonus_dirs", []):
-        p = _safe_resolve(wrapper, rel)
-        if p is None:
-            print(f"[filter {short}] bonus dir bad path: {rel!r}", flush=True)
-            continue
-        if not p.is_dir():
-            print(f"[filter {short}] bonus dir not a directory: {rel!r}", flush=True)
-            continue
-        if p.resolve() == wrapper.resolve():
-            print(f"[filter {short}] bonus dir is the wrapper root, ignoring", flush=True)
-            continue
-        bonus_dirs.append(p.resolve())
-    bonus_dirs_set = set(bonus_dirs)
-
-    def _under_bonus(video: Path) -> bool:
-        video_r = video.resolve()
-        for bd in bonus_dirs_set:
-            try:
-                video_r.relative_to(bd)
-                return True
-            except ValueError:
-                continue
-        return False
-
-    # Build name → SRT-source-path mapping.
+    # ── 2. Index LLM-matched SRTs by video filename ───────────────────
+    # main_features references videos by relative path; srt_matches does
+    # the same. We key by video filename here so the main_features pass
+    # below can look up the matched SRT regardless of path nesting.
     srt_by_video_name: dict[str, Path] = {}
     for m in result.get("srt_matches", []):
         video_rel = m.get("video", "")
@@ -286,80 +404,75 @@ def filter_wrapper(wrapper: Path) -> None:
         video_p = _safe_resolve(wrapper, video_rel)
         srt_p = _safe_resolve(wrapper, srt_rel)
         if video_p is None or srt_p is None:
-            print(f"[filter {short}] bad match path: {m}", flush=True)
+            print(f"[filter {short}] bad srt_match path: {m}", flush=True)
             continue
-        if video_p.suffix.lower() not in VIDEO_EXTS:
-            print(f"[filter {short}] not a video: {video_p.name}", flush=True)
-            continue
-        if srt_p.suffix.lower() != ".srt":
-            print(f"[filter {short}] not an srt: {srt_p.name}", flush=True)
+        if video_p.suffix.lower() not in VIDEO_EXTS or srt_p.suffix.lower() != ".srt":
             continue
         if not video_p.is_file() or not srt_p.is_file():
             continue
         srt_by_video_name[video_p.name] = srt_p
 
-    videos = [p for p in wrapper.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
-    # Defense: if every video lives inside a flagged bonus dir, the LLM
-    # almost certainly mis-classified — fall back to treating nothing as
-    # bonus so we don't end up with an empty artifact dir.
-    main_videos = [v for v in videos if not _under_bonus(v)]
-    if not main_videos and videos:
-        print(f"[filter {short}] every video falls in a bonus_dir — ignoring bonus_dirs (LLM likely wrong)", flush=True)
-        bonus_dirs_set = set()
-        main_videos = videos
+    # ── 3. For each main feature: hardlink video, copy SRT ────────────
+    canonical_videos: list[Path] = []  # tracked for the sentinel manifest
 
-    try:
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        print(f"[filter {short}] could not create artifact dir: {e}", flush=True)
-        return
-
-    # ── 2. Hardlink main-feature videos into artifact_dir ──────────────
-    # Same inode as /bt/<wrapper>/.../<video>; zero extra disk; aria2
-    # keeps seeing the original. Flat at artifact root (drop nested
-    # season folders), so Jellyfin scans cleanly.
-    for video in main_videos:
-        target = artifact_dir / video.name
-        if target.exists():
-            # Pre-existing from a prior run — don't re-link.
+    for entry in result.get("main_features", []):
+        video_rel = entry.get("video", "")
+        video_p = _safe_resolve(wrapper, video_rel)
+        if video_p is None or not video_p.is_file():
+            print(f"[filter {short}] main_feature bad path: {video_rel!r}", flush=True)
             continue
-        try:
-            os.link(str(video), str(target))
-            print(f"[filter {short}] hardlink {video.relative_to(wrapper)} → {target.name}", flush=True)
-        except OSError as e:
-            # EXDEV (cross-filesystem) or other rare failure: fall back
-            # to copy. Doubles disk usage but keeps the pipeline alive
-            # on weird mount setups.
-            try:
-                shutil.copy2(str(video), str(target))
-                print(f"[filter {short}] hardlink failed ({e}); copied instead → {target.name}", flush=True)
-            except OSError as e2:
-                print(f"[filter {short}] both hardlink and copy failed: {e}, {e2}", flush=True)
+        if video_p.suffix.lower() not in VIDEO_EXTS:
+            print(f"[filter {short}] main_feature not a video: {video_p.name}", flush=True)
+            continue
 
-    # ── 3. Copy LLM-matched bundled SRTs ───────────────────────────────
-    # Copy (not hardlink) because downstream will stamp ※ markers into
-    # them and we don't want that bleeding back into /bt/. Never clobber
-    # an existing /artifact/<wrapper>/<stem>.srt — that's already-done
-    # whisper / annotate work the user has paid for.
-    for video_name, srt_src in srt_by_video_name.items():
-        target_video = artifact_dir / video_name
+        target_video = _canonical_path(entry, video_p.suffix)
+        if target_video is None:
+            print(f"[filter {short}] could not build canonical path for {entry}", flush=True)
+            continue
+
+        try:
+            target_video.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"[filter {short}] mkdir failed for {target_video.parent}: {e}", flush=True)
+            continue
+
+        # Hardlink video. Same inode as /bt/<wrapper>/.../<video>; zero
+        # extra disk; aria2 keeps seeing the original. Pre-existing target
+        # from a prior run is left alone.
         if not target_video.exists():
-            continue
-        target_srt = target_video.with_suffix(".srt")
-        if target_srt.exists():
-            continue
-        try:
-            shutil.copy2(str(srt_src), str(target_srt))
-            stamp_source(target_srt, "bundled-filter")
-            print(f"[filter {short}] srt {srt_src.relative_to(wrapper)} → {target_srt.name}", flush=True)
-        except OSError as e:
-            print(f"[filter {short}] srt copy failed: {e}", flush=True)
+            try:
+                os.link(str(video_p), str(target_video))
+                print(f"[filter {short}] hardlink {video_p.relative_to(wrapper)} → {target_video.relative_to(ARTIFACT_ROOT)}", flush=True)
+            except OSError as e:
+                try:
+                    shutil.copy2(str(video_p), str(target_video))
+                    print(f"[filter {short}] hardlink failed ({e}); copied → {target_video.relative_to(ARTIFACT_ROOT)}", flush=True)
+                except OSError as e2:
+                    print(f"[filter {short}] both link+copy failed: {e}, {e2}", flush=True)
+                    continue
 
-    # ── 4. Sentinel ────────────────────────────────────────────────────
-    # No delete pass — /bt/ is read-only to us. Junk (Sample/, .nfo,
-    # bonus dirs) stays for aria2 to seed from until the user removes
-    # the bt-side wrapper.
-    try:
-        sentinel.touch()
-    except OSError:
-        pass
+        # Track for the manifest regardless of whether we just created it
+        # or it pre-existed; per-torrent UI actions need every produced
+        # video, not only the new ones.
+        canonical_videos.append(target_video)
+
+        # Copy LLM-matched SRT alongside the video (with canonical stem
+        # this time). Copy not hardlink — downstream will stamp ※ markers
+        # into it, and we don't want that bleeding back into /bt.
+        srt_src = srt_by_video_name.get(video_p.name)
+        if srt_src is not None:
+            target_srt = target_video.with_suffix(".srt")
+            if not target_srt.exists():
+                try:
+                    shutil.copy2(str(srt_src), str(target_srt))
+                    stamp_source(target_srt, "bundled-filter")
+                    print(f"[filter {short}] srt {srt_src.relative_to(wrapper)} → {target_srt.relative_to(ARTIFACT_ROOT)}", flush=True)
+                except OSError as e:
+                    print(f"[filter {short}] srt copy failed: {e}", flush=True)
+
+    # ── 4. Sentinel + manifest ────────────────────────────────────────
+    # No delete pass — /bt/ is read-only to us. Bonus content (videos
+    # not in main_features) simply doesn't get hardlinked; it stays in
+    # /bt for aria2 to keep seeding and the user can remove the bt-side
+    # wrapper when they're done with the torrent.
+    _write_sentinel(wrapper.name, canonical_videos)

@@ -21,8 +21,10 @@ from annotate import annotate_executor, annotate_job
 from bt_filter import (
     ARTIFACT_ROOT,
     BT_ROOT,
-    SENTINEL_NAME as FILTER_SENTINEL,
+    SENTINEL_NAME as FILTER_SENTINEL,  # noqa: F401  (kept for external callers)
+    _sentinel_for as bt_filter_sentinel_for,
     filter_wrapper,
+    load_manifest,
 )
 from gpu_lock import release_all_held
 from srt_source import stamp_source
@@ -532,18 +534,21 @@ async def list_torrents():
 @app.delete("/api/bt/torrents/{wrapper}")
 async def delete_torrent(wrapper: str):
     """Kill the aria2 subprocess (if running), rmtree the /bt-side
-    wrapper, and also rmtree the /artifact-side wrapper. The user's
-    "delete torrent" intent covers the whole library entry, not just
-    the bt-side seed / junk. If they only wanted to free seeding space
-    while keeping the playable library they'd be doing it manually."""
+    wrapper, and delete the /artifact/_processed/<wrapper>.filtered
+    sentinel so a re-submit of the same magnet gets re-processed.
+
+    Canonical /artifact paths (Movies/Title (Year)/, TV/Show (Year)/...)
+    are NOT touched — they're hardlinked into the library and a delete
+    of the bt-side torrent shouldn't silently nuke "you finished
+    watching this last week". If the user actually wants the library
+    entry gone they remove that directly via shell / Jellyfin admin."""
     bt_torrents.delete(wrapper)
-    artifact_dir = (ARTIFACT_ROOT / wrapper).resolve()
-    try:
-        artifact_dir.relative_to(ARTIFACT_ROOT.resolve())
-    except ValueError:
-        return {"ok": True}  # bad wrapper name; bt_torrents cleaned what it could
-    if artifact_dir.is_dir():
-        shutil.rmtree(artifact_dir, ignore_errors=True)
+    sentinel = bt_filter_sentinel_for(wrapper)
+    if sentinel.is_file():
+        try:
+            sentinel.unlink()
+        except OSError:
+            pass
     return {"ok": True}
 
 
@@ -557,28 +562,27 @@ class BtUpgradeEnglishRequest(BaseModel):
 
 @app.post("/api/bt/upgrade-english", status_code=200)
 async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
-    """Delete every SRT in `wrapper` that carries `※ os failed:` so the
-    next scan tick re-runs the full cascade (srt-matcher → OS → whisper)
-    against today's OpenSubtitles quota. Useful when a torrent was
-    processed during a quota-exhaustion window and the user wants to
+    """Delete every SRT belonging to `wrapper` that carries `※ os failed:`
+    so the next scan tick re-runs the full cascade (srt-matcher → OS →
+    whisper) against today's OpenSubtitles quota. Useful when a torrent
+    was processed during a quota-exhaustion window and the user wants to
     pull human-translated subs now that quota has reset.
 
-    Refuses if torrent still downloading. Skips videos currently in
-    flight (annotation queue / job). Each successful delete will cost
-    a fresh Sonnet annotation pass when the new SRT arrives — call
-    confirms this in the UI dialog."""
-    bt_root = BT_ROOTS[0]
-    src = (bt_root / req.wrapper).resolve()
-    try:
-        src.relative_to(bt_root.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="wrapper not under /artifact")
-    if not src.is_dir():
-        raise HTTPException(status_code=404, detail=f"wrapper not found: {req.wrapper}")
-    # aria2 control files live on the bt side, never in /artifact — check
-    # the bt-side mirror (same wrapper name) for in-flight downloads.
+    `wrapper` is the bt-side wrapper name — we resolve the videos via
+    the canonical-path manifest written by bt_filter, so this works
+    regardless of how Movies/TV split out under /artifact.
+
+    Refuses if the torrent is still downloading. Skips videos currently
+    in flight (annotation queue). Each successful delete will cost a
+    fresh Sonnet annotation pass when the new SRT arrives."""
     if any((BT_ROOT / req.wrapper).rglob("*.aria2")):
         raise HTTPException(status_code=409, detail="torrent still downloading")
+    canonical_videos = load_manifest(req.wrapper)
+    if not canonical_videos:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no artifact manifest for wrapper: {req.wrapper}",
+        )
 
     in_flight_paths = set()
     for j in read_jobs():
@@ -588,12 +592,8 @@ async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
             in_flight_paths.add(j.get("source_path"))
 
     deleted = 0
-    for video in src.rglob("*"):
+    for video in canonical_videos:
         if not video.is_file():
-            continue
-        if video.suffix.lower() not in VIDEO_EXTS:
-            continue
-        if video.name.startswith("."):
             continue
         if str(video) in in_flight_paths:
             continue
@@ -620,35 +620,31 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
     context) to translate the sibling `<stem>.srt` into
     `<stem>.zh-tw.srt`, or stamps `<stem>.zh-tw.srt.error` on failure.
 
+    `wrapper` is the bt-side wrapper name — videos resolve via the
+    canonical-path manifest written by bt_filter, so this works
+    regardless of how Movies/TV split out under /artifact.
+
     Refuses if:
-      - the wrapper isn't directly under /artifact
-      - the torrent hasn't finished (any `.aria2` anywhere on bt side)
-      - any video lacks the `※ annotated` sentinel (i.e. bt pipeline not
-        done yet — without an annotated English SRT, the translator has
-        nothing to translate from)
+      - the torrent is still downloading (any `.aria2` on bt side)
+      - no manifest exists for this wrapper (bt_filter hasn't run)
+      - any video lacks the `※ annotated` sentinel (without an
+        annotated English SRT, the translator has nothing to start from)
 
     Idempotent — videos that already have `<stem>.zh-tw.srt` get skipped
     inside the worker. Calling again after a partial failure clears
     `.error` stamps, so the button doubles as retry."""
-    bt_root = BT_ROOTS[0]
-    src = (bt_root / req.wrapper).resolve()
-    try:
-        src.relative_to(bt_root.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="wrapper not under /artifact")
-    if not src.is_dir():
-        raise HTTPException(status_code=404, detail=f"wrapper not found: {req.wrapper}")
-    # aria2 control files live on the bt side, never in /artifact.
     if any((BT_ROOT / req.wrapper).rglob("*.aria2")):
         raise HTTPException(status_code=409, detail="torrent still downloading")
+    canonical_videos = load_manifest(req.wrapper)
+    if not canonical_videos:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no artifact manifest for wrapper: {req.wrapper}",
+        )
 
     videos: list[Path] = []
-    for video in src.rglob("*"):
+    for video in canonical_videos:
         if not video.is_file():
-            continue
-        if video.suffix.lower() not in VIDEO_EXTS:
-            continue
-        if video.name.startswith("."):
             continue
         srt = video.with_suffix(".srt")
         if not srt.exists():
@@ -1081,9 +1077,10 @@ def _run_pending_filter():
     (no `.aria2` control files) and hasn't been filtered into /artifact
     yet, run the LLM cleanup + SRT-match + hardlink pass.
 
-    Sentinel lives at /artifact/<wrapper>/.filtered now (not at the
-    bt-side wrapper, which is read-only to us), so the skip check
-    inspects the artifact side.
+    Sentinel lives at /artifact/_processed/<wrapper>.filtered (not in
+    the bt-side wrapper, which is read-only to us, and not in the
+    canonical artifact output dirs, because those derive from LLM-decided
+    titles not the bt wrapper name).
 
     Idempotent at the bt_filter.filter_wrapper level (sentinel skip),
     so an interrupted-restart still gets one clean attempt.
@@ -1096,7 +1093,7 @@ def _run_pending_filter():
         # In-flight aria2 — wait until every piece has verified.
         if any(wrapper.rglob("*.aria2")):
             continue
-        if (ARTIFACT_ROOT / wrapper.name / FILTER_SENTINEL).exists():
+        if bt_filter_sentinel_for(wrapper.name).exists():
             continue
         try:
             filter_wrapper(wrapper)
