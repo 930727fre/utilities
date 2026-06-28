@@ -41,18 +41,16 @@ JELLYFIN_API_KEY = os.environ.get("JELLYFIN_API_KEY", "")
 # history aligned across transcribe / Apple TV / iOS Jellyfin clients.
 _jellyfin_user_id: str | None = None
 # transcribe sees the clean library at /app/data/artifact; Jellyfin sees
-# the same host folder at /media/bt (legacy container path — kept so the
-# existing Jellyfin library config + watch-history index don't need
-# re-adding). Use this prefix swap to map a transcribe path to the path
-# Jellyfin stamped in its Items index, so we can look up the Jellyfin
-# item id by exact path match.
+# the same host folder at /media/artifact. Use this prefix swap to map a
+# transcribe path to the path Jellyfin stamped in its Items index, so we
+# can look up the Jellyfin item id by exact path match.
 #
 # /app/data/bt is aria2's download dir, untouched by transcribe.
 # bt_filter reads it to feed its LLM, then hardlinks main-feature videos
 # and copies bundled SRTs into /app/data/artifact; everything downstream
 # of bt_filter (whisper, ※ annotation, zh translate, Jellyfin scanning)
 # operates exclusively on /app/data/artifact.
-_JELLYFIN_BT_PREFIX = "/media/bt"
+_JELLYFIN_BT_PREFIX = "/media/artifact"
 _TRANSCRIBE_BT_PREFIX = "/app/data/artifact"
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
