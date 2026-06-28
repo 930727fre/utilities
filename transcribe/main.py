@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -17,7 +18,12 @@ from pydantic import BaseModel
 
 import bt_torrents
 from annotate import annotate_executor, annotate_job
-from bt_filter import SENTINEL_NAME as FILTER_SENTINEL, filter_wrapper
+from bt_filter import (
+    ARTIFACT_ROOT,
+    BT_ROOT,
+    SENTINEL_NAME as FILTER_SENTINEL,
+    filter_wrapper,
+)
 from gpu_lock import release_all_held
 from srt_source import stamp_source
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
@@ -32,18 +38,25 @@ JELLYFIN_API_KEY = os.environ.get("JELLYFIN_API_KEY", "")
 # reporting + resume lookups happen against this user — keeps watch
 # history aligned across transcribe / Apple TV / iOS Jellyfin clients.
 _jellyfin_user_id: str | None = None
-# transcribe sees BT files at /bt; Jellyfin sees the same bytes at
-# /media/bt. The two compose files mount the same host folder under
-# different container paths. Use this prefix swap to map a transcribe
-# path to the path Jellyfin stamped in its Items index, so we can look
-# up the Jellyfin item id by exact path match.
+# transcribe sees the clean library at /app/data/artifact; Jellyfin sees
+# the same host folder at /media/bt (legacy container path — kept so the
+# existing Jellyfin library config + watch-history index don't need
+# re-adding). Use this prefix swap to map a transcribe path to the path
+# Jellyfin stamped in its Items index, so we can look up the Jellyfin
+# item id by exact path match.
+#
+# /app/data/bt is aria2's download dir, untouched by transcribe.
+# bt_filter reads it to feed its LLM, then hardlinks main-feature videos
+# and copies bundled SRTs into /app/data/artifact; everything downstream
+# of bt_filter (whisper, ※ annotation, zh translate, Jellyfin scanning)
+# operates exclusively on /app/data/artifact.
 _JELLYFIN_BT_PREFIX = "/media/bt"
-_TRANSCRIBE_BT_PREFIX = "/bt"
+_TRANSCRIBE_BT_PREFIX = "/app/data/artifact"
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
-# bt mode scans only /bt. yt-tab files in DOWNLOADS_DIR show up in the yt
-# tab's job list — no reason to also list them under bt.
-BT_ROOTS = [Path("/bt")]
+# bt mode scans only /app/data/artifact. yt-tab files in DOWNLOADS_DIR
+# show up in the yt tab's job list — no reason to also list them under bt.
+BT_ROOTS = [Path("/app/data/artifact")]
 # When the user clicks the "translate to zh" button on a bt torrent, we
 # write the Chinese sub as a sidecar next to the video — same folder, same
 # stem, .zh-tw.srt suffix. Infuse picks it up as a separate language track.
@@ -518,8 +531,19 @@ async def list_torrents():
 
 @app.delete("/api/bt/torrents/{wrapper}")
 async def delete_torrent(wrapper: str):
-    """Kill the subprocess (if running) + rmtree the wrapper folder."""
+    """Kill the aria2 subprocess (if running), rmtree the /bt-side
+    wrapper, and also rmtree the /artifact-side wrapper. The user's
+    "delete torrent" intent covers the whole library entry, not just
+    the bt-side seed / junk. If they only wanted to free seeding space
+    while keeping the playable library they'd be doing it manually."""
     bt_torrents.delete(wrapper)
+    artifact_dir = (ARTIFACT_ROOT / wrapper).resolve()
+    try:
+        artifact_dir.relative_to(ARTIFACT_ROOT.resolve())
+    except ValueError:
+        return {"ok": True}  # bad wrapper name; bt_torrents cleaned what it could
+    if artifact_dir.is_dir():
+        shutil.rmtree(artifact_dir, ignore_errors=True)
     return {"ok": True}
 
 
@@ -548,10 +572,12 @@ async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
     try:
         src.relative_to(bt_root.resolve())
     except ValueError:
-        raise HTTPException(status_code=400, detail="wrapper not under /bt")
+        raise HTTPException(status_code=400, detail="wrapper not under /artifact")
     if not src.is_dir():
         raise HTTPException(status_code=404, detail=f"wrapper not found: {req.wrapper}")
-    if any(src.rglob("*.aria2")):
+    # aria2 control files live on the bt side, never in /artifact — check
+    # the bt-side mirror (same wrapper name) for in-flight downloads.
+    if any((BT_ROOT / req.wrapper).rglob("*.aria2")):
         raise HTTPException(status_code=409, detail="torrent still downloading")
 
     in_flight_paths = set()
@@ -595,8 +621,8 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
     `<stem>.zh-tw.srt`, or stamps `<stem>.zh-tw.srt.error` on failure.
 
     Refuses if:
-      - the wrapper isn't directly under /bt
-      - the torrent hasn't finished (any `.aria2` anywhere)
+      - the wrapper isn't directly under /artifact
+      - the torrent hasn't finished (any `.aria2` anywhere on bt side)
       - any video lacks the `※ annotated` sentinel (i.e. bt pipeline not
         done yet — without an annotated English SRT, the translator has
         nothing to translate from)
@@ -609,10 +635,11 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
     try:
         src.relative_to(bt_root.resolve())
     except ValueError:
-        raise HTTPException(status_code=400, detail="wrapper not under /bt")
+        raise HTTPException(status_code=400, detail="wrapper not under /artifact")
     if not src.is_dir():
         raise HTTPException(status_code=404, detail=f"wrapper not found: {req.wrapper}")
-    if any(src.rglob("*.aria2")):
+    # aria2 control files live on the bt side, never in /artifact.
+    if any((BT_ROOT / req.wrapper).rglob("*.aria2")):
         raise HTTPException(status_code=409, detail="torrent still downloading")
 
     videos: list[Path] = []
@@ -1050,27 +1077,31 @@ async def play_proxy(item_id: str, tail: str, request: Request):
 # ── Background annotation loop ────────────────────────────────────────────
 
 def _run_pending_filter():
-    """For every wrapper that has finished downloading (no `.aria2`) and
-    hasn't been filtered yet, run the LLM cleanup + SRT-match pass.
+    """For every aria2 wrapper under /bt that has finished downloading
+    (no `.aria2` control files) and hasn't been filtered into /artifact
+    yet, run the LLM cleanup + SRT-match + hardlink pass.
+
+    Sentinel lives at /artifact/<wrapper>/.filtered now (not at the
+    bt-side wrapper, which is read-only to us), so the skip check
+    inspects the artifact side.
 
     Idempotent at the bt_filter.filter_wrapper level (sentinel skip),
     so an interrupted-restart still gets one clean attempt.
     """
-    for root in BT_ROOTS:
-        if not root.exists():
+    if not BT_ROOT.exists():
+        return
+    for wrapper in BT_ROOT.iterdir():
+        if not wrapper.is_dir():
             continue
-        for wrapper in root.iterdir():
-            if not wrapper.is_dir():
-                continue
-            # In-flight torrent — wait until aria2 has verified all pieces.
-            if any(wrapper.rglob("*.aria2")):
-                continue
-            if (wrapper / FILTER_SENTINEL).exists():
-                continue
-            try:
-                filter_wrapper(wrapper)
-            except Exception:
-                traceback.print_exc()
+        # In-flight aria2 — wait until every piece has verified.
+        if any(wrapper.rglob("*.aria2")):
+            continue
+        if (ARTIFACT_ROOT / wrapper.name / FILTER_SENTINEL).exists():
+            continue
+        try:
+            filter_wrapper(wrapper)
+        except Exception:
+            traceback.print_exc()
 
 
 def _queue_pending_bt_work():

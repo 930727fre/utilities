@@ -1,5 +1,9 @@
 """Per-torrent post-download LLM filter.
 
+Reads from /bt/<wrapper>/ (aria2's download dir — NEVER touched), writes
+to /artifact/<wrapper>/. Separation keeps aria2's seeding files intact
+and makes deletion / cleanup of either side independently safe.
+
 When a torrent finishes (no `.aria2` control files left under the
 wrapper), call `filter_wrapper(wrapper)`. The pass does three things:
 
@@ -10,28 +14,28 @@ wrapper), call `filter_wrapper(wrapper)`. The pass does three things:
      filenames are identical or unhelpful (e.g. `1.srt` / `2.srt`,
      RARBG's `2_English.srt` + `3_English.srt`).
 
-  2. Flatten: every video file is moved to the wrapper root regardless
-     of original nesting (`Show.S01/Season 01/E01.mkv` → `Show.S01/E01.mkv`).
-     Each video's **prior pipeline siblings** travel with it:
-     `<stem>.srt` (annotated English from whisper / OS),
-     `<stem>.zh-tw.srt` (Chinese sidecar), `<stem>.zh-tw.srt.error`
-     (translation failure stamp). LLM-matched bundled SRTs are then
-     copied to root, but they NEVER clobber an existing
-     `<stem>.srt` — a pre-existing annotated copy wins.
+  2. Hardlink main-feature videos to /artifact/<wrapper>/<filename>
+     (flat — no nested season folders). Same inode as the bt-side file,
+     zero extra disk, aria2 keeps seeing the original.
 
-  3. Delete everything else: any entry remaining at the wrapper root
-     that isn't a video, a placed SRT, or aria2c's `.torrent` resume
-     metadata is removed (Sample/, Subs/, .nfo, .exe, RARBG.txt,
-     screenshots, __MACOSX, …). Whitelist-based — there's no per-junk-
-     pattern list to maintain.
+  3. Copy LLM-matched bundled SRTs to /artifact/<wrapper>/<stem>.srt
+     (copy because we may stamp ※ markers into them later and we don't
+     want that bleeding back into aria2's directory).
 
-Hard safety net: a video file is NEVER deleted at the root level, even
-if the keeper-set bookkeeping somehow missed it. Move collisions abort
-the whole delete pass.
+There is NO delete pass — the bt-side wrapper is read-only to us. Junk
+files (Sample/, Subs/, .nfo, RARBG.txt) stay in /bt/ for aria2 to keep
+seeding from, and get cleaned up when the whole wrapper is removed by
+the user (or by an aria2 seed-limit script later).
 
-Idempotency: a `.filtered` sentinel is written on exit (even on partial
-failure) so subsequent scan ticks skip the wrapper. Delete the sentinel
-by hand to force a re-run.
+Bonus directories (featurettes, behind-the-scenes) are still detected
+by the LLM and their videos are skipped — they just don't get
+hardlinked into /artifact/. The /bt/ side keeps them.
+
+Idempotency: `.filtered` sentinel is written to /artifact/<wrapper>/
+on exit (even on partial failure) so subsequent scan ticks skip the
+wrapper. Delete the sentinel to force a re-run; existing hardlinks /
+SRT files are NOT overwritten (they're load-bearing for already-
+done whisper / ※ annotation / zh-translation work).
 """
 import os
 import shutil
@@ -42,6 +46,13 @@ from claude_client import generate_json
 from srt_source import stamp_source
 
 SENTINEL_NAME = ".filtered"
+
+# The two top-level roots, set as module constants so callers and tests
+# can override (e.g. `bt_filter.ARTIFACT_ROOT = Path('/tmp/x')`). Both
+# live under one bind mount (/app/data) so os.link() can hardlink across
+# them inside the container — see docker-compose.yml for why.
+BT_ROOT = Path("/app/data/bt")
+ARTIFACT_ROOT = Path("/app/data/artifact")
 
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 
@@ -187,37 +198,6 @@ def _build_tree(wrapper: Path) -> list[str]:
     return lines
 
 
-def _pipeline_siblings(video: Path) -> list[Path]:
-    """Files in video's parent directory that belong to the same video
-    in transcribe's pipeline: prior whisper / OS / annotate output
-    (`<stem>.srt`), Chinese sidecars (`<stem>.zh-tw.srt`), or failure
-    stamps (`<stem>.zh-tw.srt.error`).
-
-    Match rule: name starts with `<video.stem>.` AND contains `.srt`
-    (either as suffix or before `.error`). Catches every pattern the
-    rest of the pipeline currently writes; conservative on stems so
-    e.g. `Show.S01E01.Director.Cut.mkv` doesn't sweep in `S01E01.srt`.
-    """
-    parent = video.parent
-    prefix = video.stem + "."
-    out = []
-    try:
-        entries = list(parent.iterdir())
-    except OSError:
-        return out
-    for entry in entries:
-        if not entry.is_file() or entry == video:
-            continue
-        name = entry.name
-        if not name.startswith(prefix):
-            continue
-        # `.srt` covers .srt and .zh-tw.srt; `.srt.error` covers the
-        # translator's failure stamp pattern.
-        if name.endswith(".srt") or name.endswith(".srt.error"):
-            out.append(entry)
-    return out
-
-
 def _safe_resolve(wrapper: Path, rel: str) -> Path | None:
     """Resolve `rel` strictly under wrapper. Returns None on path escape."""
     if not rel:
@@ -231,13 +211,18 @@ def _safe_resolve(wrapper: Path, rel: str) -> Path | None:
 
 
 def filter_wrapper(wrapper: Path) -> None:
-    """One-shot LLM pass on a freshly-finished torrent.
+    """One-shot LLM pass on a freshly-finished torrent. Reads from
+    `wrapper` (under /bt/), writes to /artifact/<wrapper.name>/. The
+    bt-side wrapper is NEVER modified.
 
-    Idempotent — writes a sentinel on completion so subsequent calls
-    bail. Delete the sentinel to force a re-run."""
+    Idempotent — writes /artifact/<wrapper.name>/.filtered on completion
+    so subsequent calls bail. Delete the sentinel to force a re-run;
+    existing hardlinks + SRTs are preserved (annotation work survives)."""
     if not wrapper.is_dir():
         return
-    sentinel = wrapper / SENTINEL_NAME
+
+    artifact_dir = ARTIFACT_ROOT / wrapper.name
+    sentinel = artifact_dir / SENTINEL_NAME
     if sentinel.exists():
         return
 
@@ -245,27 +230,29 @@ def filter_wrapper(wrapper: Path) -> None:
     tree = _build_tree(wrapper)
     if not tree:
         try:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
             sentinel.touch()
         except OSError:
             pass
         return
 
-    # ── 1. LLM: pick SRT for each video ────────────────────────────────
+    # ── 1. LLM: pick SRT for each video + flag bonus dirs ──────────────
     prompt = _PROMPT_TEMPLATE.format(wrapper_name=wrapper.name, tree="\n".join(tree))
     try:
         result = generate_json(prompt, _SCHEMA, model=_MODEL, temperature=0.0)
     except Exception as e:
         print(f"[filter {short}] LLM call failed ({e}); writing sentinel to avoid retry storm", flush=True)
         try:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
             sentinel.touch()
         except OSError:
             pass
         return
 
     # Bonus directories — featurettes / extras / behind-the-scenes etc.
-    # Videos inside these are NOT flattened to root; the directories
-    # themselves get rm-rf'd in step 4 along with everything else that's
-    # not a keeper, so the bonus videos go down with the ship.
+    # Videos inside these get SKIPPED during hardlink so the main feature
+    # is what Jellyfin sees. The bonus videos stay in /bt/ where they
+    # came from; the user can clean up the whole wrapper later.
     bonus_dirs: list[Path] = []
     for rel in result.get("bonus_dirs", []):
         p = _safe_resolve(wrapper, rel)
@@ -275,7 +262,6 @@ def filter_wrapper(wrapper: Path) -> None:
         if not p.is_dir():
             print(f"[filter {short}] bonus dir not a directory: {rel!r}", flush=True)
             continue
-        # Defense: never accept the wrapper itself as a bonus dir.
         if p.resolve() == wrapper.resolve():
             print(f"[filter {short}] bonus dir is the wrapper root, ignoring", flush=True)
             continue
@@ -292,10 +278,7 @@ def filter_wrapper(wrapper: Path) -> None:
                 continue
         return False
 
-    # Build name→srt mapping survived across the move pass below.
-    # Indexed by video filename because we're about to relocate videos to
-    # the wrapper root, so their absolute paths shift but their names
-    # stay stable.
+    # Build name → SRT-source-path mapping.
     srt_by_video_name: dict[str, Path] = {}
     for m in result.get("srt_matches", []):
         video_rel = m.get("video", "")
@@ -315,119 +298,67 @@ def filter_wrapper(wrapper: Path) -> None:
             continue
         srt_by_video_name[video_p.name] = srt_p
 
-    # ── 2. Flatten: move every video + its pipeline-produced siblings ──
-    #     to wrapper root.
-    #
-    # Sibling preservation is the load-bearing fix: a previously-processed
-    # wrapper has `<stem>.srt` (annotated English from whisper / OS),
-    # `<stem>.zh-tw.srt` (Chinese sidecar), and possibly
-    # `<stem>.zh-tw.srt.error` next to the video. Without this step, the
-    # delete pass downstream wipes the nested directory along with all of
-    # them — destroying the work the user has already paid for.
-    keepers: set[Path] = set()  # resolved absolute paths NOT to delete
-    move_failures: list[str] = []
-
-    def _move(src: Path, label: str) -> bool:
-        """Move src to wrapper/src.name, updating keepers + move_failures.
-        Returns True on success (or if already at root, which counts)."""
-        dst = wrapper / src.name
-        if dst.resolve() == src.resolve():
-            keepers.add(dst.resolve())
-            return True
-        if dst.exists():
-            move_failures.append(f"{label} collision: {src.relative_to(wrapper)}")
-            keepers.add(src.resolve())
-            return False
-        try:
-            shutil.move(str(src), str(dst))
-            keepers.add(dst.resolve())
-            print(f"[filter {short}] flatten {label} {src.relative_to(wrapper)} → {dst.name}", flush=True)
-            return True
-        except OSError as e:
-            move_failures.append(f"{label} move failed for {src.relative_to(wrapper)}: {e}")
-            keepers.add(src.resolve())
-            return False
-
     videos = [p for p in wrapper.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
     # Defense: if every video lives inside a flagged bonus dir, the LLM
     # almost certainly mis-classified — fall back to treating nothing as
-    # bonus so we don't end up with an empty wrapper.
+    # bonus so we don't end up with an empty artifact dir.
     main_videos = [v for v in videos if not _under_bonus(v)]
     if not main_videos and videos:
         print(f"[filter {short}] every video falls in a bonus_dir — ignoring bonus_dirs (LLM likely wrong)", flush=True)
         bonus_dirs_set = set()
         main_videos = videos
 
-    for video in main_videos:
-        siblings = _pipeline_siblings(video)
-        if not _move(video, "video"):
-            # If the video itself can't move, leave its siblings alone too.
-            continue
-        for sib in siblings:
-            _move(sib, "sibling")
-
-    # Move collisions are rare in practice (release groups don't ship
-    # two `E01.mkv` files) but if they happen, abort the destructive
-    # delete pass — bad delete state is worse than no cleanup.
-    if move_failures:
-        print(f"[filter {short}] {len(move_failures)} flatten failure(s) — skipping delete pass:", flush=True)
-        for msg in move_failures:
-            print(f"  - {msg}", flush=True)
-        try:
-            sentinel.touch()
-        except OSError:
-            pass
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"[filter {short}] could not create artifact dir: {e}", flush=True)
         return
 
-    # ── 3. Copy LLM-matched SRTs to root as <video stem>.srt ───────────
-    # Anything that already lives at root (because step 2 moved a prior
-    # pipeline output there, or because the file was already strict-stem
-    # to begin with) wins over the LLM's pick — we never clobber.
-    for video_name, srt_src in srt_by_video_name.items():
-        video_at_root = wrapper / video_name
-        if not video_at_root.exists():
-            continue
-        target_srt = video_at_root.with_suffix(".srt")
-        if target_srt.exists():
-            # Either the strict-stem layout (LLM and target are the same
-            # file) or pre-existing pipeline output we just moved here.
-            # Either way: don't clobber, don't restamp (it may already
-            # carry `※ annotated` / a prior `※ source: ...` cue we don't
-            # want to duplicate).
-            keepers.add(target_srt.resolve())
+    # ── 2. Hardlink main-feature videos into artifact_dir ──────────────
+    # Same inode as /bt/<wrapper>/.../<video>; zero extra disk; aria2
+    # keeps seeing the original. Flat at artifact root (drop nested
+    # season folders), so Jellyfin scans cleanly.
+    for video in main_videos:
+        target = artifact_dir / video.name
+        if target.exists():
+            # Pre-existing from a prior run — don't re-link.
             continue
         try:
-            shutil.copy2(srt_src, target_srt)
+            os.link(str(video), str(target))
+            print(f"[filter {short}] hardlink {video.relative_to(wrapper)} → {target.name}", flush=True)
+        except OSError as e:
+            # EXDEV (cross-filesystem) or other rare failure: fall back
+            # to copy. Doubles disk usage but keeps the pipeline alive
+            # on weird mount setups.
+            try:
+                shutil.copy2(str(video), str(target))
+                print(f"[filter {short}] hardlink failed ({e}); copied instead → {target.name}", flush=True)
+            except OSError as e2:
+                print(f"[filter {short}] both hardlink and copy failed: {e}, {e2}", flush=True)
+
+    # ── 3. Copy LLM-matched bundled SRTs ───────────────────────────────
+    # Copy (not hardlink) because downstream will stamp ※ markers into
+    # them and we don't want that bleeding back into /bt/. Never clobber
+    # an existing /artifact/<wrapper>/<stem>.srt — that's already-done
+    # whisper / annotate work the user has paid for.
+    for video_name, srt_src in srt_by_video_name.items():
+        target_video = artifact_dir / video_name
+        if not target_video.exists():
+            continue
+        target_srt = target_video.with_suffix(".srt")
+        if target_srt.exists():
+            continue
+        try:
+            shutil.copy2(str(srt_src), str(target_srt))
             stamp_source(target_srt, "bundled-filter")
-            keepers.add(target_srt.resolve())
             print(f"[filter {short}] srt {srt_src.relative_to(wrapper)} → {target_srt.name}", flush=True)
         except OSError as e:
             print(f"[filter {short}] srt copy failed: {e}", flush=True)
 
-    # Preserve aria2c's seed-resume metadata files at root.
-    for entry in wrapper.iterdir():
-        if entry.is_file() and entry.suffix.lower() == ".torrent":
-            keepers.add(entry.resolve())
-
-    # ── 4. Whitelist delete: everything at root not in keepers ─────────
-    for entry in list(wrapper.iterdir()):
-        if entry.resolve() in keepers:
-            continue
-        # Hard safety: never unlink a video at root, even if it somehow
-        # missed the keeper set (defense against a buggy upstream).
-        if entry.is_file() and entry.suffix.lower() in VIDEO_EXTS:
-            print(f"[filter {short}] hard safety: refusing to delete video {entry.name}", flush=True)
-            continue
-        try:
-            if entry.is_dir():
-                shutil.rmtree(entry)
-                print(f"[filter {short}] rm -rf {entry.name}", flush=True)
-            elif entry.is_file():
-                entry.unlink()
-                print(f"[filter {short}] unlink {entry.name}", flush=True)
-        except OSError as e:
-            print(f"[filter {short}] delete failed for {entry.name}: {e}", flush=True)
-
+    # ── 4. Sentinel ────────────────────────────────────────────────────
+    # No delete pass — /bt/ is read-only to us. Junk (Sample/, .nfo,
+    # bonus dirs) stays for aria2 to seed from until the user removes
+    # the bt-side wrapper.
     try:
         sentinel.touch()
     except OSError:

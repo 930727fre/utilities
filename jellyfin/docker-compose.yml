@@ -20,10 +20,13 @@ services:
       # /cache — transcoding temp + image cache. Regenerable, OK to lose on
       # rebuild but kept on disk to avoid re-fetching posters.
       - ./data/cache:/cache
-      # Media mounts — read-only, matching the webdav / samba exposure
-      # surface. Jellyfin only needs to read for playback / metadata scan;
-      # deletes happen via transcribe UI or shell on the host.
-      - ../transcribe/data/bt:/media/bt:ro
+      # Media mounts — read-only. Container path stays /media/bt so the
+      # existing Jellyfin library config + watch-history index keep
+      # working without a re-add in admin UI. The bytes Jellyfin reads
+      # are now transcribe's /artifact dir (hardlinked main-feature
+      # videos + annotated SRTs); the raw /bt side is invisible to
+      # Jellyfin (Sample/, Subs/, .nfo stay out of the library).
+      - ../transcribe/data/artifact:/media/bt:ro
       - ../transcribe/data/downloads:/media/yt:ro
     networks:
       - default

@@ -4,12 +4,15 @@ services:
     container_name: transcribe-app
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     volumes:
+      # Single bind mount that exposes both bt/ (aria2 download dir,
+      # raw torrent contents) and artifact/ (clean library, hardlinks of
+      # main-feature videos + transcribe-produced SRTs). They MUST share
+      # a mount so os.link() inside the container can hardlink between
+      # them — Docker bind mounts each get their own st_dev, so two
+      # separate ./data/bt:/bt + ./data/artifact:/artifact mounts would
+      # fail with EXDEV (cross-device link) and silently fall back to a
+      # full byte copy.
       - ./data:/app/data
-      # /bt is the annotation library. Each magnet submitted via the bt tab
-      # gets its own aria2c subprocess that writes a per-torrent wrapper
-      # folder in here; transcribe's annotation loop then reads videos out
-      # for whisper + Claude. Single bind mount, single source of truth.
-      - ./data/bt:/bt
     environment:
       - JOBS_FILE=/app/data/jobs.json
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY must be exported before docker compose up}

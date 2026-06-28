@@ -25,7 +25,7 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-BT_LIBRARY = Path("/bt")
+BT_LIBRARY = Path("/app/data/bt")
 
 # Seed limits applied to every torrent. aria2c exits when either limit is hit.
 SEED_TIME_MIN = 1440
