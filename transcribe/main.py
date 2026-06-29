@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 import bt_torrents
 from bt_filter import (
+    ARTIFACT_ROOT,
     BT_ROOT,
     _sentinel_for as bt_filter_sentinel_for,
     _sources_path,
@@ -447,25 +448,108 @@ async def list_torrents():
     return bt_torrents.list_torrents()
 
 
+# Top-level dirs under /artifact that the cleanup walk must NOT delete
+# even if they happen to become empty. Anything else (Movie title dirs,
+# Season dirs, _sources mirror dirs) is fair game to rmdir on bottom-up
+# sweep.
+_PRESERVED_DIR_NAMES = {"Movies", "TV", "_sources", "_processed"}
+
+
+def _rmdir_empty_walk_up(start: Path) -> None:
+    """Bottom-up rmdir of empty dirs from `start` upwards, bounded to
+    inside ARTIFACT_ROOT and stopping at preserved top-level names.
+
+    Refuses to walk if `start` resolves outside ARTIFACT_ROOT — paranoid
+    safety against ever rmdir-ing something outside the library."""
+    try:
+        start.resolve().relative_to(ARTIFACT_ROOT.resolve())
+    except ValueError:
+        return
+    p = start
+    while p.is_dir() and p.name not in _PRESERVED_DIR_NAMES:
+        try:
+            p.rmdir()
+        except OSError:
+            break  # not empty / permission / race; stop here
+        p = p.parent
+
+
 @app.delete("/api/bt/torrents/{wrapper}")
 async def delete_torrent(wrapper: str):
-    """Kill the aria2 subprocess (if running), rmtree the /bt-side
-    wrapper, and delete the /artifact/_processed/<wrapper>.filtered
-    sentinel so a re-submit of the same magnet gets re-processed.
+    """Cascade-delete a torrent: aria2 subprocess + /bt/<wrapper>/ +
+    every canonical /artifact entry the torrent produced (videos, all
+    SRT sidecars, failure sidecars) + cached _sources/ files + the
+    .filtered sentinel.
 
-    Canonical /artifact paths (Movies/Title (Year)/, TV/Show (Year)/...)
-    are NOT touched — they're hardlinked into the library and a delete
-    of the bt-side torrent shouldn't silently nuke "you finished
-    watching this last week". If the user actually wants the library
-    entry gone they remove that directly via shell / Jellyfin admin."""
+    Refuses (409) if any video in this wrapper has a pipeline job
+    in-flight — half-deleting while the worker writes canonical leads
+    to ugly partial state. User should wait or cancel the job first.
+
+    The frontend's confirm dialog spells out that this nukes library
+    entries (so a misclick doesn't silently destroy ※-annotated SRTs).
+    After this returns, the torrent looks like it never existed; a
+    re-submit of the same magnet re-runs the full pipeline."""
+    # 1. Resolve canonical paths BEFORE we touch the sentinel.
+    canonical_videos = load_manifest(wrapper)
+
+    # 2. Refuse if any pipeline job is in-flight for this wrapper's videos.
+    in_flight_paths = {
+        j["source_path"] for j in read_jobs()
+        if j.get("source") == "bt"
+        and j.get("source_path")
+        and j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING")
+    }
+    blocked = [v for v in canonical_videos if str(v) in in_flight_paths]
+    if blocked:
+        names = ", ".join(v.name for v in blocked[:3])
+        raise HTTPException(
+            status_code=409,
+            detail=f"{len(blocked)} video(s) mid-pipeline ({names}…); "
+                   f"wait for finish or delete the job first",
+        )
+
+    # 3. Kill aria2 + rmtree /bt/<wrapper>/.
     bt_torrents.delete(wrapper)
+
+    # 4. For each canonical video: nuke all artifact-side artefacts +
+    # cached _sources files.
+    sources_dirs: set[Path] = set()
+    for video in canonical_videos:
+        zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
+        sidecars = [
+            video,
+            video.with_suffix(".srt"),
+            zh_path,
+            Path(str(zh_path) + ".error"),
+            whisper_failed_path(video),
+            annotate_failed_path(video),
+        ]
+        for tag in ("whisper", "bundled", "opensubtitles-hash",
+                    "opensubtitles-text", "verified"):
+            sources_path = _sources_path(video, tag)
+            sidecars.append(sources_path)
+            sources_dirs.add(sources_path.parent)
+        for p in sidecars:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # 5. Bottom-up cleanup: empty Season/Show/_sources-mirror dirs.
+    for video in canonical_videos:
+        _rmdir_empty_walk_up(video.parent)
+    for d in sources_dirs:
+        _rmdir_empty_walk_up(d)
+
+    # 6. Drop the sentinel last so re-submit of the same magnet re-runs
+    # bt_filter cleanly.
     sentinel = bt_filter_sentinel_for(wrapper)
-    if sentinel.is_file():
-        try:
-            sentinel.unlink()
-        except OSError:
-            pass
-    return {"ok": True}
+    try:
+        sentinel.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    return {"ok": True, "videos_removed": len(canonical_videos)}
 
 
 class BtTranslateZhRequest(BaseModel):

@@ -78,8 +78,21 @@ export default function Bt() {
   }
 
   async function handleDelete(wrapper) {
-    if (!confirm('Delete this torrent and its files?')) return
-    await deleteTorrent(wrapper)
+    const ok = confirm(
+      `Delete this torrent and ALL its library entries?\n\n` +
+      `Removes:\n` +
+      `  - aria2 subprocess + /bt download files\n` +
+      `  - Jellyfin library entries (Movies/TV videos + SRTs + ※ annotations)\n` +
+      `  - cached _sources/ files (whisper, OS candidates, verified copy)\n\n` +
+      `No undo. Re-submitting the same magnet later starts the whole pipeline fresh.`
+    )
+    if (!ok) return
+    try {
+      await deleteTorrent(wrapper)
+    } catch (err) {
+      alert('Delete failed: ' + err.message)
+      return
+    }
     setExpanded(prev => {
       const next = new Set(prev)
       next.delete(wrapper)

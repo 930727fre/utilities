@@ -55,7 +55,10 @@ export async function listTorrents() {
 
 export async function deleteTorrent(wrapper) {
   const r = await fetch(`${BASE}/api/bt/torrents/${encodeURIComponent(wrapper)}`, { method: 'DELETE' })
-  if (!r.ok) throw new Error('Delete failed')
+  if (!r.ok) {
+    const detail = await r.json().catch(() => null)
+    throw new Error(detail?.detail || 'Delete failed')
+  }
   return r.json()
 }
 
