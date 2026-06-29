@@ -1,5 +1,47 @@
 import { useState, useEffect, useRef } from 'react'
-import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh, translateFileZh, upgradeEnglishTorrent } from '../api'
+import { listBt, listTorrents, submitMagnet, deleteTorrent, previewDeleteTorrent, retryBtFile, translateTorrentZh, translateFileZh, upgradeEnglishTorrent } from '../api'
+
+function formatBytes(n) {
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + ' TB'
+  if (n >= 1e9)  return (n / 1e9).toFixed(2) + ' GB'
+  if (n >= 1e6)  return (n / 1e6).toFixed(0) + ' MB'
+  if (n >= 1e3)  return (n / 1e3).toFixed(0) + ' KB'
+  return n + ' B'
+}
+
+function buildDeleteConfirmText(plan) {
+  const lines = [`Will free ~${formatBytes(plan.bt_size_bytes)} of disk. Files to remove:`, '']
+
+  if (plan.bt_wrapper) {
+    lines.push(plan.bt_wrapper + '/')
+    const prefix = plan.bt_wrapper + '/'
+    for (const f of plan.bt_files) {
+      lines.push('  ' + (f.startsWith(prefix) ? f.slice(prefix.length) : f))
+    }
+    lines.push('')
+  }
+
+  if (plan.canonical_files.length) {
+    lines.push('Library entries (Movies / TV):')
+    for (const f of plan.canonical_files) lines.push('  ' + f)
+    lines.push('')
+  }
+
+  if (plan.sources_files.length) {
+    lines.push('Cached _sources/ files:')
+    for (const f of plan.sources_files) lines.push('  ' + f)
+    lines.push('')
+  }
+
+  if (plan.sentinel) {
+    lines.push('Pipeline sentinel:')
+    lines.push('  ' + plan.sentinel)
+    lines.push('')
+  }
+
+  lines.push('No undo. Continue?')
+  return lines.join('\n')
+}
 
 // bt tab has two regions: the magnet form + active-torrent list at the
 // top (each row = one wrapper folder, phase derived from filesystem + an
@@ -78,15 +120,14 @@ export default function Bt() {
   }
 
   async function handleDelete(wrapper) {
-    const ok = confirm(
-      `Delete this torrent and ALL its library entries?\n\n` +
-      `Removes:\n` +
-      `  - aria2 subprocess + /bt download files\n` +
-      `  - Jellyfin library entries (Movies/TV videos + SRTs + ※ annotations)\n` +
-      `  - cached _sources/ files (whisper, OS candidates, verified copy)\n\n` +
-      `No undo. Re-submitting the same magnet later starts the whole pipeline fresh.`
-    )
-    if (!ok) return
+    let plan
+    try {
+      plan = await previewDeleteTorrent(wrapper)
+    } catch (err) {
+      alert('Preview failed: ' + err.message)
+      return
+    }
+    if (!confirm(buildDeleteConfirmText(plan))) return
     try {
       await deleteTorrent(wrapper)
     } catch (err) {

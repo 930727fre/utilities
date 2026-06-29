@@ -455,6 +455,79 @@ async def list_torrents():
 _PRESERVED_DIR_NAMES = {"Movies", "TV", "_sources", "_processed"}
 
 
+def _enumerate_deletion_targets(wrapper: str) -> dict:
+    """Walk filesystem for everything a `delete_torrent(wrapper)` would
+    actually remove. Returns a dict suitable for both the preview
+    endpoint (dry-run UI) and the actual delete handler (which uses the
+    same enumeration to do the work).
+
+    Only existing files are listed; missing entries are silently skipped.
+    `bt_size_bytes` is the sum of file sizes under `/bt/<wrapper>/` —
+    canonical /artifact videos share inodes with these via hardlink, so
+    bt's total is the disk that actually frees up when both sides go."""
+    canonical_videos = load_manifest(wrapper)
+
+    bt_wrapper = BT_ROOT / wrapper
+    bt_files: list[Path] = []
+    bt_size = 0
+    if bt_wrapper.is_dir():
+        for entry in sorted(bt_wrapper.rglob("*")):
+            if entry.is_file():
+                bt_files.append(entry)
+                try:
+                    bt_size += entry.stat().st_size
+                except OSError:
+                    pass
+
+    canonical_files: list[Path] = []
+    sources_files: list[Path] = []
+    for video in canonical_videos:
+        zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
+        for p in (
+            video,
+            video.with_suffix(".srt"),
+            zh_path,
+            Path(str(zh_path) + ".error"),
+            whisper_failed_path(video),
+            annotate_failed_path(video),
+        ):
+            if p.is_file():
+                canonical_files.append(p)
+        for tag in ("whisper", "bundled", "opensubtitles-hash",
+                    "opensubtitles-text", "verified"):
+            sp = _sources_path(video, tag)
+            if sp.is_file():
+                sources_files.append(sp)
+
+    sentinel = bt_filter_sentinel_for(wrapper)
+
+    return {
+        "canonical_videos": canonical_videos,  # used internally by delete
+        "bt_wrapper": bt_wrapper if bt_wrapper.is_dir() else None,
+        "bt_files": bt_files,
+        "bt_size_bytes": bt_size,
+        "canonical_files": sorted(canonical_files),
+        "sources_files": sorted(sources_files),
+        "sentinel": sentinel if sentinel.is_file() else None,
+    }
+
+
+@app.get("/api/bt/torrents/{wrapper}/preview-delete")
+async def preview_delete_torrent(wrapper: str):
+    """Dry-run: list every file the cascade-delete would remove plus
+    a disk-recovery estimate. Frontend renders this verbatim in the
+    confirm dialog so the user sees the exact damage before clicking."""
+    plan = _enumerate_deletion_targets(wrapper)
+    return {
+        "bt_wrapper": str(plan["bt_wrapper"]) if plan["bt_wrapper"] else None,
+        "bt_files": [str(p) for p in plan["bt_files"]],
+        "bt_size_bytes": plan["bt_size_bytes"],
+        "canonical_files": [str(p) for p in plan["canonical_files"]],
+        "sources_files": [str(p) for p in plan["sources_files"]],
+        "sentinel": str(plan["sentinel"]) if plan["sentinel"] else None,
+    }
+
+
 def _rmdir_empty_walk_up(start: Path) -> None:
     """Bottom-up rmdir of empty dirs from `start` upwards, bounded to
     inside ARTIFACT_ROOT and stopping at preserved top-level names.
@@ -485,14 +558,12 @@ async def delete_torrent(wrapper: str):
     in-flight — half-deleting while the worker writes canonical leads
     to ugly partial state. User should wait or cancel the job first.
 
-    The frontend's confirm dialog spells out that this nukes library
-    entries (so a misclick doesn't silently destroy ※-annotated SRTs).
-    After this returns, the torrent looks like it never existed; a
-    re-submit of the same magnet re-runs the full pipeline."""
-    # 1. Resolve canonical paths BEFORE we touch the sentinel.
-    canonical_videos = load_manifest(wrapper)
+    Shares enumeration with /preview-delete so the frontend dialog can
+    show the exact path list before this fires."""
+    plan = _enumerate_deletion_targets(wrapper)
+    canonical_videos: list[Path] = plan["canonical_videos"]
 
-    # 2. Refuse if any pipeline job is in-flight for this wrapper's videos.
+    # Refuse if any pipeline job is in-flight for this wrapper's videos.
     in_flight_paths = {
         j["source_path"] for j in read_jobs()
         if j.get("source") == "bt"
@@ -508,46 +579,30 @@ async def delete_torrent(wrapper: str):
                    f"wait for finish or delete the job first",
         )
 
-    # 3. Kill aria2 + rmtree /bt/<wrapper>/.
+    # Kill aria2 + rmtree /bt/<wrapper>/.
     bt_torrents.delete(wrapper)
 
-    # 4. For each canonical video: nuke all artifact-side artefacts +
-    # cached _sources files.
-    sources_dirs: set[Path] = set()
+    # Unlink everything the plan listed (canonical + _sources/ + sentinel).
+    for p in plan["canonical_files"] + plan["sources_files"]:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if plan["sentinel"] is not None:
+        try:
+            plan["sentinel"].unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    # Bottom-up sweep: empty Season/Show/_sources-mirror dirs.
+    swept: set[Path] = set()
     for video in canonical_videos:
-        zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
-        sidecars = [
-            video,
-            video.with_suffix(".srt"),
-            zh_path,
-            Path(str(zh_path) + ".error"),
-            whisper_failed_path(video),
-            annotate_failed_path(video),
-        ]
+        swept.add(video.parent)
         for tag in ("whisper", "bundled", "opensubtitles-hash",
                     "opensubtitles-text", "verified"):
-            sources_path = _sources_path(video, tag)
-            sidecars.append(sources_path)
-            sources_dirs.add(sources_path.parent)
-        for p in sidecars:
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    # 5. Bottom-up cleanup: empty Season/Show/_sources-mirror dirs.
-    for video in canonical_videos:
-        _rmdir_empty_walk_up(video.parent)
-    for d in sources_dirs:
+            swept.add(_sources_path(video, tag).parent)
+    for d in swept:
         _rmdir_empty_walk_up(d)
-
-    # 6. Drop the sentinel last so re-submit of the same magnet re-runs
-    # bt_filter cleanly.
-    sentinel = bt_filter_sentinel_for(wrapper)
-    try:
-        sentinel.unlink(missing_ok=True)
-    except OSError:
-        pass
 
     return {"ok": True, "videos_removed": len(canonical_videos)}
 

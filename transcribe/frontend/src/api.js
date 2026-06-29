@@ -62,6 +62,15 @@ export async function deleteTorrent(wrapper) {
   return r.json()
 }
 
+export async function previewDeleteTorrent(wrapper) {
+  const r = await fetch(`${BASE}/api/bt/torrents/${encodeURIComponent(wrapper)}/preview-delete`)
+  if (!r.ok) {
+    const detail = await r.json().catch(() => null)
+    throw new Error(detail?.detail || 'Preview failed')
+  }
+  return r.json()
+}
+
 export async function retryBtFile(path) {
   const r = await fetch(`${BASE}/api/bt/retry`, {
     method: 'POST',
