@@ -23,7 +23,7 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | SRT matcher | Claude (haiku) at bt_filter time — one call picks the canonical title / year / S+E for each main video AND chooses which bundled SRT (if any) to copy into `_sources/<stem>.bundled.srt` as a candidate. Uses cue count + time-span coverage + first-cue preview to distinguish forced / SDH / full-dialogue tracks |
 | Subs finder | OpenSubtitles REST API — fetches hash-search and text-search candidates into `_sources/<stem>.opensubtitles-{hash,text}.srt`. Never writes the canonical SRT directly |
 | Metadata verifier | Claude (haiku) — confirms an OS search-result's release / title / year matches the local filename. Runs BEFORE download to avoid burning OS quota on the wrong file |
-| Content verifier | Programmatic `rapidfuzz` — cue-density gate plus time-aligned `token_set_ratio` fuzzy match between each candidate and the whisper ground-truth transcript. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
+| Content verifier | `jiwer` — cue-density gate plus word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
 | Subs sync | `ffsubsync` — VAD on the video's audio aligns the verified candidate's cue timing before it lands at the canonical path (handles release-mismatch drift) |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
 
@@ -149,13 +149,15 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
    Each search is metadata-prefiltered by Haiku (`subs_verifier.verify_candidate`)
    to avoid burning OS quota on the wrong file.
 
-4. Content gate (rapidfuzz, deterministic, ~$0)
+4. Content gate (jiwer / WER, deterministic, ~$0)
      For each candidate in order (bundled → OS hash → OS text):
        - cue-density gate: reject if candidate has <40% or >250% of
          whisper's cue count (catches forced subs / wrong content)
-       - sample 20 whisper cues across the timeline, find candidate
-         cues within ±15 s, fuzzy-match with token_set_ratio
-       - PASS if ≥ 50% of samples match with score ≥ 50
+       - concat all cue text → strip SRT formatting + punctuation,
+         lowercase → compute WER vs whisper (reference) → pass if
+         WER ≤ 0.5
+     Timing is ignored on purpose — ffsubsync handles alignment later;
+     verify's only job is "same transcript content."
      First-pass-wins. First passing candidate → ffsubsync against the
      video's audio → _sources/<stem>.verified.srt.
      All candidates fail → cp whisper.srt → verified.srt.
@@ -185,7 +187,7 @@ canonical /artifact/.../<stem>.srt exists       → done; skip
 
 Failure sidecars are extension-less plain-text files holding the error reason — Jellyfin / Infuse never load them as subtitles, but `cat <stem>.whisper-failed` shows you what broke. The UI ↻ button clears canonical + both sidecars; cached `_sources/` files are preserved so replay only re-does the missing stages.
 
-Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch them. Drop into `_sources/<stem>.bundled.srt` instead if you want the rapidfuzz content gate to evaluate your candidate (and to get the automatic annotation pass).
+Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch them. Drop into `_sources/<stem>.bundled.srt` instead if you want the WER content gate to evaluate your candidate (and to get the automatic annotation pass).
 
 ## Rollback granularity
 

@@ -73,8 +73,8 @@ PROCESSED_DIR = ARTIFACT_ROOT / "_processed"
 # writes whisper output + downloaded OS candidates + bundled-SRT copies
 # here; the verifier picks a winner and the winner is promoted to the
 # canonical path. Keeping originals around means changing the verifier
-# (rapidfuzz threshold, new check) lets us replay without re-downloading
-# / re-running whisper. See `_sources_path` for the per-video layout.
+# (WER threshold, new check) lets us replay without re-downloading or
+# re-running whisper. See `_sources_path` for the per-video layout.
 SOURCES_DIR = ARTIFACT_ROOT / "_sources"
 
 # Filesystem-unsafe characters that need stripping from LLM-returned
@@ -501,7 +501,7 @@ def filter_wrapper(wrapper: Path) -> None:
         # Copy LLM-matched SRT into the `_sources/` candidate tree (not
         # into the canonical path — the pipeline's verifier picks a winner
         # later and promotes it). Copy, not hardlink: the bt side stays
-        # pristine, and downstream rapidfuzz comparisons read from this
+        # pristine, and the downstream WER comparison reads from this
         # copy without bleeding state back into /bt.
         srt_src = srt_by_video_name.get(video_p.name)
         if srt_src is not None:

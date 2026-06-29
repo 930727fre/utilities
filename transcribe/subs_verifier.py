@@ -7,22 +7,25 @@ best one. Cheap, runs BEFORE we burn an OS download quota on the wrong
 file.
 
 `verify_against_whisper(whisper_srt, candidate_srt)` — content-level
-gate. Whisper output is the ground-truth listening reference; the
-candidate is a "literary upgrade" we accept only if its actual cue text
-+ timing demonstrate it's subtitling the same audio.
+gate via word error rate (`jiwer`). Whisper output is the ground-truth
+listening reference; the candidate is a "literary upgrade" we accept
+only if its full transcript text is close enough to whisper's that
+they're plausibly the same audio. Timing is intentionally ignored —
+ffsubsync handles alignment downstream once a candidate passes.
 
 Why two? Cheap-first ordering: metadata filter discards obviously wrong
 candidates (different show, wrong episode) before we even download, then
-content gate catches the failures metadata can't see — wrong cut (right
+WER gate catches the failures metadata can't see — wrong cut (right
 movie but Snyder Cut vs theatrical), forced subs masquerading as full
 dialogue, sub mis-labelled as English. Both layers are needed; neither
 subsumes the other.
 """
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
-from rapidfuzz import fuzz
+import jiwer
 
 from annotate import parse_srt
 from claude_client import generate_json
@@ -140,37 +143,37 @@ def verify_candidate(video: Path, candidates: list[dict]) -> Optional[dict]:
     return id_map[match_id]
 
 
-# ── Content-level verification against whisper ────────────────────────────
+# ── Content-level verification against whisper (WER) ──────────────────────
 
-# Density gate: candidate's cue count vs whisper's. Forced subs typically
-# have ~10 cues spanning a 50-min episode, vs ~500 for whisper full dialogue.
-# Ratio guards against both directions (SDH candidates may have ~1.2x
-# whisper's cue count, still healthy).
+# Density gate: cheap pre-filter for forced subs / pathologically
+# mismatched lengths. WER would also reject these but density check is
+# O(1) vs WER's O(n*m). Symmetric so a candidate that's MUCH longer than
+# whisper (rare; over-eager SDH) gets rejected too.
 _DENSITY_MIN_RATIO = 0.4
 
-# Time-aligned fuzzy match parameters.
-_SAMPLE_CUES = 20             # number of whisper cues sampled evenly across the file
-_TIME_WINDOW_S = 15.0         # ±window for finding candidate cues near a whisper cue's timestamp
-_FUZZ_MIN_SCORE = 50          # rapidfuzz token_set_ratio threshold for "this pair matches"
-_MATCH_RATIO_PASS = 0.5       # >= 50% of sampled whisper cues must find a fuzzy match
+# WER threshold. Calibration from the whisper / ASR-eval literature:
+# clean human transcript vs whisper-large output on the same audio
+# usually scores 0.1–0.3. With the extra noise of release-mismatch (CC
+# vs full dialogue, occasional missing lines, etc.) realistic same-
+# content WER lands around 0.2–0.5. Different content / wrong cut /
+# wrong language climbs >0.7. 0.5 is the conventional pass cutoff and
+# leaves safety margin in both directions.
+_WER_PASS_MAX = 0.5
 
+# Strip SRT formatting tags before normalization — `<i>...</i>`,
+# `<b>`, `{\an8}` positioning markers, etc. — so the WER score reflects
+# spoken-word content only.
+_SRT_TAG_RE = re.compile(r"<[^>]+>|\{[^}]+\}")
 
-def _start_seconds(cue: dict) -> float:
-    """Parse cue's start timestamp (HH:MM:SS,mmm) into seconds. Permissive
-    on malformed: returns 0.0 so a bad cue sorts to the start of the
-    timeline rather than aborting verification."""
-    try:
-        start = cue["time"].split(" -->")[0]
-        h, m, rest = start.split(":")
-        sec, ms = rest.split(",")
-        return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
-    except (KeyError, ValueError, AttributeError):
-        return 0.0
+# Drop everything that isn't a word character, whitespace, or apostrophe
+# (apostrophes are kept so "don't" / "it's" don't get split mid-word).
+_PUNCT_RE = re.compile(r"[^\w\s']", re.UNICODE)
+_MULTI_WS_RE = re.compile(r"\s+")
 
 
 def _cue_text(cue: dict) -> str:
-    """Flatten cue's text lines into a single lower-cased string for fuzzing."""
-    return " ".join(ln.strip() for ln in cue.get("lines", []) if ln.strip()).lower()
+    """Flatten a cue's lines into a single string."""
+    return " ".join(ln.strip() for ln in cue.get("lines", []) if ln.strip())
 
 
 def _real_cues(srt_path: Path) -> list[dict]:
@@ -184,23 +187,38 @@ def _real_cues(srt_path: Path) -> list[dict]:
     return [c for c in cues if c.get("idx", 0) < 99000]
 
 
+def _normalized_full_text(cues: list[dict]) -> str:
+    """Concatenate every cue's text, strip SRT formatting, lowercase,
+    drop punctuation (except apostrophes), collapse whitespace. Result is
+    a clean space-separated word stream ready to feed jiwer.wer."""
+    raw = " ".join(_cue_text(c) for c in cues)
+    s = _SRT_TAG_RE.sub("", raw)
+    s = s.lower()
+    s = _PUNCT_RE.sub(" ", s)
+    s = _MULTI_WS_RE.sub(" ", s)
+    return s.strip()
+
+
 def verify_against_whisper(
     whisper_srt: Path,
     candidate_srt: Path,
 ) -> tuple[bool, str]:
-    """Pure-Python content gate. Returns (pass, reason).
+    """WER-based content gate. Returns (pass, reason).
 
-    Stage 1 — density check: reject if candidate has dramatically fewer
-    or more cues than whisper (catches forced subs / wrong content).
+    Stage 1 — density check: reject if candidate's cue count is less
+    than 40% (or more than 250%) of whisper's. Catches forced subs and
+    wildly mismatched lengths without paying the WER's quadratic cost.
 
-    Stage 2 — time-aligned fuzzy match: sample whisper cues across the
-    file, find any candidate cue within ±15s of each sample, score
-    token-set similarity. Pass if >= 50% of samples find a match scoring
-    >= 50.
+    Stage 2 — WER: concat all cue text from each side, strip SRT
+    formatting + punctuation, lowercase. Compute word error rate
+    between whisper (reference) and candidate (hypothesis); pass if
+    WER ≤ 0.5. jiwer is the canonical ASR-eval library used across the
+    whisper / Common Voice / etc. ecosystem, so the threshold has
+    well-known calibration.
 
-    rapidfuzz.token_set_ratio is robust to whisper mis-hearings,
-    punctuation/casing differences, SDH descriptive cues, slight reorderings —
-    everything that a strict character-level compare would falsely reject.
+    Timing is deliberately not considered — ffsubsync handles alignment
+    after this gate passes. Verify's only job is "is this the same
+    transcript content."
     """
     w_cues = _real_cues(whisper_srt)
     c_cues = _real_cues(candidate_srt)
@@ -219,39 +237,20 @@ def verify_against_whisper(
             f"or wrong content)"
         )
 
-    # Stage 2 — time-aligned fuzzy match
-    n_samples = min(_SAMPLE_CUES, len(w_cues))
-    step = max(1, len(w_cues) // n_samples)
-    samples = w_cues[::step][:n_samples]
+    # Stage 2 — WER
+    w_text = _normalized_full_text(w_cues)
+    c_text = _normalized_full_text(c_cues)
+    if not w_text or not c_text:
+        return False, "normalized transcript empty after cleanup"
 
-    matches = 0
-    for w_cue in samples:
-        w_t = _start_seconds(w_cue)
-        w_text = _cue_text(w_cue)
-        if not w_text:
-            continue
+    try:
+        wer = jiwer.wer(w_text, c_text)
+    except ValueError as e:
+        return False, f"WER computation failed: {e}"
 
-        nearby = [
-            c for c in c_cues
-            if abs(_start_seconds(c) - w_t) <= _TIME_WINDOW_S
-        ]
-        if not nearby:
-            continue
-
-        best_score = max(
-            fuzz.token_set_ratio(w_text, _cue_text(c)) for c in nearby
-        )
-        if best_score >= _FUZZ_MIN_SCORE:
-            matches += 1
-
-    match_ratio = matches / n_samples if n_samples else 0.0
-    if match_ratio >= _MATCH_RATIO_PASS:
-        return True, (
-            f"{matches}/{n_samples} sampled cues matched "
-            f"(density {density:.2f})"
-        )
+    if wer <= _WER_PASS_MAX:
+        return True, f"WER {wer:.2f} ≤ {_WER_PASS_MAX} (density {density:.2f})"
     return False, (
-        f"only {matches}/{n_samples} sampled cues matched, need "
-        f"{int(_MATCH_RATIO_PASS * n_samples)} (density {density:.2f}) — "
+        f"WER {wer:.2f} > {_WER_PASS_MAX} (density {density:.2f}) — "
         f"likely different content / wrong cut / wrong language"
     )

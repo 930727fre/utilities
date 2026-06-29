@@ -383,7 +383,7 @@ def process_bt_file(job_id: str):
       2. candidates   → /artifact/_sources/.../<stem>.{bundled,opensubtitles-*}.srt
       3. verify+sync  → /artifact/_sources/.../<stem>.verified.srt
                         (winner from step 2 → ffsubsync; or whisper itself
-                         if no candidate passed the rapidfuzz gate)
+                         if no candidate passed the WER gate)
       4. annotate     → /artifact/.../<stem>.srt   (atomic mv tmp → canonical)
 
     State recovery on restart: a pipeline that died mid-run leaves
