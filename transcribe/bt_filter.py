@@ -1,26 +1,35 @@
 """Per-torrent post-download LLM filter.
 
 Reads from /bt/<wrapper>/ (aria2's download dir — NEVER touched), writes
-to /artifact/<wrapper>/. Separation keeps aria2's seeding files intact
-and makes deletion / cleanup of either side independently safe.
+into the canonical Movies/TV tree under /artifact/ plus the candidate
+staging tree under /artifact/_sources/. Separation keeps aria2's seeding
+files intact and makes deletion / cleanup of either side independently
+safe.
 
 When a torrent finishes (no `.aria2` control files left under the
 wrapper), call `filter_wrapper(wrapper)`. The pass does three things:
 
-  1. ONE Haiku call decides: for each video file, which bundled English
-     SRT (if any) should attach as its sibling subtitle. The listing
-     given to the model includes cue count + time span for each .srt so
-     forced / SDH / full-dialogue tracks are distinguishable even when
-     filenames are identical or unhelpful (e.g. `1.srt` / `2.srt`,
+  1. ONE Haiku call decides: for each video file, the canonical
+     Jellyfin-friendly title / year / (season, episode for TV) AND
+     which bundled English SRT (if any) is the right sibling subtitle.
+     The listing given to the model includes cue count + time span for
+     each .srt so forced / SDH / full-dialogue tracks are distinguishable
+     even when filenames are identical or unhelpful (e.g. `1.srt` / `2.srt`,
      RARBG's `2_English.srt` + `3_English.srt`).
 
-  2. Hardlink main-feature videos to /artifact/<wrapper>/<filename>
-     (flat — no nested season folders). Same inode as the bt-side file,
-     zero extra disk, aria2 keeps seeing the original.
+  2. Hardlink main-feature videos to canonical Movies/TV paths
+     (Movies/Title (Year)/Title (Year).mkv,
+      TV/Title (Year)/Season NN/Title (Year) - SNNENN.mkv).
+     Same inode as the bt-side file; zero extra disk; aria2 keeps the
+     original.
 
-  3. Copy LLM-matched bundled SRTs to /artifact/<wrapper>/<stem>.srt
-     (copy because we may stamp ※ markers into them later and we don't
-     want that bleeding back into aria2's directory).
+  3. Copy LLM-matched bundled SRTs into /artifact/_sources/ mirroring
+     the canonical tree, named `<stem>.bundled.srt`. They sit as one
+     candidate among many that the bt video pipeline (whisper + OS
+     fetch + verifier) will later evaluate against the whisper
+     ground-truth transcript. The canonical /artifact/Movies/.../X.srt
+     is written ONLY by the pipeline, after a candidate passes
+     content verification.
 
 There is NO delete pass — the bt-side wrapper is read-only to us. Junk
 files (Sample/, Subs/, .nfo, RARBG.txt) stay in /bt/ for aria2 to keep
@@ -29,13 +38,13 @@ the user (or by an aria2 seed-limit script later).
 
 Bonus directories (featurettes, behind-the-scenes) are still detected
 by the LLM and their videos are skipped — they just don't get
-hardlinked into /artifact/. The /bt/ side keeps them.
+hardlinked. The /bt/ side keeps them.
 
-Idempotency: `.filtered` sentinel is written to /artifact/<wrapper>/
+Idempotency: `.filtered` sentinel is written to /artifact/_processed/
 on exit (even on partial failure) so subsequent scan ticks skip the
-wrapper. Delete the sentinel to force a re-run; existing hardlinks /
-SRT files are NOT overwritten (they're load-bearing for already-
-done whisper / ※ annotation / zh-translation work).
+wrapper. Delete the sentinel to force a re-run; existing hardlinks +
+`_sources/<stem>.bundled.srt` copies are NOT overwritten (they're load-
+bearing for in-progress verification / annotation work).
 """
 import os
 import re
@@ -44,7 +53,6 @@ from pathlib import Path
 
 from annotate import parse_srt
 from claude_client import generate_json
-from srt_source import stamp_source
 
 SENTINEL_NAME = ".filtered"
 
@@ -60,6 +68,14 @@ ARTIFACT_ROOT = Path("/app/data/artifact")
 # paths derive from LLM-decided titles and the bt-wrapper name doesn't
 # embed into them. One file per bt wrapper, named after the wrapper.
 PROCESSED_DIR = ARTIFACT_ROOT / "_processed"
+
+# Raw subtitle candidates mirror the canonical Movies/TV tree. Pipeline
+# writes whisper output + downloaded OS candidates + bundled-SRT copies
+# here; the verifier picks a winner and the winner is promoted to the
+# canonical path. Keeping originals around means changing the verifier
+# (rapidfuzz threshold, new check) lets us replay without re-downloading
+# / re-running whisper. See `_sources_path` for the per-video layout.
+SOURCES_DIR = ARTIFACT_ROOT / "_sources"
 
 # Filesystem-unsafe characters that need stripping from LLM-returned
 # titles before they become path segments.
@@ -288,6 +304,32 @@ def _canonical_path(entry: dict, ext: str) -> Path | None:
     return None
 
 
+def _sources_path(canonical_video: Path, source_tag: str) -> Path:
+    """Map a canonical video path to its `_sources/` mirror entry for a
+    given source tag. Mirrors `_canonical_path` for the source-staging
+    tree:
+
+      /artifact/Movies/Title (Year)/Title (Year).mkv
+        →  /artifact/_sources/Movies/Title (Year)/Title (Year).<tag>.srt
+
+      /artifact/TV/Title (Year)/Season 01/Title (Year) - S01E01.mkv
+        →  /artifact/_sources/TV/Title (Year)/Season 01/Title (Year) - S01E01.<tag>.srt
+
+    `source_tag` is one of: "whisper", "bundled",
+    "opensubtitles-hash", "opensubtitles-text". The tag becomes part of
+    the filename so multiple candidates for the same video sit side-by-
+    side and can be inspected with `ls`.
+    """
+    try:
+        rel = canonical_video.relative_to(ARTIFACT_ROOT)
+    except ValueError:
+        # Canonical path didn't start under /artifact — defensive fallback
+        # (the rest of the pipeline only ever passes paths produced by
+        # `_canonical_path`, so this branch should not trigger).
+        return SOURCES_DIR / f"{canonical_video.stem}.{source_tag}.srt"
+    return SOURCES_DIR / rel.parent / f"{canonical_video.stem}.{source_tag}.srt"
+
+
 def _sentinel_for(wrapper_name: str) -> Path:
     """Sentinel file path for a bt wrapper, in /artifact/_processed/.
     Wrapper-name sanitisation matches _safe_title's so different wrapper
@@ -456,16 +498,18 @@ def filter_wrapper(wrapper: Path) -> None:
         # video, not only the new ones.
         canonical_videos.append(target_video)
 
-        # Copy LLM-matched SRT alongside the video (with canonical stem
-        # this time). Copy not hardlink — downstream will stamp ※ markers
-        # into it, and we don't want that bleeding back into /bt.
+        # Copy LLM-matched SRT into the `_sources/` candidate tree (not
+        # into the canonical path — the pipeline's verifier picks a winner
+        # later and promotes it). Copy, not hardlink: the bt side stays
+        # pristine, and downstream rapidfuzz comparisons read from this
+        # copy without bleeding state back into /bt.
         srt_src = srt_by_video_name.get(video_p.name)
         if srt_src is not None:
-            target_srt = target_video.with_suffix(".srt")
+            target_srt = _sources_path(target_video, "bundled")
             if not target_srt.exists():
                 try:
+                    target_srt.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(srt_src), str(target_srt))
-                    stamp_source(target_srt, "bundled-filter")
                     print(f"[filter {short}] srt {srt_src.relative_to(wrapper)} → {target_srt.relative_to(ARTIFACT_ROOT)}", flush=True)
                 except OSError as e:
                     print(f"[filter {short}] srt copy failed: {e}", flush=True)

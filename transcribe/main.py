@@ -23,13 +23,17 @@ from bt_filter import (
     BT_ROOT,
     SENTINEL_NAME as FILTER_SENTINEL,  # noqa: F401  (kept for external callers)
     _sentinel_for as bt_filter_sentinel_for,
+    _sources_path,
     filter_wrapper,
     load_manifest,
 )
 from gpu_lock import release_all_held
-from srt_source import stamp_source
+from srt_source import (
+    annotate_failed_path,
+    read_failure_reason,
+    whisper_failed_path,
+)
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
-from subs_finder import find_subs
 from translator import translate_video_zh, translator_executor
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
@@ -63,17 +67,15 @@ BT_ROOTS = [Path("/app/data/artifact")]
 ZH_SUFFIX = ".zh-tw.srt"
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 ANNOTATION_MARKER = "※ annotated"
-WHISPER_FAILED_MARKER = "※ whisper failed:"
-ANNOTATE_FAILED_MARKER = "※ annotate failed:"
-OS_FAILED_MARKER = "※ os failed:"
 MTIME_GRACE_SECONDS = 60
 BT_SCAN_INTERVAL = 30
 
 # No in-memory failure counters: "we tried this once" is recorded as a
-# sentinel cue inside the SRT itself (see srt_source.stamp_*), so the
-# scan loop reads it back on every tick and survives container restarts.
-# Auto-retry is gone; the UI ↻ button is the only path back into the
-# pipeline for a failed file.
+# sidecar file next to the video — <stem>.whisper-failed for whisper
+# crashes, <stem>.annotate-failed for annotation crashes. Sidecars
+# survive container restarts and signal "skip this file" to the scan
+# loop. The UI ↻ button deletes the canonical SRT + both sidecars so
+# the next tick replays the pipeline.
 
 # In-flight translate-to-zh futures keyed by absolute video path. Set when
 # the translate-zh endpoint submits a worker, cleared (via a `finally` in
@@ -357,34 +359,6 @@ def _is_annotated_srt(srt_path: Path) -> bool:
         return False
 
 
-def _has_source_stamp(srt_path: Path) -> bool:
-    """Whether the SRT carries any `※ source: …` sentinel cue. Used to
-    detect strict-stem bundled SRTs (`<stem>.srt` sitting next to the
-    video — manually dropped in by the user after bt_filter already
-    wrote its sentinel, so the filter never saw it), which otherwise
-    carry no source attribution."""
-    try:
-        with open(srt_path, "rb") as f:
-            content = f.read()
-        return b"\xe2\x80\xbb source:" in content  # "※ source:" UTF-8
-    except OSError:
-        return False
-
-
-def _read_srt_marker(srt_path: Path, marker: str) -> str | None:
-    """If the SRT contains a sentinel cue starting with `marker`, return the
-    text that follows (the error message). Returns None if not present."""
-    try:
-        content = srt_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    for line in content.splitlines():
-        idx = line.find(marker)
-        if idx >= 0:
-            return line[idx + len(marker):].strip() or "(no message)"
-    return None
-
-
 def _scan_bt() -> list[dict]:
     """Walk BT_ROOTS, return one entry per video file. Filesystem only,
     plus the in-flight set of translate-zh futures for `zh_in_flight`."""
@@ -432,14 +406,13 @@ def _scan_bt() -> list[dict]:
                 continue
             srt = video.with_suffix(".srt")
             has_srt = srt.exists()
-            whisper_error = _read_srt_marker(srt, WHISPER_FAILED_MARKER) if has_srt else None
-            annotate_error = _read_srt_marker(srt, ANNOTATE_FAILED_MARKER) if has_srt else None
-            os_failed = _read_srt_marker(srt, OS_FAILED_MARKER) if has_srt else None
-            # An SRT carrying only the whisper-failed sentinel isn't a real
-            # transcript — for everything downstream of whisper we treat it
-            # as "no SRT yet, but don't retry."
-            has_real_srt = has_srt and whisper_error is None
-            has_annotation = has_real_srt and _is_annotated_srt(srt)
+            # Failure sidecars next to the video signal "pipeline tried,
+            # don't retry until user clears via the ↻ button". Filename
+            # is the state — extension-less so Jellyfin / Infuse never
+            # try to load them as subtitles.
+            whisper_error = read_failure_reason(whisper_failed_path(video))
+            annotate_error = read_failure_reason(annotate_failed_path(video))
+            has_annotation = has_srt and _is_annotated_srt(srt)
             # Chinese sub state (user-triggered translate-zh button output).
             # `.zh-tw.srt` is the sidecar; `.zh-tw.srt.error` records a
             # failure reason from the Chinese translator when it surfaces one.
@@ -464,11 +437,10 @@ def _scan_bt() -> list[dict]:
                 "name": video.name,
                 "parent": parent_rel,
                 "root": str(root),
-                "has_srt": has_real_srt,
+                "has_srt": has_srt,
                 "has_annotation": has_annotation,
                 "whisper_error": whisper_error,
                 "annotate_error": annotate_error,
-                "os_failed": os_failed,
                 "has_zh_srt": has_zh_srt,
                 "zh_in_flight": zh_in_flight,
                 "zh_error": zh_error,
@@ -560,19 +532,22 @@ class BtUpgradeEnglishRequest(BaseModel):
 
 @app.post("/api/bt/upgrade-english", status_code=200)
 async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
-    """Delete every SRT belonging to `wrapper` that carries `※ os failed:`
-    so the next scan tick re-runs the full cascade (srt-matcher → OS →
-    whisper) against today's OpenSubtitles quota. Useful when a torrent
-    was processed during a quota-exhaustion window and the user wants to
-    pull human-translated subs now that quota has reset.
+    """Force a fresh OpenSubtitles attempt for every video in `wrapper`.
 
-    `wrapper` is the bt-side wrapper name — we resolve the videos via
-    the canonical-path manifest written by bt_filter, so this works
-    regardless of how Movies/TV split out under /artifact.
+    Deletes cached OS candidates (`_sources/<stem>.opensubtitles-hash.srt`
+    and `…-text.srt`) so the pipeline re-fetches against today's quota,
+    then deletes the canonical SRT so the pipeline actually re-runs.
+    The cached whisper SRT in `_sources/` is left alone — no GPU re-pass
+    needed; the verifier will replay against the same ground-truth
+    transcript.
 
-    Refuses if the torrent is still downloading. Skips videos currently
-    in flight (annotation queue). Each successful delete will cost a
-    fresh Sonnet annotation pass when the new SRT arrives."""
+    Trade-off: any annotation work on affected videos is lost (Sonnet
+    pass re-runs after the new SRT lands). Run this only when quota has
+    reset and a fresh OS hit is genuinely valuable. Skips videos already
+    in flight.
+
+    `wrapper` is the bt-side wrapper name — videos resolve via the
+    canonical-path manifest written by bt_filter."""
     if any((BT_ROOT / req.wrapper).rglob("*.aria2")):
         raise HTTPException(status_code=409, detail="torrent still downloading")
     canonical_videos = load_manifest(req.wrapper)
@@ -589,26 +564,29 @@ async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
         if j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING"):
             in_flight_paths.add(j.get("source_path"))
 
-    deleted = 0
+    cleared = 0
     for video in canonical_videos:
         if not video.is_file():
             continue
         if str(video) in in_flight_paths:
             continue
+        # Drop cached OS candidates so the next pipeline pass refetches.
+        for tag in ("opensubtitles-hash", "opensubtitles-text"):
+            cand = _sources_path(video, tag)
+            if cand.exists():
+                try:
+                    cand.unlink()
+                except OSError as e:
+                    print(f"[upgrade-english] unlink {cand.name!r}: {e}", flush=True)
+        # Drop the canonical SRT so the pipeline reruns its verify pass.
         srt = video.with_suffix(".srt")
-        if not srt.exists():
-            continue
-        try:
-            if OS_FAILED_MARKER.encode("utf-8") not in srt.read_bytes():
-                continue
-        except OSError:
-            continue
-        try:
-            srt.unlink()
-            deleted += 1
-        except OSError as e:
-            print(f"[upgrade-english] unlink failed for {srt.name!r}: {e}", flush=True)
-    return {"ok": True, "deleted": deleted}
+        if srt.exists():
+            try:
+                srt.unlink()
+                cleared += 1
+            except OSError as e:
+                print(f"[upgrade-english] unlink {srt.name!r}: {e}", flush=True)
+    return {"ok": True, "cleared": cleared}
 
 
 @app.post("/api/bt/translate-zh", status_code=200)
@@ -729,21 +707,25 @@ class BtRetryRequest(BaseModel):
 
 @app.post("/api/bt/retry", status_code=200)
 async def bt_retry(req: BtRetryRequest):
-    """Clear a failure sentinel so the scan loop picks the file up again.
+    """Clear failure state for a video so the scan loop replays its pipeline.
 
-    Implementation: delete the SRT entirely. Yes that throws away a
-    successfully-transcribed transcript if the failure was only on the
-    annotation stage — but that's the trade-off for not having three
-    different retry buttons. Whisper's the expensive bit, and even then
-    it's <10 min on the GPU; cheaper than building partial-retry UI.
+    Deletes: the canonical SRT + `<stem>.whisper-failed` + `<stem>.annotate-failed`.
+    Keeps the `_sources/` candidate cache — whisper output and OS hits
+    stick around so the next pipeline run replays cheaply (no GPU re-pass,
+    no OS quota re-burn). For a hard reset that wipes cached sources too,
+    manual rm under /artifact/_sources/ is the right escape hatch.
     """
     path = _validate_bt_path(req.path)
-    srt = path.with_suffix(".srt")
-    if srt.exists():
-        try:
-            srt.unlink()
-        except OSError as e:
-            raise HTTPException(status_code=500, detail=f"unlink failed: {e}")
+    for target in (
+        path.with_suffix(".srt"),
+        whisper_failed_path(path),
+        annotate_failed_path(path),
+    ):
+        if target.exists():
+            try:
+                target.unlink()
+            except OSError as e:
+                raise HTTPException(status_code=500, detail=f"unlink {target.name} failed: {e}")
     return {"ok": True}
 
 
@@ -1100,11 +1082,19 @@ def _run_pending_filter():
 
 
 def _queue_pending_bt_work():
-    """For every bt video without SRT, enqueue whisper; for every SRT without ※,
-    enqueue annotation. Files carrying a `※ whisper failed:` or
-    `※ annotate failed:` sentinel in their SRT are skipped — the worker
-    that hit the error wrote the sentinel itself, and the user clears it
-    via the UI ↻ button (which deletes the SRT).
+    """Decide what each bt video needs and enqueue the right worker:
+
+      - canonical SRT exists + has `※ annotated`        → SKIP (done)
+      - canonical SRT exists + no `※ annotated`         → enqueue annotate
+        (pipeline completed verification but didn't finish the Sonnet pass)
+      - `<stem>.whisper-failed` sidecar exists          → SKIP (user must ↻)
+      - `<stem>.annotate-failed` sidecar exists         → SKIP (user must ↻)
+      - none of the above                               → enqueue full pipeline
+        (whisper → collect candidates → verify → ffsubsync → write canonical)
+
+    Manual SRT drops at the canonical path are treated as "trust the user" —
+    no whisper verification kicks in. Drop into `_sources/<stem>.bundled.srt`
+    instead if you want the pipeline's content gate to evaluate it.
     """
     _run_pending_filter()
     items = _scan_bt()
@@ -1119,61 +1109,26 @@ def _queue_pending_bt_work():
     for item in items:
         if item["path"] in in_flight_paths:
             continue
-
-        # whisper-failed SRTs read as `has_srt=False` from _scan_bt, but the
-        # sentinel is still present on disk — skip so we don't re-fire.
-        if item["whisper_error"]:
+        if item["whisper_error"] or item["annotate_error"]:
             continue
-
-        # If the SRT was hand-dropped next to the video after bt_filter
-        # already wrote its sentinel for this wrapper, the filter never
-        # saw it and didn't stamp a source. Catch it retroactively as
-        # `bundled-strict-stem` so the playback flash + on-disk
-        # attribution stay consistent with every other path.
-        # Cheap substring check, idempotent.
         if item["has_srt"]:
-            srt_path = Path(item["path"]).with_suffix(".srt")
-            if not _has_source_stamp(srt_path):
-                try:
-                    stamp_source(srt_path, "bundled-strict-stem")
-                except OSError as e:
-                    print(f"[srt-matcher] strict-stem source stamp failed for "
-                          f"{srt_path.name!r}: {e}", flush=True)
-
-        if not item["has_srt"]:
-            video = Path(item["path"])
-
-            # 1. OpenSubtitles by file hash — human-translated subs are
-            #    better than whisper output and free at the API layer (subject
-            #    to daily quota; misses are cached in-memory to avoid retries).
-            #    Note: bundled SRTs (release-shipped Subs/<lang>/*.srt etc.)
-            #    are already in place by this point — bt_filter.filter_wrapper
-            #    runs at the wrapper level when the torrent finishes and
-            #    copies bundled English subs to <stem>.srt before this loop
-            #    sees the video.
-            if find_subs(video) is not None:
+            if item["has_annotation"]:
                 continue
-
-            # 2. Fallback: GPU whisper. If it fails, tasks.py stamps the
-            #    failure sentinel onto the SRT itself — we'll see it on the
-            #    next tick and skip via the `whisper_error` branch above.
+            # SRT exists (pipeline-written or user-dropped) but not annotated —
+            # just run the Sonnet pass.
             job_id = str(uuid.uuid4())
             job = _new_bt_job(job_id, item["path"])
+            job["status"] = "ANNOTATING"
             upsert_job(job)
-            executor.submit(process_bt_file, job_id)
+            annotate_executor.submit(annotate_job, job_id)
             continue
-
-        # Has SRT — check if annotation is needed. Skip annotated-once-
-        # failed cases via the sentinel.
-        if item["has_annotation"]:
-            continue
-        if item["annotate_error"]:
-            continue
+        # No canonical SRT, no failure sidecars — start the full pipeline.
+        # tasks.process_bt_file orchestrates whisper → candidate fetch →
+        # verify → ffsubsync → annotation handoff.
         job_id = str(uuid.uuid4())
         job = _new_bt_job(job_id, item["path"])
-        job["status"] = "ANNOTATING"
         upsert_job(job)
-        annotate_executor.submit(annotate_job, job_id)
+        executor.submit(process_bt_file, job_id)
 
 
 async def _bt_work_loop():

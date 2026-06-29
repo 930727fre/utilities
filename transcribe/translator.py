@@ -39,7 +39,6 @@ from requests.adapters import HTTPAdapter
 
 from annotate import parse_srt, render_srt  # reuse the same parser/renderer
 from gemini_client import generate_json
-from srt_source import stamp_source
 
 ZH_SUFFIX = ".zh-tw.srt"
 
@@ -286,7 +285,6 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
             c["lines"] = new_lines
 
     out_path.write_text(render_srt(cues), encoding="utf-8")
-    stamp_source(out_path, "llm-translated")
 
 
 def translate_video_zh(video: Path) -> None:

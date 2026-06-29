@@ -1,23 +1,30 @@
-"""LLM-assisted OpenSubtitles candidate verification.
+"""Two-stage subtitle verification.
 
-`moviehash_match=True` only means the uploader claimed their sub corresponds
-to this hash — there's no server-side check. Real-world bad data exists (e.g.
-Spider-Man subs mis-tagged with Whiplash's hash). We need a second line that
-reasons about whether the candidate actually refers to the same work.
+`verify_candidate(video, candidates)` — metadata-only prefilter for an
+OpenSubtitles result list. Asks Haiku whether each candidate's release /
+title / season-episode metadata matches the local filename, picks the
+best one. Cheap, runs BEFORE we burn an OS download quota on the wrong
+file.
 
-Both signals available per candidate help here:
-- `attributes.release` — the uploader's subtitle filename, usually a release
-  string like `Movie.Title.YEAR.QUALITY.GROUP.mkv`
-- `attributes.feature_details.title` / `.year` — canonical metadata from
-  OpenSubtitles' film database
+`verify_against_whisper(whisper_srt, candidate_srt)` — content-level
+gate. Whisper output is the ground-truth listening reference; the
+candidate is a "literary upgrade" we accept only if its actual cue text
++ timing demonstrate it's subtitling the same audio.
 
-Haiku is cheap and reliably handles transliteration / abbreviation / noise
-tokens / language variants when comparing these to the local filename.
+Why two? Cheap-first ordering: metadata filter discards obviously wrong
+candidates (different show, wrong episode) before we even download, then
+content gate catches the failures metadata can't see — wrong cut (right
+movie but Snyder Cut vs theatrical), forced subs masquerading as full
+dialogue, sub mis-labelled as English. Both layers are needed; neither
+subsumes the other.
 """
 import os
 from pathlib import Path
 from typing import Optional
 
+from rapidfuzz import fuzz
+
+from annotate import parse_srt
 from claude_client import generate_json
 
 _MATCH_MODEL = os.environ.get("ANTHROPIC_MATCH_MODEL", "claude-haiku-4-5-20251001")
@@ -131,3 +138,120 @@ def verify_candidate(video: Path, candidates: list[dict]) -> Optional[dict]:
         print(f"[subs-verify] LLM returned {match_id!r}, not a valid id; ignoring", flush=True)
         return None
     return id_map[match_id]
+
+
+# ── Content-level verification against whisper ────────────────────────────
+
+# Density gate: candidate's cue count vs whisper's. Forced subs typically
+# have ~10 cues spanning a 50-min episode, vs ~500 for whisper full dialogue.
+# Ratio guards against both directions (SDH candidates may have ~1.2x
+# whisper's cue count, still healthy).
+_DENSITY_MIN_RATIO = 0.4
+
+# Time-aligned fuzzy match parameters.
+_SAMPLE_CUES = 20             # number of whisper cues sampled evenly across the file
+_TIME_WINDOW_S = 15.0         # ±window for finding candidate cues near a whisper cue's timestamp
+_FUZZ_MIN_SCORE = 50          # rapidfuzz token_set_ratio threshold for "this pair matches"
+_MATCH_RATIO_PASS = 0.5       # >= 50% of sampled whisper cues must find a fuzzy match
+
+
+def _start_seconds(cue: dict) -> float:
+    """Parse cue's start timestamp (HH:MM:SS,mmm) into seconds. Permissive
+    on malformed: returns 0.0 so a bad cue sorts to the start of the
+    timeline rather than aborting verification."""
+    try:
+        start = cue["time"].split(" -->")[0]
+        h, m, rest = start.split(":")
+        sec, ms = rest.split(",")
+        return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
+    except (KeyError, ValueError, AttributeError):
+        return 0.0
+
+
+def _cue_text(cue: dict) -> str:
+    """Flatten cue's text lines into a single lower-cased string for fuzzing."""
+    return " ".join(ln.strip() for ln in cue.get("lines", []) if ln.strip()).lower()
+
+
+def _real_cues(srt_path: Path) -> list[dict]:
+    """Parse SRT and drop our ※ sentinel cues (idx >= 99000 by convention).
+    Verification compares dialogue, not status overlay."""
+    try:
+        text = srt_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    cues = parse_srt(text)
+    return [c for c in cues if c.get("idx", 0) < 99000]
+
+
+def verify_against_whisper(
+    whisper_srt: Path,
+    candidate_srt: Path,
+) -> tuple[bool, str]:
+    """Pure-Python content gate. Returns (pass, reason).
+
+    Stage 1 — density check: reject if candidate has dramatically fewer
+    or more cues than whisper (catches forced subs / wrong content).
+
+    Stage 2 — time-aligned fuzzy match: sample whisper cues across the
+    file, find any candidate cue within ±15s of each sample, score
+    token-set similarity. Pass if >= 50% of samples find a match scoring
+    >= 50.
+
+    rapidfuzz.token_set_ratio is robust to whisper mis-hearings,
+    punctuation/casing differences, SDH descriptive cues, slight reorderings —
+    everything that a strict character-level compare would falsely reject.
+    """
+    w_cues = _real_cues(whisper_srt)
+    c_cues = _real_cues(candidate_srt)
+
+    if not w_cues:
+        return False, "whisper SRT empty or unparseable"
+    if not c_cues:
+        return False, "candidate SRT empty or unparseable"
+
+    # Stage 1 — density
+    density = min(len(w_cues), len(c_cues)) / max(len(w_cues), len(c_cues))
+    if density < _DENSITY_MIN_RATIO:
+        return False, (
+            f"cue density {density:.2f} below {_DENSITY_MIN_RATIO} "
+            f"(whisper={len(w_cues)}, candidate={len(c_cues)} — likely forced subs "
+            f"or wrong content)"
+        )
+
+    # Stage 2 — time-aligned fuzzy match
+    n_samples = min(_SAMPLE_CUES, len(w_cues))
+    step = max(1, len(w_cues) // n_samples)
+    samples = w_cues[::step][:n_samples]
+
+    matches = 0
+    for w_cue in samples:
+        w_t = _start_seconds(w_cue)
+        w_text = _cue_text(w_cue)
+        if not w_text:
+            continue
+
+        nearby = [
+            c for c in c_cues
+            if abs(_start_seconds(c) - w_t) <= _TIME_WINDOW_S
+        ]
+        if not nearby:
+            continue
+
+        best_score = max(
+            fuzz.token_set_ratio(w_text, _cue_text(c)) for c in nearby
+        )
+        if best_score >= _FUZZ_MIN_SCORE:
+            matches += 1
+
+    match_ratio = matches / n_samples if n_samples else 0.0
+    if match_ratio >= _MATCH_RATIO_PASS:
+        return True, (
+            f"{matches}/{n_samples} sampled cues matched "
+            f"(density {density:.2f})"
+        )
+    return False, (
+        f"only {matches}/{n_samples} sampled cues matched, need "
+        f"{int(_MATCH_RATIO_PASS * n_samples)} (density {density:.2f}) — "
+        f"likely different content / wrong cut / wrong language"
+    )

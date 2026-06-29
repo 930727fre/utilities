@@ -112,16 +112,17 @@ export default function Bt() {
 
   async function handleUpgradeEnglish(wrapper, count) {
     const ok = confirm(
-      `Retry OpenSubtitles for ${count} video${count === 1 ? '' : 's'} in this torrent?\n\n` +
-      `These SRTs were produced by whisper after OS missed (likely quota-exhausted). ` +
-      `Retrying deletes each affected SRT and re-runs the full cascade — including a ` +
-      `fresh Claude annotation pass (~$0.05 each).`
+      `Force fresh OpenSubtitles fetch for ${count} video${count === 1 ? '' : 's'} in this torrent?\n\n` +
+      `Cached OS candidates will be deleted so the pipeline retries against ` +
+      `today's quota. Each affected SRT gets re-verified, re-ffsubsync'd, and ` +
+      `a fresh Claude annotation pass runs (~$0.05 each). Cached whisper ` +
+      `output is kept — no GPU re-pass.`
     )
     if (!ok) return
     try {
       const res = await upgradeEnglishTorrent(wrapper)
-      if (res.deleted === 0) {
-        alert('Nothing was upgraded — videos may have moved out of the os-failed state already.')
+      if (res.cleared === 0) {
+        alert('Nothing was cleared — videos may be in flight or annotated already.')
       }
       await refresh()
     } catch (err) {
@@ -161,15 +162,15 @@ export default function Bt() {
       return { ready: false, count: 0, reason: 'Torrent still downloading' }
     }
     const myItems = itemsByTorrent.get(torrent.name) || []
-    const candidates = myItems.filter(it => it.os_failed && !it.in_flight_job_id)
+    const candidates = myItems.filter(it => it.has_annotation && !it.in_flight_job_id)
     if (candidates.length === 0) {
-      return { ready: false, count: 0, reason: 'No whisper-fallback videos to upgrade' }
+      return { ready: false, count: 0, reason: 'No annotated videos to refetch English subs for' }
     }
     return {
       ready: true,
       count: candidates.length,
-      reason: `Retry OpenSubtitles for ${candidates.length} video${candidates.length === 1 ? '' : 's'} ` +
-              `that fell back to whisper (will re-annotate, ~$0.05 each)`,
+      reason: `Force OS refetch for ${candidates.length} video${candidates.length === 1 ? '' : 's'} ` +
+              `(will throw away annotation, re-annotate ~$0.05 each)`,
     }
   }
 

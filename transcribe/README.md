@@ -20,29 +20,56 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (bt, 1440 min / ratio 1.0 seed limits) |
 | Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
-| SRT matcher | Claude (haiku) tool-use agent — `list_dir` + `read_lines` + `srt_summary` to browse the torrent's tree (flat sibling, RARBG's `Subs/<stem>/N_English.srt`, anything in between), comparing cue count + time-span coverage to tell forced/fragment tracks from full dialogue tracks, then reading cue text to verify language. Sandboxed to the video's folder, capped at 12 tool calls |
-| Subs finder | OpenSubtitles REST API — queries by OSDb file hash for human-translated subs before falling back to whisper |
-| Subs verifier | Claude (haiku) — confirms the OpenSubtitles candidate's release/title/year matches the local filename, guarding against mis-tagged uploads |
-| Subs sync | `ffsubsync` — VAD on the video's audio aligns the downloaded SRT's cue timing (handles release-mismatch drift) |
+| SRT matcher | Claude (haiku) at bt_filter time — one call picks the canonical title / year / S+E for each main video AND chooses which bundled SRT (if any) to copy into `_sources/<stem>.bundled.srt` as a candidate. Uses cue count + time-span coverage + first-cue preview to distinguish forced / SDH / full-dialogue tracks |
+| Subs finder | OpenSubtitles REST API — fetches hash-search and text-search candidates into `_sources/<stem>.opensubtitles-{hash,text}.srt`. Never writes the canonical SRT directly |
+| Metadata verifier | Claude (haiku) — confirms an OS search-result's release / title / year matches the local filename. Runs BEFORE download to avoid burning OS quota on the wrong file |
+| Content verifier | Programmatic `rapidfuzz` — cue-density gate plus time-aligned `token_set_ratio` fuzzy match between each candidate and the whisper ground-truth transcript. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
+| Subs sync | `ffsubsync` — VAD on the video's audio aligns the verified candidate's cue timing before it lands at the canonical path (handles release-mismatch drift) |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
 
 ## On-disk layout
 
 ```
-data/downloads/                  ← YouTube output
+data/downloads/                                 ← YouTube output
   <sanitized title>.mp4
-  <sanitized title>.srt          ← annotated in place
+  <sanitized title>.srt                         ← whisper + annotated in place
 
-data/bt/<wrapper>/               ← per-torrent wrapper; aria2c writes here,
-  Show.S01E01.mkv                  transcribe reads via /bt mount
-  Show.S01E01.srt                ← written by bt pipeline (whisper / OS /
-                                    bundled-recursive), annotated in place
-  Show.S01E01.zh-tw.srt          ← written by the "translate to 中" button
-                                    (10-cue Gemini Flash Lite + sliding context)
+data/bt/<wrapper>/                              ← aria2 download dir (READ-ONLY
+  Show.S01E01.mkv                                 to us; we hardlink out)
+  Subs/                                           the wrapper stays so aria2
+                                                  can keep seeding
 
-  (for multi-file torrents, aria2 adds another nested folder named after
-   the torrent's metadata "name" field inside <wrapper>; harmless, predictable)
+data/artifact/Movies/Title (Year)/              ← Jellyfin scans here
+  Title (Year).mkv                              hardlinked from data/bt
+  Title (Year).srt                              FINAL (verified + annotated)
+  Title (Year).zh-tw.srt                        from "translate to 中" button
+
+data/artifact/TV/Title (Year)/Season 01/
+  Title (Year) - S01E01.mkv
+  Title (Year) - S01E01.srt
+  Title (Year) - S01E01.annotate-failed         sidecar IF annotation crashed
+  Title (Year) - S01E01.whisper-failed          sidecar IF whisper crashed
+                                                (extension-less so Jellyfin
+                                                ignores them)
+
+data/artifact/_processed/                       pipeline state
+  <wrapper>.filtered                            bt_filter sentinel (one per
+                                                bt wrapper that's been
+                                                LLM-classified)
+
+data/artifact/_sources/                         candidate staging — mirrors
+  Movies/Title (Year)/                          Movies/TV. Pipeline reads these
+    Title (Year).whisper.srt                    to pick a winner; the winner
+    Title (Year).bundled.srt                    gets ffsubsync'd and copied to
+    Title (Year).opensubtitles-hash.srt         the canonical path. They stay
+    Title (Year).opensubtitles-text.srt         around so the verifier's
+  TV/Title (Year)/Season 01/                    threshold can be tweaked and
+    Title (Year) - S01E01.whisper.srt           the pipeline replayed without
+    Title (Year) - S01E01.bundled.srt           re-running whisper or
+                                                re-burning OS quota
 ```
+
+Jellyfin's docker-compose mounts only `data/artifact/Movies` and `data/artifact/TV` — `_processed` and `_sources` are invisible to it.
 
 YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for filesystem (control chars and `<>:"/\|?*` replaced with `_`, capped at 180 chars). Infuse auto-loads any `.srt` sibling as a sidecar.
 
@@ -82,7 +109,8 @@ docker compose up -d --build
 | `GET`  | `/api/bt/torrents` | One entry per wrapper folder + its phase (`downloading` / `seeding` / `done` / `orphaned`) |
 | `DELETE` | `/api/bt/torrents/{wrapper}` | Kill the subprocess (if running) + rmtree the wrapper folder |
 | `POST` | `/api/bt/transcribe` | `{path}`: manually trigger whisper on a bt file (background loop already handles this; useful for power/curl override) |
-| `POST` | `/api/bt/retry` | `{path}`: clear the failure sentinel SRT so the loop picks the file up again |
+| `POST` | `/api/bt/retry` | `{path}`: clear the canonical SRT + both failure sidecars (whisper-failed / annotate-failed) so the loop replays the pipeline. Cached `_sources/` candidates are preserved for cheap replay |
+| `POST` | `/api/bt/upgrade-english` | `{wrapper}`: nuke cached OS candidates + canonical SRTs in the wrapper so the next tick re-fetches OS against today's quota. Throws away annotation work in the process |
 | `POST` | `/api/bt/translate-zh` | `{wrapper}`: queue every video in this torrent for Chinese translation via 10-cue Gemini Flash Lite batches. Refuses if torrent still downloading or any video lacks `※ annotated`. Idempotent — clicking again clears `.error` stamps so it doubles as retry |
 
 ## Job states
@@ -98,18 +126,57 @@ Magnet submissions don't enter `jobs.json` at all. The bt-tab UI shows two live 
 
 Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` jobs flip to `FAILED` on startup. `ANNOTATING` crashes flip to `SUCCESS` with `annotation_error` set; for bt jobs the background loop will retry.
 
+## SRT pipeline (bt path)
+
+Whisper is the ground-truth listening reference; scraped subtitles are "literary upgrades" we accept only after they prove they're subtitling the same audio. Per video:
+
+```
+1. bt_filter (Haiku, one call per wrapper)
+     → hardlinks main-feature videos into Movies/ or TV/
+     → copies bundled English SRT (if any) into _sources/<stem>.bundled.srt
+2. whisper (HTTP to shared service, GPU-gated)
+     → _sources/<stem>.whisper.srt
+3. OS candidate fetch (per video)
+     → _sources/<stem>.opensubtitles-hash.srt   (if hash search hits)
+     → _sources/<stem>.opensubtitles-text.srt   (if text search hits)
+   Each search is metadata-prefiltered by Haiku (`subs_verifier.verify_candidate`)
+   to avoid burning OS quota on the wrong file.
+4. Content gate (rapidfuzz, deterministic, ~$0)
+     For each candidate in order (bundled → OS hash → OS text):
+       - cue-density gate: reject if candidate has <40% or >250% of
+         whisper's cue count (catches forced subs / wrong content)
+       - sample 20 whisper cues across the timeline, find candidate
+         cues within ±15 s, fuzzy-match with token_set_ratio
+       - PASS if ≥ 50% of samples match with score ≥ 50
+5. Winner placement
+     - First passing candidate → ffsubsync → canonical /artifact/.../X.srt
+     - All fail → whisper SRT copied to canonical
+6. Annotation (Sonnet) → ※ annotated marker appended in place
+```
+
+Re-running the verifier (e.g. after tweaking the rapidfuzz threshold) replays from `_sources/` without re-burning GPU or OS quota — every candidate that was ever fetched stays cached.
+
+## State markers
+
+Three signals, designed so the background loop can decide what to do for each video by inspecting the filesystem alone (no jobs.json overlay, no metadata DB):
+
+```
+<stem>.srt with `※ annotated` cue   → done; skip
+<stem>.srt without `※ annotated`     → run Sonnet annotation
+<stem>.whisper-failed sidecar        → pipeline halted at whisper; skip until ↻
+<stem>.annotate-failed sidecar       → annotation crashed; skip until ↻
+(none of the above)                  → run full pipeline
+```
+
+Failure sidecars are extension-less plain-text files holding the error reason — Jellyfin / Infuse never load them as subtitles, but `cat <stem>.whisper-failed` shows you what broke. The UI ↻ button clears all three (canonical SRT + both sidecars); cached candidates in `_sources/` are preserved so the next replay is fast.
+
+Manual SRT drops at `<stem>.srt` are trusted — they skip whisper verification and just get annotated. Drop into `_sources/<stem>.bundled.srt` instead if you want the rapidfuzz content gate to evaluate your candidate.
+
 ## Annotation
 
-Claude scans the SRT for U.S.-cultural references a Taiwanese viewer might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues. After annotation, sentinel cues sit in the 00:00:00–00:00:08 window at video start: `※ source: <bundled-strict-stem | bundled-recursive | opensubtitles-hash | opensubtitles-text | whisper>` (0–2 s) recording which pipeline path produced the SRT — `bundled-strict-stem` for a `<stem>.srt` sitting flat next to the video (no Subs/ folder, picked up as-is), `bundled-recursive` for the srt-matcher tool-use agent walking into `Subs/` or similar subfolders, `opensubtitles-*` for OS, `whisper` for the GPU fallback. `※ annotated` (2–4 s) marking the annotation pass complete. On the bt path when whisper took over because OpenSubtitles missed, `※ os failed: <reason>` (4–8 s) recording exactly why OS didn't deliver (no candidate / verifier rejection / quota / etc.) — OS is the most consequential leg of the pipeline (human subs > whisper) so its failure mode is surfaced first-class. They flash at playback start so the user gets immediate confirmation of "which path produced this SRT, did annotation run, did OS try" without opening the UI. Manually-dropped SRTs get the `bundled-strict-stem` tag retroactively on the next scan tick (we can't distinguish a manual drop from a torrent-bundled flat sibling; both end up at `<stem>.srt`). The presence of `※ annotated` on disk is the only annotation-state signal — no jobs.json overlay. Failures use the same window (whisper failure as the sole cue 0–3 s; annotate failure appended at 2–5 s after the source stamp).
+Claude (sonnet) scans the chosen English SRT for U.S.-cultural references a Taiwanese viewer might miss — athletes, brands, regional places, slang, sports gameplay — and appends a short 繁體中文 note prefixed with `※` to the relevant cues. A `※ annotated` sentinel cue at 00:00:02 → 00:00:04 marks the SRT as final.
 
-A background loop scans `/bt` every 30s for both whisper work (video without SRT) and annotation work (SRT without `※ annotated`), and queues each through the appropriate executor. Failures are recorded as sentinel cues inside the SRT itself (`※ whisper failed:` / `※ annotate failed:`) so the loop knows not to retry; the UI ↻ button is the only path back into the pipeline.
-
-**Before queuing whisper, two rescue steps fire** (in order, cheapest first):
-
-1. **LLM srt-matcher**: Claude Haiku gets `list_dir` + `read_lines` tools and walks the video's folder tree to find an English subtitle. Handles flat-folder bundles (`Movie.2024.en.srt` next to the mp4), RARBG-style nested layouts (`Subs/<video-stem>/N_English.srt`), and anything in between the same way — the agent lists what's around, drills into likely subfolders, and reads the first ~20 cues of candidates to verify the language is English (skip Spanish / Chinese / SDH-only / forced-signs tracks). Match → COPY (not move) to satisfy strict match while preserving the torrent's original Subs/ folder → annotation proceeds. Tool calls are sandboxed to the video's parent folder and capped at 12.
-2. **OpenSubtitles (hash → text)**: if no sibling `.srt` to rescue, compute the file's OSDb hash and query OpenSubtitles. Filter to `moviehash_match=true` results (uploader-claimed exact hash match), then ask Claude Haiku to confirm the candidate's release / title / year / show / S+E matches the local filename — `moviehash_match` is uploader-claimed, not server-verified, and mis-tagged uploads do exist (real case: Spider-Man subs returned for a Whiplash hash). If hash search returns nothing or Haiku rejects every candidate, fall back to a **text search** by extracted title (+ year for movies, + season/episode for TV), again gated by the verifier. Source-stamped `※ source: opensubtitles-hash` vs `opensubtitles-text` so you can tell which path produced the SRT. On confirmed match: download → run `ffsubsync` against the video's audio to correct any release-mismatch timing drift → annotation. Misses are cached in-memory so we don't burn quota on the same file every 30s.
-
-Only if both steps miss does whisper run. For popular content (movies, mainstream TV) this means ~zero GPU is spent — OpenSubtitles' human-translated subs are higher quality than whisper output anyway.
+A background loop scans `/artifact` every 30 s, queues anything matching the table above through the right executor (full pipeline → `tasks.executor`, annotation-only → `annotate.annotate_executor`). The Sonnet pass is chained automatically after every successful pipeline run — annotation is never user-triggered.
 
 ## bt scan filters
 
@@ -143,7 +210,7 @@ Per video:
 3. Chunk into 10-cue batches; run batches in parallel (10 concurrent Gemini calls per episode), each with sliding-window context + forced-JSON array output keyed by the input cue indices.
 4. Validate per batch: returned cue indices must cover the input batch. On mismatch, retry once before accepting partial coverage (missing cues keep their English line).
 5. Apply translations back in place.
-6. Write `<stem>.zh-tw.srt` next to the video and stamp `※ source: llm-translated` so the player flashes the source tag at the 0–2 s window same as everywhere else.
+6. Write `<stem>.zh-tw.srt` next to the video.
 
 Cost: ~$0.02 per movie, ~30-60 s per movie depending on cue count. A 13-episode pack like Sopranos S01 takes ~10 min end-to-end.
 

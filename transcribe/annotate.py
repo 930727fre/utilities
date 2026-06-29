@@ -194,13 +194,14 @@ def annotate_job(job_id: str):
     except Exception as exc:
         traceback.print_exc()
         job = get_job(job_id)
-        # Drop a failure sentinel into the SRT itself so the background
-        # scan loop stops re-firing annotation for this file. The user
-        # clears it (and triggers a fresh annotate run) by pressing ↻ in
-        # the UI, which deletes the SRT and lets the whole pipeline rerun.
+        # Drop an annotate-failed sidecar next to the video so the
+        # background scan loop stops re-firing annotation for this file.
+        # The user clears it (and triggers a fresh annotate run) by
+        # pressing ↻ in the UI, which deletes the canonical SRT plus
+        # both sidecars and lets the next tick replay the pipeline.
         if job:
             srt_path = _srt_path_for(job)
-            if srt_path is not None and srt_path.exists():
+            if srt_path is not None:
                 try:
                     stamp_annotate_failed(srt_path, str(exc))
                 except OSError:
@@ -248,10 +249,10 @@ def _do_annotate(job_id: str):
     if not cues:
         raise RuntimeError("SRT contained no parseable cues")
 
-    # Exclude our own sentinel cues from what Claude sees — they sit at
-    # 00:00:00–05 with `※ source: …` / `※ whisper failed: …` text and
-    # would confuse the model into either annotating them or skipping
-    # neighbouring real cues. Re-render at the end still includes them.
+    # Exclude our own sentinel cues from what Claude sees — `※ annotated`
+    # sits at 00:00:02 and would confuse the model into either annotating
+    # it or skipping the neighbouring real cue. Re-render at the end
+    # still includes it.
     annotatable_cues = [c for c in cues if not _is_sentinel_cue(c)]
     if not annotatable_cues:
         raise RuntimeError("SRT had only sentinel cues, no dialogue to annotate")
@@ -304,12 +305,9 @@ def _do_annotate(job_id: str):
         "lines": ["※ annotated"],
     })
 
-    # stamp_source / stamp_os_failed / stamp_annotate_failed all APPEND to
-    # the file, so cues like `※ source: bundled-agent` (00:00:00) sit at
-    # the end of the cues list even though their timestamps belong at the
-    # start. Players sort by timestamp anyway, but anyone doing `head
-    # file.srt` sees a confusing order. Sort the cues list before render so
-    # file order = playback order and casual inspection is honest.
+    # `※ annotated` is inserted at idx 99999 with a 00:00:02 timestamp;
+    # if any other 00:00 sentinel exists from older runs, sort the cues
+    # by timestamp so `head file.srt` shows them in playback order.
     cues.sort(key=_cue_start_seconds)
 
     # Re-check before writing

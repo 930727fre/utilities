@@ -1,32 +1,35 @@
-"""OpenSubtitles.com client — find a matching subtitle for a video file.
+"""OpenSubtitles.com client — fetch matching subtitle candidates for a video.
 
-Called before whisper for any bt video that's missing a strict-stem .srt. For
-popular content (movies, mainstream TV) OpenSubtitles usually has a hand-
-translated sub with proper punctuation and clean cue boundaries — much better
-than whisper output, and free at the API layer (just 5-20 downloads/day on the
-free tier per registered consumer).
+Called by the bt video pipeline AFTER whisper has produced a ground-truth
+SRT. The candidates returned here are evaluated against whisper output by
+`subs_verifier.verify_against_whisper`; only those that pass that content
+gate become the final subtitle. Mis-matched candidates are simply
+discarded — there's no second-chance lookup or stamping back into the
+canonical SRT path.
 
-Two-pass search:
-1. **hash search** — query by OSDb file hash, filter to `moviehash_match=True`,
-   verify via Haiku. Highest confidence — when it hits, the SRT is for this
-   exact release, no timing drift.
-2. **text search** — fall back to querying by title (+ year for movies,
-   + season/episode for TV episodes), verify via Haiku, run ffsubsync to fix
-   release-mismatch drift. Lower confidence — the SRT is for a different
-   release, so timing alignment relies on ffsubsync.
+This module's sole responsibility:
+  1. Search OpenSubtitles (hash, then text)
+  2. Metadata-prefilter via Haiku (`subs_verifier.verify_candidate`)
+  3. Download the chosen candidate's raw SRT bytes into a caller-provided
+     destination path
 
-Auth: `Api-Key` header for search; `Authorization: Bearer <token>` for download
-endpoints. Token obtained via /login (user/pass), cached in memory, refreshed
-on 401.
+Caller does ffsubsync, caller decides whether to promote the candidate
+to canonical. This module never touches `_sources/` layout or
+`/artifact/.../*.srt` directly — purity matters because the candidate
+might lose verification and we don't want partial writes leaking into
+user-facing paths.
 
-Silent-fail philosophy: any error path returns None and the caller falls
-through to whisper. The pipeline degrades gracefully if env vars are unset,
-quota is exhausted, or OpenSubtitles is unreachable.
+Auth: `Api-Key` header for search; `Authorization: Bearer <token>` for
+download endpoints. Token obtained via /login, cached in memory,
+refreshed on 401.
+
+Quota: 5-20 downloads/day on the free tier (300 with paid). A daily-
+TTL negative cache keyed by (video, languages, mode) prevents the
+30 s scan loop from re-burning quota on a video that just missed.
 """
 import os
 import re
 import struct
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -34,7 +37,6 @@ from typing import Optional
 
 import requests
 
-from srt_source import stamp_source
 from subs_verifier import verify_candidate
 
 API_BASE = "https://api.opensubtitles.com/api/v1"
@@ -52,30 +54,17 @@ HASH_CHUNK = 65536  # 64 KB for OSDb hash
 _token: Optional[str] = None
 _token_lock = threading.Lock()
 
-# Negative cache: { (video_path, languages): (expiry_unix_timestamp, reason) }.
+# Negative cache: { (video_path, languages, mode): expiry_unix_timestamp }
+# `mode` ∈ {"hash", "text"} — both legs cached independently so a quota
+# hit on /download (which only fires after a successful search) doesn't
+# poison the cheaper search path on the other mode.
 #
-# Keyed by (path, languages) for hygiene — only ever populated with "en" now
-# (the Chinese-translation path is LLM-only and doesn't go through OS at
-# all) but the structure remains generic in case we ever bring it back.
-#
-# Without it the 30 s scan loop would burn an OS API call (and a Claude haiku
-# verify, which costs real money) every tick on the same video.
-#
-# Permanent entries (`expiry = float("inf")`) are for outcomes that the next
-# API call would deterministically reproduce — no candidate found, all
-# candidates rejected by the verifier, candidate has no file_id. Time-limited
-# entries are for "transient-looking" failures, almost always OpenSubtitles'
-# daily download quota cap (HTTP 406): the quota refreshes at the next UTC
-# day boundary, so we expire those after 24 h and let whichever scan tick
-# lands first try the API again.
-#
-# `reason` is a human-readable string surfaced via get_failure_reason() —
-# stamped into the SRT (`※ os failed: …` when whisper takes over) so the
-# user understands WHY OS didn't deliver without needing to read
-# `docker logs`. OS is the most consequential leg of the English pipeline
-# (human subs > whisper), so its failure mode deserves first-class
-# visibility.
-_failed: dict[tuple[str, str], tuple[float, str]] = {}
+# Permanent entries (`expiry = float("inf")`) are for outcomes that the
+# next API call would deterministically reproduce — no results, all
+# candidates rejected by Haiku, candidate had no file_id. Time-limited
+# entries (24 h TTL) cover quota exhaustion (HTTP 406) so the next-day
+# scan tick gets a clean retry without our 30 s loop spamming OS.
+_failed: dict[tuple[str, str, str], float] = {}
 _failed_lock = threading.Lock()
 
 _TRANSIENT_RETRY_SECONDS = 24 * 3600
@@ -213,6 +202,32 @@ def _parse_filename(video: Path) -> dict:
     }
 
 
+# ── Failed cache helpers ──────────────────────────────────────────────────
+
+def _check_cache(key: tuple[str, str, str]) -> bool:
+    """Return True if this lookup should be skipped (cached as failed)."""
+    now = time.time()
+    with _failed_lock:
+        expiry = _failed.get(key)
+        if expiry is None:
+            return False
+        if expiry > now:
+            return True
+        # Expired — drop so we don't keep checking expiry.
+        _failed.pop(key, None)
+        return False
+
+
+def _cache_permanent(key: tuple[str, str, str]):
+    with _failed_lock:
+        _failed[key] = float("inf")
+
+
+def _cache_transient(key: tuple[str, str, str]):
+    with _failed_lock:
+        _failed[key] = time.time() + _TRANSIENT_RETRY_SECONDS
+
+
 # ── Two search strategies ─────────────────────────────────────────────────
 
 def _search_by_hash(video: Path, languages: str) -> Optional[dict]:
@@ -291,151 +306,95 @@ def _search_by_text(video: Path, languages: str) -> Optional[dict]:
               f"(query={info['title']!r} S={info['season']} E={info['episode']} y={info['year']})", flush=True)
         return None
 
-    # Pass up to top 10 to the verifier — text search returns ordered by
-    # relevance, more than that just burns tokens without helping.
     print(f"[subs-finder] text {len(data)} results for {video.name!r}", flush=True)
     return verify_candidate(video, data[:10])
 
 
-# ── Entry point ───────────────────────────────────────────────────────────
+# ── Download a verified pick to a destination path ────────────────────────
 
-def find_subs(video: Path, languages: str = "en", out_path: Optional[Path] = None) -> Optional[Path]:
-    """Search OpenSubtitles for a subtitle in `languages` matching this video.
-
-    `languages` is a comma-separated list of ISO codes (currently always
-    "en" — the Chinese-translation path bypasses OS entirely). `out_path`
-    overrides the default `video.with_suffix('.srt')` output location. Both
-    parameters stay generic in case the OS-Chinese branch is ever revived.
-
-    Try hash search first (zero timing drift when it hits), fall back to
-    text search (drift fixed by ffsubsync). Returns the written SRT path
-    on success, None on any miss/error.
-    """
-    if out_path is None:
-        out_path = video.with_suffix(".srt")
-    cache_key = (str(video), languages)
-
-    now = time.time()
-    with _failed_lock:
-        entry = _failed.get(cache_key)
-        if entry is not None:
-            expiry, _reason = entry
-            if expiry > now:
-                return None
-            # Expired — drop the entry so we don't keep checking expiry.
-            _failed.pop(cache_key, None)
-
-    def cache_permanent(reason: str):
-        with _failed_lock:
-            _failed[cache_key] = (float("inf"), reason)
-        return None
-
-    def cache_transient(reason: str):
-        with _failed_lock:
-            _failed[cache_key] = (time.time() + _TRANSIENT_RETRY_SECONDS, reason)
-        return None
-
-    pick = _search_by_hash(video, languages)
-    source_tag = "opensubtitles-hash"
-
-    if pick is None:
-        pick = _search_by_text(video, languages)
-        source_tag = "opensubtitles-text"
-
-    if pick is None:
-        return cache_permanent(
-            f"no verified subtitle candidate (lang={languages}); "
-            f"hash + text search both returned 0 results or the Haiku verifier "
-            f"rejected every candidate"
-        )
-
+def _download_candidate(pick: dict, dest: Path) -> bool:
+    """Resolve the chosen OS pick into actual SRT bytes at `dest`.
+    Returns True on success, False on any failure (caller decides
+    whether to cache permanent vs transient based on its key)."""
     attrs = pick.get("attributes") or {}
     files = attrs.get("files") or []
     if not files:
-        print(f"[subs-finder] picked candidate has no files for {video.name!r}", flush=True)
-        return cache_permanent("OpenSubtitles candidate had no downloadable file attached")
+        return False
     file_id = files[0].get("file_id")
     if not file_id:
-        print(f"[subs-finder] picked candidate has no file_id for {video.name!r}", flush=True)
-        return cache_permanent("OpenSubtitles candidate file had no file_id")
-    print(f"[subs-finder] picked release={attrs.get('release', '?')!r} "
-          f"via {source_tag} (lang={languages})", flush=True)
+        return False
 
     try:
         download_url = _download_with_retry(file_id)
     except (requests.RequestException, KeyError) as e:
-        # Almost always HTTP 406 = daily quota exhausted, sometimes a real
-        # network blip. Either way, "tomorrow / soon" is the right retry
-        # window, not "permanent" or "every 30 s."
-        print(f"[subs-finder] download API failed for {video.name!r}: {e}", flush=True)
-        return cache_transient(
-            f"OpenSubtitles /download API failed (most likely HTTP 406 = "
-            f"daily quota exhausted; retries in 24h): {e}"
-        )
+        # Almost always HTTP 406 (daily quota); caller treats as transient.
+        print(f"[subs-finder] /download API failed: {e}", flush=True)
+        return False
 
     try:
         r = requests.get(download_url, timeout=60)
         r.raise_for_status()
-        # OS subs come in varied encodings; let requests decode with charset
-        # detection, then we write as UTF-8 (annotation step also handles this
-        # with a latin-1 fallback if needed).
         srt_text = r.text
     except requests.RequestException as e:
-        # CDN hiccup — also transient.
-        print(f"[subs-finder] SRT fetch failed for {video.name!r}: {e}", flush=True)
-        return cache_transient(f"SRT CDN fetch failed (retries in 24h): {e}")
+        print(f"[subs-finder] SRT fetch failed: {e}", flush=True)
+        return False
 
     if not srt_text.strip():
-        # Genuinely missing content on OpenSubtitles' side — no point
-        # retrying tomorrow.
-        print(f"[subs-finder] empty SRT body for {video.name!r}", flush=True)
-        return cache_permanent("OpenSubtitles returned an empty SRT body")
+        return False
 
-    out_path.write_text(srt_text, encoding="utf-8")
-    print(f"[subs-finder] wrote {out_path.name!r} from OpenSubtitles", flush=True)
-
-    # ffsubsync overwrites the SRT, so source-stamp AFTER it (whether it
-    # succeeded or fell through). Tag distinguishes hash vs text origin —
-    # text-origin SRTs are more likely to need timing verification.
-    _resync_inplace(video, out_path)
-    stamp_source(out_path, source_tag)
-    return out_path
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(srt_text, encoding="utf-8")
+    return True
 
 
-def get_failure_reason(video: Path, languages: str = "en") -> Optional[str]:
-    """Return the human-readable failure reason for the last find_subs
-    call on (video, languages), or None if find_subs succeeded or was
-    never called for this pair.
+# ── Public entry points: per-mode candidate fetch ─────────────────────────
 
-    Used by the bt path to stamp `※ os failed: …` into the SRT after
-    whisper takes over, so the user sees WHY OS didn't deliver this one
-    at playback start. Returns the reason regardless of whether the cache
-    entry is permanent or transient — callers usually only ask after
-    find_subs returned None on the current tick."""
-    with _failed_lock:
-        entry = _failed.get((str(video), languages))
-        return entry[1] if entry is not None else None
+def find_candidate_hash(video: Path, languages: str, dest: Path) -> Optional[Path]:
+    """Fetch one hash-matched candidate SRT to `dest`. Returns `dest` on
+    success, None on any miss.
+
+    Caller is responsible for whisper-verifying the result and deciding
+    whether to promote to canonical."""
+    key = (str(video), languages, "hash")
+    if _check_cache(key):
+        return None
+
+    pick = _search_by_hash(video, languages)
+    if pick is None:
+        _cache_permanent(key)
+        return None
+
+    if not _download_candidate(pick, dest):
+        # /download endpoint is the quota-gated one; treat as transient.
+        _cache_transient(key)
+        return None
+
+    attrs = pick.get("attributes") or {}
+    print(f"[subs-finder] hash candidate written: release="
+          f"{attrs.get('release', '?')!r} → {dest.name}", flush=True)
+    return dest
 
 
-def _resync_inplace(video: Path, srt: Path) -> None:
-    """ffsubsync uses VAD on the video's audio + the SRT's cue rhythm to find
-    the right time offset, then writes the corrected SRT back in place.
+def find_candidate_text(video: Path, languages: str, dest: Path) -> Optional[Path]:
+    """Fetch one text-matched candidate SRT to `dest`. Returns `dest` on
+    success, None on any miss.
 
-    Best-effort: any failure leaves the original (possibly mis-synced) SRT
-    intact and the pipeline continues. Capped at 5 min for a sane upper bound
-    on long movies.
-    """
-    try:
-        r = subprocess.run(
-            ["ffsubsync", str(video), "-i", str(srt), "-o", str(srt)],
-            capture_output=True,
-            timeout=300,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        print(f"[subs-finder] ffsubsync error for {srt.name!r}: {e}", flush=True)
-        return
-    if r.returncode != 0:
-        tail = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:]
-        print(f"[subs-finder] ffsubsync rc={r.returncode} for {srt.name!r}: {tail}", flush=True)
-        return
-    print(f"[subs-finder] resynced {srt.name!r} via ffsubsync", flush=True)
+    Caller is responsible for whisper-verifying the result and running
+    ffsubsync against the local audio."""
+    key = (str(video), languages, "text")
+    if _check_cache(key):
+        return None
+
+    pick = _search_by_text(video, languages)
+    if pick is None:
+        _cache_permanent(key)
+        return None
+
+    if not _download_candidate(pick, dest):
+        _cache_transient(key)
+        return None
+
+    attrs = pick.get("attributes") or {}
+    print(f"[subs-finder] text candidate written: release="
+          f"{attrs.get('release', '?')!r} → {dest.name}", flush=True)
+    return dest
