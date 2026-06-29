@@ -11,10 +11,15 @@ from pathlib import Path
 import requests
 import yt_dlp
 
-from annotate import annotate_executor, annotate_job
+from annotate import annotate_srt
 from bt_filter import _sources_path
 from gpu_lock import gpu_lock
-from srt_source import stamp_whisper_failed, whisper_failed_path
+from srt_source import (
+    annotate_failed_path,
+    stamp_annotate_failed,
+    stamp_whisper_failed,
+    whisper_failed_path,
+)
 from subs_finder import find_candidate_hash, find_candidate_text
 from subs_verifier import verify_against_whisper
 from storage import get_job, upsert_job
@@ -26,9 +31,12 @@ DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
 FFSUBSYNC_TIMEOUT = 5 * 60        # 5 minutes per file is plenty for movies
 
-# Whisper serialization happens upstream (gpu_lock + whisper container's own
-# internal queue), but we keep our own single-threaded executor so this
-# process's per-job state (jobs.json updates, file renames) stays serial.
+# Single worker — pipeline (whisper + verify + ffsubsync + annotation) runs
+# end-to-end on one thread so per-job state mutations stay serial and the
+# GPU lock is held only when whisper is actually running. Annotation
+# (~1 min Sonnet pass) inlines after whisper for a ~5% throughput hit, in
+# exchange for an atomic "canonical exists = fully done" invariant — no
+# separate ANNOTATING executor, no marker checks.
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="transcribe-worker")
 
 
@@ -50,6 +58,23 @@ def _catch_unhandled(fn):
             traceback.print_exc()
             _fail(job_id, f"Unhandled error: {exc}")
     return wrapped
+
+
+def _is_job_deleted(job_id: str) -> bool:
+    job = get_job(job_id)
+    return not job or job["status"] == "DELETED"
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write `content` to `path` via a sibling tmp file + rename. The
+    rename is atomic on POSIX (single inode swap), so any other reader
+    (Jellyfin scan, Infuse browse) sees either the prior file or the new
+    file — never a half-written intermediate. Used for canonical-SRT
+    writes where partial state would confuse downstream consumers."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.tmp"
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
 
 
 def enumerate_playlist(url: str) -> list[dict]:
@@ -199,22 +224,18 @@ def _run_whisper(job_id: str, media_path: Path, srt_path: Path):
     srt_path.write_text(srt_text, encoding="utf-8")
 
 
-def _resync_to_canonical(video: Path, candidate_srt: Path, canonical_srt: Path) -> bool:
-    """Run ffsubsync to align `candidate_srt` to `video`'s audio, writing the
-    result to `canonical_srt`. The candidate file stays untouched (so the
-    _sources/ copy can be replayed against an updated verifier later).
+def _resync(video: Path, candidate_srt: Path, output_srt: Path) -> bool:
+    """Run ffsubsync to align `candidate_srt` to `video`'s audio, writing
+    the result to `output_srt`. Candidate stays untouched (it lives under
+    `_sources/` and is re-read on every replay). Returns True on success.
 
-    Returns True if ffsubsync produced an aligned SRT at canonical_srt;
-    False on any failure (in which case caller should pick the next
-    candidate or fall back to the whisper copy).
-
-    Best-effort timeout cap; ffsubsync VAD on a long movie can be slow
-    but 5 minutes is more than enough in practice.
+    5-minute timeout — ffsubsync VAD on a long movie can be slow but
+    that's more than enough in practice.
     """
-    canonical_srt.parent.mkdir(parents=True, exist_ok=True)
+    output_srt.parent.mkdir(parents=True, exist_ok=True)
     try:
         r = subprocess.run(
-            ["ffsubsync", str(video), "-i", str(candidate_srt), "-o", str(canonical_srt)],
+            ["ffsubsync", str(video), "-i", str(candidate_srt), "-o", str(output_srt)],
             capture_output=True,
             timeout=FFSUBSYNC_TIMEOUT,
         )
@@ -225,71 +246,95 @@ def _resync_to_canonical(video: Path, candidate_srt: Path, canonical_srt: Path) 
         tail = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:]
         print(f"[ffsubsync] rc={r.returncode} for {video.name!r}: {tail}", flush=True)
         return False
-    if not canonical_srt.exists() or canonical_srt.stat().st_size == 0:
+    if not output_srt.exists() or output_srt.stat().st_size == 0:
         return False
-    print(f"[ffsubsync] resynced → {canonical_srt.name}", flush=True)
+    print(f"[ffsubsync] resynced → {output_srt.name}", flush=True)
     return True
 
 
-def _queue_annotation(job_id: str):
-    """Flip a SUCCESS job to ANNOTATING and submit to the annotate executor.
-
-    Called automatically after every successful transcription (yt + bt).
-    """
-    job = get_job(job_id)
-    if not job or job["status"] != "SUCCESS":
-        return
-    job["status"] = "ANNOTATING"
-    job["annotation_error"] = None
-    job["updated_at"] = _now()
-    upsert_job(job)
-    annotate_executor.submit(annotate_job, job_id)
-
-
 def _run_transcription(job_id: str, staging_mp4: str):
-    """yt path: whisper a staging mp4, rename to title-based filename,
-    write SRT next to it, then auto-queue annotation.
+    """yt path: whisper a staging mp4, run annotation inline, then rename
+    the mp4 + write the annotated SRT atomically at title-based final
+    paths. No candidate verification step — YouTube has only whisper as
+    a source, so the verified.srt tier under /artifact/_sources/ doesn't
+    apply (yt files don't even live under /artifact)."""
+    staging_path = Path(staging_mp4)
+    staging_srt = staging_path.with_suffix(".srt")
 
-    YouTube videos go to /app/data/downloads/ and bypass the bt
-    `_sources/` candidate pipeline entirely — there's nothing to
-    verify against (no bundled SRTs, no OS catalog match worth the
-    quota burn for an arbitrary YouTube clip). Whisper output is the
-    final SRT directly."""
+    # ── Whisper ───────────────────────────────────────────────────────
     try:
-        # Whisper into a temp SRT next to the staging mp4; rename both after.
-        staging_path = Path(staging_mp4)
-        staging_srt = staging_path.with_suffix(".srt")
         _run_whisper(job_id, staging_path, staging_srt)
     except Exception as exc:
         _fail(job_id, str(exc))
         return
 
-    job = get_job(job_id)
-    if not job or job["status"] == "DELETED":
+    if _is_job_deleted(job_id):
         return
 
-    # Promote staging mp4 + srt to title-based filenames so they're
-    # human-recognizable in Infuse / file listings.
+    # ── Decide final paths ───────────────────────────────────────────
+    job = get_job(job_id)
+    if not job:
+        return
     base = _unique_basename(_sanitize_title(job["title"]))
     final_mp4 = DOWNLOADS_DIR / f"{base}.mp4"
     final_srt = DOWNLOADS_DIR / f"{base}.srt"
 
-    # Rename SRT before mp4 so the sidecar exists before any consumer scans
-    # for the freshly-named video — cheap insurance even though WebDAV +
-    # Infuse browse on demand (no inotify race).
-    staging_path = Path(staging_mp4)
-    staging_srt = staging_path.with_suffix(".srt")
-    if staging_srt.exists():
-        staging_srt.rename(final_srt)
-    if staging_path.exists():
-        staging_path.rename(final_mp4)
-
-    job["status"] = "SUCCESS"
-    job["basename"] = base
+    # ── Annotation ────────────────────────────────────────────────────
+    job["status"] = "ANNOTATING"
     job["updated_at"] = _now()
     upsert_job(job)
 
-    _queue_annotation(job_id)
+    annotation_error: str | None = None
+    try:
+        annotated = annotate_srt(
+            staging_srt,
+            is_cancelled=lambda: _is_job_deleted(job_id),
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        annotation_error = f"Annotation failed: {exc}"
+        annotated = None
+
+    if _is_job_deleted(job_id):
+        return
+
+    # On annotation failure or cancellation that wasn't deletion, fall
+    # back to the un-annotated whisper transcript so the user at least
+    # gets a usable subtitle file — yt jobs are one-shot, throwing away
+    # the download+transcribe work on a transient API failure is too
+    # punitive.
+    if annotated is None and annotation_error is None:
+        # Treated as graceful cancellation — bail without writing.
+        return
+    if annotated is None:
+        try:
+            annotated = staging_srt.read_text(encoding="utf-8")
+        except OSError as exc:
+            _fail(job_id, f"Whisper SRT unreadable: {exc}")
+            return
+
+    # ── Promote staging → final atomically ────────────────────────────
+    try:
+        _atomic_write_text(final_srt, annotated)
+    except OSError as exc:
+        _fail(job_id, f"write final SRT failed: {exc}")
+        return
+    if staging_path.exists():
+        try:
+            staging_path.rename(final_mp4)
+        except OSError as exc:
+            _fail(job_id, f"rename mp4 failed: {exc}")
+            return
+    staging_srt.unlink(missing_ok=True)
+
+    job = get_job(job_id)
+    if not job or job["status"] == "DELETED":
+        return
+    job["status"] = "SUCCESS"
+    job["basename"] = base
+    job["annotation_error"] = annotation_error
+    job["updated_at"] = _now()
+    upsert_job(job)
 
 
 # ── BT video pipeline ─────────────────────────────────────────────────────
@@ -328,25 +373,31 @@ def _fetch_candidate(tag: str, video: Path, dest: Path) -> Path | None:
 
 @_catch_unhandled
 def process_bt_file(job_id: str):
-    """bt video pipeline:
+    """bt video pipeline — produces a canonical, annotated SRT through
+    four cacheable stages, each writing its output to `_sources/` and
+    only the final annotated text landing at the canonical path. Each
+    stage skips if its output already exists on disk, so any partial
+    progress survives crashes / restarts / manual deletions:
 
-      1. whisper → _sources/<stem>.whisper.srt (ground truth)
-      2. collect candidates (bundled / OS hash / OS text), each into its
-         own _sources/<stem>.<tag>.srt
-      3. for each candidate in order: verify_against_whisper; the first
-         to pass goes through ffsubsync and lands at the canonical
-         /artifact/.../X.srt
-      4. if no candidate passes: cp whisper SRT to canonical
-      5. queue annotation
+      1. whisper      → /artifact/_sources/.../<stem>.whisper.srt
+      2. candidates   → /artifact/_sources/.../<stem>.{bundled,opensubtitles-*}.srt
+      3. verify+sync  → /artifact/_sources/.../<stem>.verified.srt
+                        (winner from step 2 → ffsubsync; or whisper itself
+                         if no candidate passed the rapidfuzz gate)
+      4. annotate     → /artifact/.../<stem>.srt   (atomic mv tmp → canonical)
 
-    Whisper failure halts the pipeline (writes <stem>.whisper-failed
-    sidecar, no canonical SRT written) — without a ground-truth
-    transcript there's nothing to verify candidates against, so it
-    isn't safe to fall back to bundled-untrusted.
+    State recovery on restart: a pipeline that died mid-run leaves
+    whatever it managed to write under `_sources/` intact. The next
+    scan tick re-queues `process_bt_file`, which picks up at the first
+    stage whose output is missing — no manual intervention, no marker
+    reads, no jobs.json overlay.
 
-    Idempotent on re-entry: _sources/ files already on disk are reused
-    (no re-whisper, no re-OS-call), so the verifier can be re-run
-    cheaply when its thresholds change.
+    Whisper failure → `<stem>.whisper-failed` sidecar, halt; canonical
+    never written, _sources/ left as-is (might be empty).
+
+    Annotation failure → `<stem>.annotate-failed` sidecar, halt;
+    canonical never written, `_sources/<stem>.verified.srt` retained so
+    ↻ replay only re-runs annotation.
     """
     job = get_job(job_id)
     if not job or job["status"] in ("DELETED", "SUCCESS"):
@@ -362,14 +413,15 @@ def process_bt_file(job_id: str):
         _fail(job_id, f"Source file missing: {source_path}")
         return
 
-    canonical_srt = video.with_suffix(".srt")
+    canonical = video.with_suffix(".srt")
     whisper_src = _sources_path(video, "whisper")
+    verified_src = _sources_path(video, "verified")
 
     job["status"] = "TRANSCRIBING"
     job["updated_at"] = _now()
     upsert_job(job)
 
-    # ── 1. Whisper (skip if cached in _sources/) ──────────────────────
+    # ── 1. Whisper (cached) ───────────────────────────────────────────
     if not whisper_src.exists():
         try:
             _run_whisper(job_id, video, whisper_src)
@@ -383,62 +435,93 @@ def process_bt_file(job_id: str):
     else:
         print(f"[pipeline] reusing cached whisper SRT for {video.name!r}", flush=True)
 
-    job = get_job(job_id)
-    if not job or job["status"] == "DELETED":
+    if _is_job_deleted(job_id):
         return
 
-    # ── 2 & 3. Walk candidates; first-pass-wins ────────────────────────
-    winner_tag: str | None = None
-    for tag in _CANDIDATE_TAGS:
-        cand_dest = _sources_path(video, tag)
-        cand_path = _fetch_candidate(tag, video, cand_dest)
-        if cand_path is None:
-            continue
+    # ── 2 & 3. Verified.srt (cached) ──────────────────────────────────
+    if not verified_src.exists():
+        winner_tag: str | None = None
+        for tag in _CANDIDATE_TAGS:
+            cand_dest = _sources_path(video, tag)
+            cand_path = _fetch_candidate(tag, video, cand_dest)
+            if cand_path is None:
+                continue
 
-        ok, reason = verify_against_whisper(whisper_src, cand_path)
-        if not ok:
-            print(f"[pipeline] {video.name!r}: {tag} REJECT — {reason}", flush=True)
-            continue
-        print(f"[pipeline] {video.name!r}: {tag} ACCEPT — {reason}", flush=True)
+            ok, reason = verify_against_whisper(whisper_src, cand_path)
+            if not ok:
+                print(f"[pipeline] {video.name!r}: {tag} REJECT — {reason}", flush=True)
+                continue
+            print(f"[pipeline] {video.name!r}: {tag} ACCEPT — {reason}", flush=True)
 
-        # ffsubsync writes the aligned version straight to canonical;
-        # _sources/<tag>.srt stays untouched for future replay.
-        if _resync_to_canonical(video, cand_path, canonical_srt):
-            winner_tag = tag
-            break
-        # ffsubsync failed — keep trying next candidate. (We don't
-        # fall back to the un-synced candidate because timing drift
-        # over a 50-min episode is worse than whisper output.)
-        print(f"[pipeline] {video.name!r}: {tag} ffsubsync failed; trying next", flush=True)
+            if _resync(video, cand_path, verified_src):
+                winner_tag = tag
+                break
+            # ffsubsync failed — try next candidate. Un-synced candidate
+            # isn't worth using; timing drift over a 50-min episode is
+            # worse than whisper output.
+            print(f"[pipeline] {video.name!r}: {tag} ffsubsync failed; trying next", flush=True)
 
-    # ── 4. Fallback to whisper ─────────────────────────────────────────
-    if winner_tag is None:
-        try:
-            canonical_srt.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(whisper_src), str(canonical_srt))
-            print(f"[pipeline] {video.name!r}: no candidate verified → whisper SRT promoted", flush=True)
-        except OSError as exc:
-            _fail(job_id, f"copy whisper → canonical failed: {exc}")
-            return
-        winner_tag = "whisper"
+        if winner_tag is None:
+            # No candidate passed. Whisper IS the verified output (it's
+            # already audio-aligned, no ffsubsync needed).
+            try:
+                verified_src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(whisper_src), str(verified_src))
+                print(f"[pipeline] {video.name!r}: no candidate verified → whisper promoted to verified.srt", flush=True)
+            except OSError as exc:
+                _fail(job_id, f"copy whisper → verified failed: {exc}")
+                return
+    else:
+        print(f"[pipeline] reusing cached verified SRT for {video.name!r}", flush=True)
 
-    # Clean any stale whisper-failed sidecar from a previous run — we
-    # just successfully produced an SRT, so the prior failure no longer
-    # blocks anything.
-    try:
-        whisper_failed_path(video).unlink(missing_ok=True)
-    except OSError:
-        pass
-
-    job = get_job(job_id)
-    if not job or job["status"] == "DELETED":
+    if _is_job_deleted(job_id):
         return
 
-    job["status"] = "SUCCESS"
+    # ── 4. Annotation → canonical (atomic) ────────────────────────────
+    job["status"] = "ANNOTATING"
     job["updated_at"] = _now()
     upsert_job(job)
 
-    _queue_annotation(job_id)
+    try:
+        annotated = annotate_srt(
+            verified_src,
+            is_cancelled=lambda: _is_job_deleted(job_id),
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            stamp_annotate_failed(video, str(exc))
+        except OSError:
+            pass
+        _fail(job_id, f"Annotation failed: {exc}")
+        return
+
+    if annotated is None:
+        # Cancelled (job DELETED). Nothing written to canonical; the
+        # next-time replay re-runs only the annotation step thanks to
+        # the cached verified.srt.
+        return
+
+    try:
+        _atomic_write_text(canonical, annotated)
+    except OSError as exc:
+        _fail(job_id, f"write canonical failed: {exc}")
+        return
+
+    # Successfully produced the canonical SRT — clear any stale failure
+    # sidecars from a prior run so the file isn't accidentally skipped.
+    for sidecar in (whisper_failed_path(video), annotate_failed_path(video)):
+        try:
+            sidecar.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    job = get_job(job_id)
+    if not job or job["status"] == "DELETED":
+        return
+    job["status"] = "SUCCESS"
+    job["updated_at"] = _now()
+    upsert_job(job)
 
 
 def _fail(job_id: str, error: str):

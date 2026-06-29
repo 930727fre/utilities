@@ -1,22 +1,23 @@
-"""SRT annotation worker — calls Claude (Sonnet) to flag U.S.-culture-specific references
-and embeds short 繁體中文 notes into each cue's text.
+"""SRT annotation — Claude (Sonnet) flags U.S.-culture-specific references and
+embeds short 繁體中文 notes into each cue's text.
+
+Pure function entry point: `annotate_srt(srt_path) -> str` reads an SRT,
+runs the Sonnet annotation pass, returns the annotated SRT text. Callers
+(tasks.py for both bt and yt paths) are responsible for writing the result
+to canonical, handling failures, and updating job status.
+
+No `※ annotated` sentinel cue is inserted — under the file-existence state
+model, the canonical SRT existing IS the "annotated" signal, so an in-body
+marker would be redundant overlay noise.
 """
 import re
-import traceback
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from typing import Callable, Optional
 from pathlib import Path
 
 from claude_client import generate_json
-from srt_source import stamp_annotate_failed
-from storage import get_job, upsert_job
 
-DOWNLOADS_DIR = Path("/app/data/downloads")
-
-# Single worker — annotation is API-bound, not time-critical. Keep predictable.
-annotate_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="annotate-worker")
-
-# Cap per-call cue count so output JSON stays well under flash-lite's output limit.
+# Cap per-call cue count so output JSON stays well under the model's
+# output limit.
 CHUNK_SIZE = 800
 
 ANNOTATION_SCHEMA = {
@@ -112,10 +113,6 @@ SRT chunk:
 """
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 # ── SRT parsing ────────────────────────────────────────────────────────────
 
 _BLOCK_SEP = re.compile(r"\n\s*\n")
@@ -161,81 +158,31 @@ def render_chunk_for_prompt(chunk: list[dict]) -> str:
     return "\n".join(parts)
 
 
-def _cue_start_seconds(cue: dict) -> float:
-    """Parse the cue's start timestamp into seconds. Used to sort cues
-    chronologically before re-rendering, so sentinels appended at the
-    file end (`※ source: …` etc.) but timestamped at 00:00:00 sit at
-    the top of the rendered file. Permissive: malformed timestamps
-    sort to the start (safer than raising mid-render)."""
-    try:
-        start = cue["time"].split(" -->")[0]
-        h, m, rest = start.split(":")
-        sec, ms = rest.split(",")
-        return int(h) * 3600 + int(m) * 60 + int(sec) + int(ms) / 1000
-    except (KeyError, ValueError, AttributeError):
-        return 0.0
-
-
 def _is_sentinel_cue(cue: dict) -> bool:
-    """A cue whose visible text is just our ※ markers (e.g. `※ source: …`,
-    `※ annotated`, the failure stamps). Filtered out of chunks sent to the
-    LLM so Claude doesn't waste tokens / hallucinate annotations on our
-    own status overlay, but kept in the cues list so the final re-render
-    preserves them on disk."""
+    """A cue whose visible text is just our ※ markers. Phase-2 pipelines
+    don't emit these any more, but legacy annotated SRTs (pre-Phase 2) may
+    still carry `※ source: …` / `※ annotated` / `※ os failed: …` cues,
+    so we still filter them out of LLM chunks so Claude doesn't re-annotate
+    them. Re-render preserves them verbatim."""
     visible = [ln.strip() for ln in cue.get("lines", []) if ln.strip()]
     return bool(visible) and all(ln.startswith("※") for ln in visible)
 
 
-# ── Worker ────────────────────────────────────────────────────────────────
+# ── Annotation entry point ────────────────────────────────────────────────
 
-def annotate_job(job_id: str):
-    try:
-        _do_annotate(job_id)
-    except Exception as exc:
-        traceback.print_exc()
-        job = get_job(job_id)
-        # Drop an annotate-failed sidecar next to the video so the
-        # background scan loop stops re-firing annotation for this file.
-        # The user clears it (and triggers a fresh annotate run) by
-        # pressing ↻ in the UI, which deletes the canonical SRT plus
-        # both sidecars and lets the next tick replay the pipeline.
-        if job:
-            srt_path = _srt_path_for(job)
-            if srt_path is not None:
-                try:
-                    stamp_annotate_failed(srt_path, str(exc))
-                except OSError:
-                    pass
-        if job and job["status"] == "ANNOTATING":
-            job["status"] = "SUCCESS"
-            job["annotation_error"] = f"Annotation failed: {exc}"
-            job["updated_at"] = _now()
-            upsert_job(job)
+def annotate_srt(
+    srt_path: Path,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+) -> Optional[str]:
+    """Annotate the SRT at `srt_path`; return the annotated SRT text.
 
+    Returns None if `is_cancelled()` ever returns True between chunks
+    (caller decides what to do — typically: stop without writing canonical).
 
-def _srt_path_for(job: dict) -> Path | None:
-    if job.get("source") == "bt" and job.get("source_path"):
-        return Path(job["source_path"]).with_suffix(".srt")
-    base = job.get("basename")
-    if base:
-        return DOWNLOADS_DIR / f"{base}.srt"
-    return None
-
-
-def _do_annotate(job_id: str):
-    job = get_job(job_id)
-    if not job or job["status"] != "ANNOTATING":
-        return
-
-    # bt jobs annotate the SRT sibling to the source video; yt jobs annotate
-    # the title-based SRT in DOWNLOADS_DIR.
-    if job.get("source") == "bt" and job.get("source_path"):
-        srt_path = Path(job["source_path"]).with_suffix(".srt")
-    else:
-        basename = job.get("basename")
-        if not basename:
-            raise RuntimeError("Job has no basename — was it transcribed before the schema migration?")
-        srt_path = DOWNLOADS_DIR / f"{basename}.srt"
+    Raises on any other failure (missing file, no parseable cues, API
+    error). Callers should catch and write `<stem>.annotate-failed`
+    sidecar so the scan loop stops retrying.
+    """
     if not srt_path.exists():
         raise RuntimeError(f"SRT file missing on disk: {srt_path}")
 
@@ -249,10 +196,9 @@ def _do_annotate(job_id: str):
     if not cues:
         raise RuntimeError("SRT contained no parseable cues")
 
-    # Exclude our own sentinel cues from what Claude sees — `※ annotated`
-    # sits at 00:00:02 and would confuse the model into either annotating
-    # it or skipping the neighbouring real cue. Re-render at the end
-    # still includes it.
+    # Skip any legacy ※-prefix cues when chunking for the LLM (re-render
+    # still includes them so old annotated SRTs that get re-processed
+    # don't lose anything).
     annotatable_cues = [c for c in cues if not _is_sentinel_cue(c)]
     if not annotatable_cues:
         raise RuntimeError("SRT had only sentinel cues, no dialogue to annotate")
@@ -261,11 +207,8 @@ def _do_annotate(job_id: str):
     seen_entities: set[str] = set()
 
     for start in range(0, len(annotatable_cues), CHUNK_SIZE):
-        # Check for cancellation between chunks — keeps annotation responsive
-        # to a Delete (frontend disables it, but other callers can DELETE).
-        current = get_job(job_id)
-        if not current or current["status"] == "DELETED":
-            return
+        if is_cancelled is not None and is_cancelled():
+            return None
 
         chunk = annotatable_cues[start:start + CHUNK_SIZE]
         chunk_text = render_chunk_for_prompt(chunk)
@@ -281,50 +224,17 @@ def _do_annotate(job_id: str):
                 continue
             if not note:
                 continue
-            # Hard dedup belt-and-suspenders for when the model ignores the
-            # "already annotated" list (which it sometimes does).
+            # Hard dedup belt-and-suspenders for when the model ignores
+            # the "already annotated" list.
             if entity and entity in seen_entities:
                 continue
             notes[cue_idx] = note
             if entity:
                 seen_entities.add(entity)
 
-    # Apply
     for c in cues:
         note = notes.get(c["idx"])
         if note:
             c["lines"].append(f"※ {note}")
 
-    # Sentinel cue inserted at the start (00:00:02 → 00:00:04, just after
-    # the source sentinel's 0–2 s slot) so the user gets a 2-second
-    # "※ annotated" confirmation flash at playback start. Cue index 99999
-    # is well above any plausible real-content cue count.
-    cues.insert(0, {
-        "idx": 99999,
-        "time": "00:00:02,000 --> 00:00:04,000",
-        "lines": ["※ annotated"],
-    })
-
-    # `※ annotated` is inserted at idx 99999 with a 00:00:02 timestamp;
-    # if any other 00:00 sentinel exists from older runs, sort the cues
-    # by timestamp so `head file.srt` shows them in playback order.
-    cues.sort(key=_cue_start_seconds)
-
-    # Re-check before writing
-    current = get_job(job_id)
-    if not current or current["status"] == "DELETED":
-        return
-
-    # Overwrite the SRT in place — downstream players (Infuse via webdav)
-    # pick up the annotated cues as the only sidecar. Re-annotation isn't
-    # supported; to get the plain transcript back the user re-runs the job.
-    srt_path.write_text(render_srt(cues), encoding="utf-8")
-
-    job = get_job(job_id)
-    if not job or job["status"] == "DELETED":
-        return
-    job["status"] = "SUCCESS"
-    job["annotated"] = True
-    job["annotation_error"] = None
-    job["updated_at"] = _now()
-    upsert_job(job)
+    return render_srt(cues)

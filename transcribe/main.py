@@ -17,7 +17,6 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 import bt_torrents
-from annotate import annotate_executor, annotate_job
 from bt_filter import (
     ARTIFACT_ROOT,
     BT_ROOT,
@@ -66,16 +65,16 @@ BT_ROOTS = [Path("/app/data/artifact")]
 # stem, .zh-tw.srt suffix. Infuse picks it up as a separate language track.
 ZH_SUFFIX = ".zh-tw.srt"
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
-ANNOTATION_MARKER = "※ annotated"
 MTIME_GRACE_SECONDS = 60
 BT_SCAN_INTERVAL = 30
 
-# No in-memory failure counters: "we tried this once" is recorded as a
-# sidecar file next to the video — <stem>.whisper-failed for whisper
-# crashes, <stem>.annotate-failed for annotation crashes. Sidecars
-# survive container restarts and signal "skip this file" to the scan
-# loop. The UI ↻ button deletes the canonical SRT + both sidecars so
-# the next tick replays the pipeline.
+# State model: file existence alone — no marker reads, no jobs.json
+# overlay. canonical SRT exists = the pipeline finished verifying +
+# annotating; <stem>.whisper-failed sidecar = pipeline halted at
+# whisper; <stem>.annotate-failed sidecar = pipeline halted at
+# annotation. The ↻ button deletes canonical + both sidecars to let
+# the scan loop re-queue the pipeline; cached `_sources/` candidates
+# are kept so replay only re-does the stages that were missing.
 
 # In-flight translate-to-zh futures keyed by absolute video path. Set when
 # the translate-zh endpoint submits a worker, cleared (via a `finally` in
@@ -161,15 +160,18 @@ async def lifespan(app: FastAPI):
             changed = True
             print(f"[startup] orphaned {job['job_id']} -> FAILED", flush=True)
         elif job["status"] == "ANNOTATING":
-            # Annotation is optional; if it crashed mid-way, flip back to SUCCESS.
-            # The .srt may be partially overwritten — the background loop will
-            # pick it up again if it's a bt job, or the yt user re-runs the
-            # whole job.
-            job["status"] = "SUCCESS"
-            job["annotation_error"] = "Interrupted by restart"
+            # Annotation is now inline inside the pipeline; an interrupted
+            # ANNOTATING job means the pipeline died mid-Sonnet-pass and
+            # the canonical SRT was never atomically written. For bt jobs
+            # the next scan tick will re-queue process_bt_file and replay
+            # only the annotation step (verified.srt is cached). For yt
+            # jobs the user re-submits the URL. Either way: FAILED is the
+            # honest status.
+            job["status"] = "FAILED"
+            job["error"] = "Interrupted by restart"
             job["updated_at"] = _now()
             changed = True
-            print(f"[startup] orphaned annotation {job['job_id']} -> SUCCESS", flush=True)
+            print(f"[startup] orphaned annotation {job['job_id']} -> FAILED", flush=True)
     if changed:
         write_jobs(jobs)
 
@@ -184,7 +186,6 @@ async def lifespan(app: FastAPI):
     finally:
         annotation_loop_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
-        annotate_executor.shutdown(wait=False, cancel_futures=True)
         translator_executor.shutdown(wait=False, cancel_futures=True)
         bt_torrents.shutdown()
         # Free any GPU leases still held — the broker has no TTL, so without
@@ -346,19 +347,6 @@ class BtTranscribeRequest(BaseModel):
     path: str
 
 
-def _is_annotated_srt(srt_path: Path) -> bool:
-    """`※ annotated` anywhere in the SRT means annotation already ran.
-    Includes the 99:59:59 sentinel cue appended even on 0-note passes, so
-    this is a complete check — no need for a jobs.json overlay. (Producer
-    source sentinels use `※ source: …` which won't false-trigger this.)"""
-    try:
-        with open(srt_path, "rb") as f:
-            content = f.read()
-        return ANNOTATION_MARKER.encode("utf-8") in content
-    except OSError:
-        return False
-
-
 def _scan_bt() -> list[dict]:
     """Walk BT_ROOTS, return one entry per video file. Filesystem only,
     plus the in-flight set of translate-zh futures for `zh_in_flight`."""
@@ -409,10 +397,10 @@ def _scan_bt() -> list[dict]:
             # Failure sidecars next to the video signal "pipeline tried,
             # don't retry until user clears via the ↻ button". Filename
             # is the state — extension-less so Jellyfin / Infuse never
-            # try to load them as subtitles.
+            # try to load them as subtitles. Canonical SRT existence
+            # alone is the "fully done" signal — no marker reads.
             whisper_error = read_failure_reason(whisper_failed_path(video))
             annotate_error = read_failure_reason(annotate_failed_path(video))
-            has_annotation = has_srt and _is_annotated_srt(srt)
             # Chinese sub state (user-triggered translate-zh button output).
             # `.zh-tw.srt` is the sidecar; `.zh-tw.srt.error` records a
             # failure reason from the Chinese translator when it surfaces one.
@@ -438,7 +426,6 @@ def _scan_bt() -> list[dict]:
                 "parent": parent_rel,
                 "root": str(root),
                 "has_srt": has_srt,
-                "has_annotation": has_annotation,
                 "whisper_error": whisper_error,
                 "annotate_error": annotate_error,
                 "has_zh_srt": has_zh_srt,
@@ -578,7 +565,16 @@ async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
                     cand.unlink()
                 except OSError as e:
                     print(f"[upgrade-english] unlink {cand.name!r}: {e}", flush=True)
-        # Drop the canonical SRT so the pipeline reruns its verify pass.
+        # Drop the cached verified.srt — it was derived from candidates
+        # we just nuked (or from whisper-fallback), so re-running the
+        # verify+ffsubsync stage is required for any OS hit to land.
+        verified = _sources_path(video, "verified")
+        if verified.exists():
+            try:
+                verified.unlink()
+            except OSError as e:
+                print(f"[upgrade-english] unlink {verified.name!r}: {e}", flush=True)
+        # Drop the canonical SRT so the scan loop re-queues the pipeline.
         srt = video.with_suffix(".srt")
         if srt.exists():
             try:
@@ -623,13 +619,11 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
         if not video.is_file():
             continue
         srt = video.with_suffix(".srt")
+        # Canonical SRT is only written atomically as the pipeline's
+        # final step (annotation included), so existence here implies
+        # the English transcript is finished and ready for translation.
         if not srt.exists():
             raise HTTPException(status_code=409, detail=f"{video.name} has no SRT yet")
-        try:
-            if ANNOTATION_MARKER.encode("utf-8") not in srt.read_bytes():
-                raise HTTPException(status_code=409, detail=f"{video.name} not annotated yet")
-        except OSError as e:
-            raise HTTPException(status_code=500, detail=f"reading SRT failed: {e}")
         videos.append(video)
     # rglob order is filesystem-dependent (inode order on ext4). Sort by
     # name so a multi-episode pack like Sopranos S01 translates E01→E13 in
@@ -673,13 +667,10 @@ async def bt_translate_zh_file(req: BtTranslateZhFileRequest):
     if path.suffix.lower() not in VIDEO_EXTS:
         raise HTTPException(status_code=400, detail="not a video file")
     srt = path.with_suffix(".srt")
+    # Canonical SRT is only written atomically as the pipeline's final
+    # step (annotation included); existence implies "ready to translate".
     if not srt.exists():
-        raise HTTPException(status_code=409, detail="no SRT yet — annotate first")
-    try:
-        if ANNOTATION_MARKER.encode("utf-8") not in srt.read_bytes():
-            raise HTTPException(status_code=409, detail="SRT not annotated yet")
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"reading SRT failed: {e}")
+        raise HTTPException(status_code=409, detail="no SRT yet — wait for pipeline to finish")
 
     zh_path = path.parent / f"{path.stem}{ZH_SUFFIX}"
     if zh_path.exists():
@@ -1082,19 +1073,21 @@ def _run_pending_filter():
 
 
 def _queue_pending_bt_work():
-    """Decide what each bt video needs and enqueue the right worker:
+    """Decide what each bt video needs and enqueue the right worker.
 
-      - canonical SRT exists + has `※ annotated`        → SKIP (done)
-      - canonical SRT exists + no `※ annotated`         → enqueue annotate
-        (pipeline completed verification but didn't finish the Sonnet pass)
-      - `<stem>.whisper-failed` sidecar exists          → SKIP (user must ↻)
-      - `<stem>.annotate-failed` sidecar exists         → SKIP (user must ↻)
-      - none of the above                               → enqueue full pipeline
-        (whisper → collect candidates → verify → ffsubsync → write canonical)
+    Three states by file existence alone — no marker reads:
 
-    Manual SRT drops at the canonical path are treated as "trust the user" —
-    no whisper verification kicks in. Drop into `_sources/<stem>.bundled.srt`
-    instead if you want the pipeline's content gate to evaluate it.
+      - canonical SRT exists      → SKIP (pipeline finished; canonical is
+                                    only written atomically after annotation)
+      - whisper-failed sidecar    → SKIP (user must ↻ to retry)
+      - annotate-failed sidecar   → SKIP (user must ↻ to retry)
+      - none of the above         → queue process_bt_file (which itself
+                                    resumes at whichever pipeline stage
+                                    is missing in `_sources/`)
+
+    Manual SRT drops at the canonical path are accepted as final — pipeline
+    won't touch them. Drop into `_sources/<stem>.bundled.srt` instead if
+    you want the content gate to evaluate your candidate before promotion.
     """
     _run_pending_filter()
     items = _scan_bt()
@@ -1109,22 +1102,8 @@ def _queue_pending_bt_work():
     for item in items:
         if item["path"] in in_flight_paths:
             continue
-        if item["whisper_error"] or item["annotate_error"]:
+        if item["has_srt"] or item["whisper_error"] or item["annotate_error"]:
             continue
-        if item["has_srt"]:
-            if item["has_annotation"]:
-                continue
-            # SRT exists (pipeline-written or user-dropped) but not annotated —
-            # just run the Sonnet pass.
-            job_id = str(uuid.uuid4())
-            job = _new_bt_job(job_id, item["path"])
-            job["status"] = "ANNOTATING"
-            upsert_job(job)
-            annotate_executor.submit(annotate_job, job_id)
-            continue
-        # No canonical SRT, no failure sidecars — start the full pipeline.
-        # tasks.process_bt_file orchestrates whisper → candidate fetch →
-        # verify → ffsubsync → annotation handoff.
         job_id = str(uuid.uuid4())
         job = _new_bt_job(job_id, item["path"])
         upsert_job(job)

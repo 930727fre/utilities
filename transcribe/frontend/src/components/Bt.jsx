@@ -162,7 +162,7 @@ export default function Bt() {
       return { ready: false, count: 0, reason: 'Torrent still downloading' }
     }
     const myItems = itemsByTorrent.get(torrent.name) || []
-    const candidates = myItems.filter(it => it.has_annotation && !it.in_flight_job_id)
+    const candidates = myItems.filter(it => it.has_srt && !it.in_flight_job_id)
     if (candidates.length === 0) {
       return { ready: false, count: 0, reason: 'No annotated videos to refetch English subs for' }
     }
@@ -185,7 +185,7 @@ export default function Bt() {
     if (myItems.some(it => it.zh_in_flight)) {
       return { ready: false, count: 0, reason: 'Translation in progress…' }
     }
-    const done = myItems.filter(it => it.has_annotation).length
+    const done = myItems.filter(it => it.has_srt).length
     if (done < myItems.length) {
       return { ready: false, count: 0, reason: `${done} of ${myItems.length} videos annotated — wait for the rest` }
     }
@@ -501,7 +501,7 @@ function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate, onPlay }) {
 
 function deriveEngState(item) {
   if (item.in_flight_job_id) return 'working'
-  if (item.has_annotation) return 'done'
+  if (item.has_srt) return 'done'
   if (item.whisper_error || item.annotate_error) return 'failed'
   return 'working'
 }
