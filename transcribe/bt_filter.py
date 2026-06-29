@@ -1,57 +1,44 @@
 """Per-torrent post-download LLM filter.
 
 Reads from /bt/<wrapper>/ (aria2's download dir — NEVER touched), writes
-into the canonical Movies/TV tree under /artifact/ plus the candidate
-staging tree under /artifact/_sources/. Separation keeps aria2's seeding
-files intact and makes deletion / cleanup of either side independently
-safe.
+canonical Movies/TV hardlinks under /artifact/. Bundled subtitles are
+NOT touched here — the downstream pipeline scans /bt for them at
+whisper-completion time and content-matches via WER (see
+tasks._pick_bundled).
 
 When a torrent finishes (no `.aria2` control files left under the
-wrapper), call `filter_wrapper(wrapper)`. The pass does three things:
+wrapper), call `filter_wrapper(wrapper)`. The pass does two things:
 
-  1. ONE Haiku call decides: for each video file, the canonical
-     Jellyfin-friendly title / year / (season, episode for TV) AND
-     which bundled English SRT (if any) is the right sibling subtitle.
-     The listing given to the model includes cue count + time span for
-     each .srt so forced / SDH / full-dialogue tracks are distinguishable
-     even when filenames are identical or unhelpful (e.g. `1.srt` / `2.srt`,
-     RARBG's `2_English.srt` + `3_English.srt`).
+  1. ONE Haiku call decides per video:
+       - canonical Jellyfin-friendly title / year / (season, episode for TV)
+       - which directories are bonus content (featurettes, behind-the-
+         scenes, deleted scenes, etc.) so their videos get skipped
 
   2. Hardlink main-feature videos to canonical Movies/TV paths
      (Movies/Title (Year)/Title (Year).mkv,
       TV/Title (Year)/Season NN/Title (Year) - SNNENN.mkv).
      Same inode as the bt-side file; zero extra disk; aria2 keeps the
-     original.
-
-  3. Copy LLM-matched bundled SRTs into /artifact/_sources/ mirroring
-     the canonical tree, named `<stem>.bundled.srt`. They sit as one
-     candidate among many that the bt video pipeline (whisper + OS
-     fetch + verifier) will later evaluate against the whisper
-     ground-truth transcript. The canonical /artifact/Movies/.../X.srt
-     is written ONLY by the pipeline, after a candidate passes
-     content verification.
+     original. The canonical /artifact/.../<stem>.srt is written ONLY
+     by the pipeline, after annotation finishes.
 
 There is NO delete pass — the bt-side wrapper is read-only to us. Junk
 files (Sample/, Subs/, .nfo, RARBG.txt) stay in /bt/ for aria2 to keep
 seeding from, and get cleaned up when the whole wrapper is removed by
 the user (or by an aria2 seed-limit script later).
 
-Bonus directories (featurettes, behind-the-scenes) are still detected
-by the LLM and their videos are skipped — they just don't get
-hardlinked. The /bt/ side keeps them.
+Bonus directories' videos are skipped from main_features so they never
+land in /artifact. The /bt/ side keeps them for completeness.
 
 Idempotency: `.filtered` sentinel is written to /artifact/_processed/
 on exit (even on partial failure) so subsequent scan ticks skip the
-wrapper. Delete the sentinel to force a re-run; existing hardlinks +
-`_sources/<stem>.bundled.srt` copies are NOT overwritten (they're load-
-bearing for in-progress verification / annotation work).
+wrapper. Delete the sentinel to force a re-run; existing hardlinks are
+NOT overwritten.
 """
 import os
 import re
 import shutil
 from pathlib import Path
 
-from annotate import parse_srt
 from claude_client import generate_json
 
 SENTINEL_NAME = ".filtered"
@@ -108,17 +95,6 @@ _SCHEMA = {
                 "required": ["video", "kind", "title", "year"],
             },
         },
-        "srt_matches": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "video": {"type": "string", "description": "relative path of the video"},
-                    "srt": {"type": "string", "description": "relative path of the English SRT to attach"},
-                },
-                "required": ["video", "srt"],
-            },
-        },
         "bonus_dirs": {
             "type": "array",
             "items": {
@@ -127,12 +103,12 @@ _SCHEMA = {
             },
         },
     },
-    "required": ["main_features", "srt_matches", "bonus_dirs"],
+    "required": ["main_features", "bonus_dirs"],
 }
 
 
 _PROMPT_TEMPLATE = """\
-A freshly-downloaded BT torrent. Three decisions:
+A freshly-downloaded BT torrent. Two decisions:
 
 A) For each MAIN-FEATURE video, provide its canonical Jellyfin-friendly \
 naming so the library entry doesn't depend on the release group's quirks:
@@ -150,29 +126,9 @@ episode=1. Always emit both for TV files.
 
    Use your knowledge of mainstream titles; if a release is genuinely \
 unknown, do your best from the filename. Skip bonus / extras videos \
-(they're handled in C below).
+(they're handled in B below).
 
-B) For each main-feature video, pick the best English subtitle to attach \
-as its sibling. Omit a video from srt_matches if no usable English SRT \
-exists.
-
-   Each SRT entry includes:
-     [N cues, START → END]   — coverage stats
-     preview: '<first cue>'  — first dialogue line, for language check
-
-   Picking rules:
-   - Prefer FULL dialogue tracks: hundreds of cues spanning the whole \
-runtime (e.g. 00:00 → 00:55 on a 55-min show).
-   - SDH (similar coverage with extra [MUSIC] / [DOOR SLAMS] cues) \
-is an acceptable fallback.
-   - AVOID FORCED tracks: very few cues (often ~10), narrow span — \
-they only subtitle foreign-language scenes / signs.
-   - The preview must look like real English dialogue, not Spanish \
-/ French / Italian / Chinese.
-   - Match per episode by number when the torrent is a season pack \
-(S01E01.mkv ↔ Subs/01_English.srt etc.).
-
-C) Identify BONUS-CONTENT directories whose videos are NOT the main \
+B) Identify BONUS-CONTENT directories whose videos are NOT the main \
 feature. List their relative paths in `bonus_dirs`. Typical names:
    - Featurettes / Featurette
    - Extras / Bonus / Bonus Content / Bonus Features
@@ -183,6 +139,10 @@ feature. List their relative paths in `bonus_dirs`. Typical names:
    Only directories whose contents are CLEARLY bonus material. Do NOT \
 list directories that contain the main episodes (`Season 01`, the \
 release group's wrapper folder, `Subs`, etc.). If unsure, omit.
+
+Bundled subtitle files (`.srt`) in the listing are NOT your concern —
+the downstream pipeline runs whisper then content-matches each `.srt`
+against whisper output via WER. You only need to classify videos.
 
 Torrent: {wrapper_name}
 
@@ -204,30 +164,14 @@ def _human_size(n: int) -> str:
     return f"{n}B"
 
 
-def _srt_stats_and_preview(p: Path) -> tuple[str | None, str | None]:
-    """Return `(stats, preview)` for an SRT: cue count + time span, and
-    the first cue's dialogue text. Either may be None if the file isn't
-    parseable as SRT (binary subs, malformed, etc.)."""
-    try:
-        text = p.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None, None
-    try:
-        cues = parse_srt(text)
-    except Exception:
-        return None, None
-    if not cues:
-        return None, None
-    # Trim milliseconds from the timestamps to keep the listing compact.
-    first_time = cues[0]["time"].split(" --> ")[0].split(",")[0]
-    last_time = cues[-1]["time"].split(" --> ")[0].split(",")[0]
-    stats = f"{len(cues)} cues, {first_time} → {last_time}"
-    preview = " ".join(cues[0]["lines"]).strip()[:120] or None
-    return stats, preview
-
-
 def _build_tree(wrapper: Path) -> list[str]:
-    """Walk wrapper depth-first, return human-readable listing lines."""
+    """Walk wrapper depth-first, return human-readable listing lines.
+
+    Lists folders and files (with sizes) so the LLM has the structural
+    context it needs to spot bonus directories. SRT cue counts /
+    previews are deliberately omitted — Haiku doesn't pick subtitles
+    any more; the downstream WER gate decides which `.srt` matches
+    which video by content."""
     lines: list[str] = []
     count = 0
     for entry in sorted(wrapper.rglob("*")):
@@ -245,14 +189,7 @@ def _build_tree(wrapper: Path) -> list[str]:
                 size = entry.stat().st_size
             except OSError:
                 size = 0
-            line = f"F {rel}  {_human_size(size)}"
-            if entry.suffix.lower() == ".srt":
-                stats, preview = _srt_stats_and_preview(entry)
-                if stats:
-                    line += f"  [{stats}]"
-                if preview:
-                    line += f"  preview: {preview!r}"
-            lines.append(line)
+            lines.append(f"F {rel}  {_human_size(size)}")
         count += 1
     return lines
 
@@ -426,7 +363,7 @@ def filter_wrapper(wrapper: Path) -> None:
         _write_sentinel(wrapper.name, [])
         return
 
-    # ── 1. LLM: canonical naming + SRT matching ───────────────────────
+    # ── 1. LLM: canonical naming + bonus-dir classification ──────────
     prompt = _PROMPT_TEMPLATE.format(wrapper_name=wrapper.name, tree="\n".join(tree))
     try:
         result = generate_json(prompt, _SCHEMA, model=_MODEL, temperature=0.0)
@@ -435,26 +372,11 @@ def filter_wrapper(wrapper: Path) -> None:
         _write_sentinel(wrapper.name, [])
         return
 
-    # ── 2. Index LLM-matched SRTs by video filename ───────────────────
-    # main_features references videos by relative path; srt_matches does
-    # the same. We key by video filename here so the main_features pass
-    # below can look up the matched SRT regardless of path nesting.
-    srt_by_video_name: dict[str, Path] = {}
-    for m in result.get("srt_matches", []):
-        video_rel = m.get("video", "")
-        srt_rel = m.get("srt", "")
-        video_p = _safe_resolve(wrapper, video_rel)
-        srt_p = _safe_resolve(wrapper, srt_rel)
-        if video_p is None or srt_p is None:
-            print(f"[filter {short}] bad srt_match path: {m}", flush=True)
-            continue
-        if video_p.suffix.lower() not in VIDEO_EXTS or srt_p.suffix.lower() != ".srt":
-            continue
-        if not video_p.is_file() or not srt_p.is_file():
-            continue
-        srt_by_video_name[video_p.name] = srt_p
-
-    # ── 3. For each main feature: hardlink video, copy SRT ────────────
+    # ── 2. For each main feature: hardlink video to canonical path ────
+    # No bundled-SRT copying here — the downstream pipeline scans /bt/ at
+    # whisper-completion time and content-matches every `.srt` against
+    # whisper output via WER. bt_filter's only job for subs is "stay out
+    # of the way" (don't write to canonical, don't pre-pick a bundled).
     canonical_videos: list[Path] = []  # tracked for the sentinel manifest
 
     for entry in result.get("main_features", []):
@@ -498,23 +420,7 @@ def filter_wrapper(wrapper: Path) -> None:
         # video, not only the new ones.
         canonical_videos.append(target_video)
 
-        # Copy LLM-matched SRT into the `_sources/` candidate tree (not
-        # into the canonical path — the pipeline's verifier picks a winner
-        # later and promotes it). Copy, not hardlink: the bt side stays
-        # pristine, and the downstream WER comparison reads from this
-        # copy without bleeding state back into /bt.
-        srt_src = srt_by_video_name.get(video_p.name)
-        if srt_src is not None:
-            target_srt = _sources_path(target_video, "bundled")
-            if not target_srt.exists():
-                try:
-                    target_srt.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(srt_src), str(target_srt))
-                    print(f"[filter {short}] srt {srt_src.relative_to(wrapper)} → {target_srt.relative_to(ARTIFACT_ROOT)}", flush=True)
-                except OSError as e:
-                    print(f"[filter {short}] srt copy failed: {e}", flush=True)
-
-    # ── 4. Sentinel + manifest ────────────────────────────────────────
+    # ── 3. Sentinel + manifest ────────────────────────────────────────
     # No delete pass — /bt/ is read-only to us. Bonus content (videos
     # not in main_features) simply doesn't get hardlinked; it stays in
     # /bt for aria2 to keep seeding and the user can remove the bt-side

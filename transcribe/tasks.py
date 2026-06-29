@@ -12,7 +12,12 @@ import requests
 import yt_dlp
 
 from annotate import annotate_srt
-from bt_filter import _sources_path
+from bt_filter import (
+    ARTIFACT_ROOT,
+    BT_ROOT,
+    PROCESSED_DIR,
+    _sources_path,
+)
 from gpu_lock import gpu_lock
 from srt_source import (
     annotate_failed_path,
@@ -347,20 +352,113 @@ def _run_transcription(job_id: str, staging_mp4: str):
 _CANDIDATE_TAGS = ("bundled", "opensubtitles-hash", "opensubtitles-text")
 
 
-def _fetch_candidate(tag: str, video: Path, dest: Path) -> Path | None:
+def _find_bt_wrapper(canonical_video: Path) -> Path | None:
+    """Reverse-lookup the /bt/<wrapper>/ directory a canonical video was
+    hardlinked from. Two strategies:
+
+      1. Read the `_processed/<wrapper>.filtered` sentinels (their content
+         is the canonical-path manifest bt_filter wrote). The sentinel's
+         filename is the sanitized wrapper name.
+
+      2. Fallback: walk /bt and find any file with matching inode (since
+         canonical is a hardlink of the bt-side file). Slower but robust
+         when sanitization changed the wrapper name on the sentinel side.
+    """
+    try:
+        rel_str = str(canonical_video.relative_to(ARTIFACT_ROOT))
+    except ValueError:
+        return None
+
+    if PROCESSED_DIR.exists():
+        for sentinel in PROCESSED_DIR.glob("*.filtered"):
+            try:
+                text = sentinel.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if rel_str in text.splitlines():
+                wrapper = BT_ROOT / sentinel.stem
+                if wrapper.is_dir():
+                    return wrapper
+                # Sanitization changed the on-disk name — fall through
+                # to inode lookup.
+                break
+
+    return _find_bt_wrapper_by_inode(canonical_video)
+
+
+def _find_bt_wrapper_by_inode(canonical_video: Path) -> Path | None:
+    """Walk /bt looking for a file with the same inode as `canonical_video`
+    (they share an inode because /artifact is a hardlink of /bt). The
+    found file's top-level wrapper dir is the answer. Falls back to None
+    if no match (orphaned canonical, /bt cleaned up, etc.)."""
+    try:
+        target_inode = canonical_video.stat().st_ino
+    except OSError:
+        return None
+    if not BT_ROOT.exists():
+        return None
+    for wrapper in BT_ROOT.iterdir():
+        if not wrapper.is_dir():
+            continue
+        for entry in wrapper.rglob("*"):
+            try:
+                if entry.is_file() and entry.stat().st_ino == target_inode:
+                    return wrapper
+            except OSError:
+                continue
+    return None
+
+
+def _pick_bundled(video: Path, dest: Path, whisper_src: Path) -> Path | None:
+    """Scan the bt-side wrapper for `.srt` files and find one whose content
+    matches the whisper transcript (via WER). First match (sorted by
+    filename) wins, gets copied to `dest`, and is returned.
+
+    Filename ordering matters for season packs — `01_English.srt` <
+    `01_SDH.srt` alphabetically means the plain English track gets tried
+    before SDH variants. Wrong-episode subs (E02's SRT in an E01 lookup)
+    have very high WER and get rejected naturally.
+
+    No bonus-dir exclusion: bonus content's SRTs have completely different
+    dialogue from the main feature, so they fail WER without help.
+    """
+    wrapper = _find_bt_wrapper(video)
+    if wrapper is None:
+        return None
+
+    for srt in sorted(wrapper.rglob("*.srt")):
+        try:
+            rel = srt.relative_to(wrapper)
+        except ValueError:
+            continue
+        ok, reason = verify_against_whisper(whisper_src, srt)
+        if not ok:
+            print(f"[bundled-scan] {video.name!r}: REJECT {rel} — {reason}", flush=True)
+            continue
+        print(f"[bundled-scan] {video.name!r}: PICK {rel} — {reason}", flush=True)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(srt), str(dest))
+        except OSError as exc:
+            print(f"[bundled-scan] copy failed: {exc}", flush=True)
+            return None
+        return dest
+
+    return None
+
+
+def _fetch_candidate(tag: str, video: Path, dest: Path, whisper_src: Path) -> Path | None:
     """Materialize a candidate SRT at `dest` if we don't already have it.
     Returns `dest` on success, None on miss.
 
-    Bundled candidates are written by bt_filter at LLM-filter time; this
-    function never fetches them — it just checks existence."""
+    Bundled candidates are discovered by scanning the bt-side wrapper
+    and picking the first `.srt` whose content matches `whisper_src` —
+    no bt_filter pre-staging, no filename heuristics."""
     if dest.exists():
         return dest
 
     if tag == "bundled":
-        # bt_filter is the only writer for bundled candidates; if it
-        # didn't create one, there's no English SRT shipped with this
-        # release.
-        return None
+        return _pick_bundled(video, dest, whisper_src)
 
     if tag == "opensubtitles-hash":
         return find_candidate_hash(video, "en", dest)
@@ -443,7 +541,7 @@ def process_bt_file(job_id: str):
         winner_tag: str | None = None
         for tag in _CANDIDATE_TAGS:
             cand_dest = _sources_path(video, tag)
-            cand_path = _fetch_candidate(tag, video, cand_dest)
+            cand_path = _fetch_candidate(tag, video, cand_dest, whisper_src)
             if cand_path is None:
                 continue
 

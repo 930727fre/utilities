@@ -20,7 +20,7 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (bt, 1440 min / ratio 1.0 seed limits) |
 | Transcriber | HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`) |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
-| SRT matcher | Claude (haiku) at bt_filter time — one call picks the canonical title / year / S+E for each main video AND chooses which bundled SRT (if any) to copy into `_sources/<stem>.bundled.srt` as a candidate. Uses cue count + time-span coverage + first-cue preview to distinguish forced / SDH / full-dialogue tracks |
+| Main-feature classifier | Claude (haiku) at bt_filter time — one call per torrent: assigns each video its canonical title / year / S+E and flags bonus-content directories. Subtitle selection is NOT Haiku's job — the WER gate downstream handles "is this `.srt` the right one for this video" via content match |
 | Subs finder | OpenSubtitles REST API — fetches hash-search and text-search candidates into `_sources/<stem>.opensubtitles-{hash,text}.srt`. Never writes the canonical SRT directly |
 | Metadata verifier | Claude (haiku) — confirms an OS search-result's release / title / year matches the local filename. Runs BEFORE download to avoid burning OS quota on the wrong file |
 | Content verifier | `jiwer` — cue-density gate plus word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
@@ -138,18 +138,25 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
 ```
 1. bt_filter (Haiku, one call per wrapper, at torrent-finish time)
      → hardlinks main-feature videos into Movies/ or TV/
-     → copies bundled English SRT (if any) into _sources/<stem>.bundled.srt
+     → tags bonus directories (so their videos get skipped)
+     (subtitles NOT touched here — discovered at step 3)
 
 2. whisper (HTTP to shared service, GPU-gated)
      → _sources/<stem>.whisper.srt
 
-3. OS candidate fetch (lazy, per video)
+3. Bundled candidate discovery (lazy, per video)
+     → scans the bt-side wrapper for `.srt` files; for each, runs the
+       WER gate (step 4) against the whisper output; first passing
+       SRT (sorted by filename) gets copied to
+       _sources/<stem>.bundled.srt and used as the bundled candidate
+
+4. OS candidate fetch (lazy, per video)
      → _sources/<stem>.opensubtitles-hash.srt   (if hash search hits)
      → _sources/<stem>.opensubtitles-text.srt   (if text search hits)
    Each search is metadata-prefiltered by Haiku (`subs_verifier.verify_candidate`)
    to avoid burning OS quota on the wrong file.
 
-4. Content gate (jiwer / WER, deterministic, ~$0)
+5. Content gate (jiwer / WER, deterministic, ~$0)
      For each candidate in order (bundled → OS hash → OS text):
        - cue-density gate: reject if candidate has <40% or >250% of
          whisper's cue count (catches forced subs / wrong content)
@@ -162,7 +169,7 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
      video's audio → _sources/<stem>.verified.srt.
      All candidates fail → cp whisper.srt → verified.srt.
 
-5. Annotation (Sonnet) — reads _sources/<stem>.verified.srt, returns
+6. Annotation (Sonnet) — reads _sources/<stem>.verified.srt, returns
    annotated SRT text. NO marker cue inserted.
      → atomic write to /artifact/.../<stem>.srt (canonical)
 ```
