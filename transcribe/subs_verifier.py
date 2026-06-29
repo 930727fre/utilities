@@ -11,7 +11,7 @@ gate via word error rate (`jiwer`). Whisper output is the ground-truth
 listening reference; the candidate is a "literary upgrade" we accept
 only if its full transcript text is close enough to whisper's that
 they're plausibly the same audio. Timing is intentionally ignored —
-ffsubsync handles alignment downstream once a candidate passes.
+alass handles alignment downstream once a candidate passes.
 
 Why two? Cheap-first ordering: metadata filter discards obviously wrong
 candidates (different show, wrong episode) before we even download, then
@@ -215,7 +215,7 @@ def verify_against_whisper(
     Common Voice / etc. ecosystem, so the threshold has well-known
     calibration.
 
-    Timing is deliberately not considered — ffsubsync handles alignment
+    Timing is deliberately not considered — alass handles alignment
     after this gate passes. Verify's only job is "is this the same
     transcript content."
     """

@@ -13,7 +13,7 @@ This module's sole responsibility:
   3. Download the chosen candidate's raw SRT bytes into a caller-provided
      destination path
 
-Caller does ffsubsync, caller decides whether to promote the candidate
+Caller does alass alignment, caller decides whether to promote the candidate
 to canonical. This module never touches `_sources/` layout or
 `/artifact/.../*.srt` directly — purity matters because the candidate
 might lose verification and we don't want partial writes leaking into
@@ -271,7 +271,7 @@ def _search_by_text(video: Path, languages: str) -> Optional[dict]:
     verified candidate or None.
 
     Useful when hash hits empty (sparse coverage for niche releases / TV).
-    The candidate's release won't match the local file, so ffsubsync is
+    The candidate's release won't match the local file, so alass is
     needed downstream to fix timing drift.
     """
     info = _parse_filename(video)
@@ -380,7 +380,7 @@ def find_candidate_text(video: Path, languages: str, dest: Path) -> Optional[Pat
     success, None on any miss.
 
     Caller is responsible for whisper-verifying the result and running
-    ffsubsync against the local audio."""
+    alass against the local audio."""
     key = (str(video), languages, "text")
     if _check_cache(key):
         return None

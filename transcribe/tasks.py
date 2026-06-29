@@ -34,9 +34,9 @@ WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
-FFSUBSYNC_TIMEOUT = 5 * 60        # 5 minutes per file is plenty for movies
+RESYNC_TIMEOUT = 5 * 60           # alass on a long movie tops out well under this
 
-# Single worker — pipeline (whisper + verify + ffsubsync + annotation) runs
+# Single worker — pipeline (whisper + verify + alass + annotation) runs
 # end-to-end on one thread so per-job state mutations stay serial and the
 # GPU lock is held only when whisper is actually running. Annotation
 # (~1 min Sonnet pass) inlines after whisper for a ~5% throughput hit, in
@@ -230,30 +230,33 @@ def _run_whisper(job_id: str, media_path: Path, srt_path: Path):
 
 
 def _resync(video: Path, candidate_srt: Path, output_srt: Path) -> bool:
-    """Run ffsubsync to align `candidate_srt` to `video`'s audio, writing
-    the result to `output_srt`. Candidate stays untouched (it lives under
+    """Run alass to align `candidate_srt` to `video`'s audio, writing the
+    result to `output_srt`. Candidate stays untouched (it lives under
     `_sources/` and is re-read on every replay). Returns True on success.
 
-    5-minute timeout — ffsubsync VAD on a long movie can be slow but
-    that's more than enough in practice.
+    alass does piecewise drift detection — if `candidate_srt` has a
+    cold-open / recap / outro segment that doesn't exist in the video,
+    alass aligns each piece independently instead of forcing a single
+    uniform offset (which is what made ffsubsync misalign on releases
+    with different opening structures). 5-minute timeout is plenty.
     """
     output_srt.parent.mkdir(parents=True, exist_ok=True)
     try:
         r = subprocess.run(
-            ["ffsubsync", str(video), "-i", str(candidate_srt), "-o", str(output_srt)],
+            ["alass", str(video), str(candidate_srt), str(output_srt)],
             capture_output=True,
-            timeout=FFSUBSYNC_TIMEOUT,
+            timeout=RESYNC_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        print(f"[ffsubsync] error for {video.name!r}: {e}", flush=True)
+        print(f"[alass] error for {video.name!r}: {e}", flush=True)
         return False
     if r.returncode != 0:
         tail = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:]
-        print(f"[ffsubsync] rc={r.returncode} for {video.name!r}: {tail}", flush=True)
+        print(f"[alass] rc={r.returncode} for {video.name!r}: {tail}", flush=True)
         return False
     if not output_srt.exists() or output_srt.stat().st_size == 0:
         return False
-    print(f"[ffsubsync] resynced → {output_srt.name}", flush=True)
+    print(f"[alass] resynced → {output_srt.name}", flush=True)
     return True
 
 
@@ -345,7 +348,7 @@ def _run_transcription(job_id: str, staging_mp4: str):
 # ── BT video pipeline ─────────────────────────────────────────────────────
 
 # Candidate sources we try in order. Bundled-SRT comes first because it's
-# from the same release as the video (zero drift before ffsubsync) and
+# from the same release as the video (zero drift before alass) and
 # already passed the bt_filter Haiku preview test for English / dialogue.
 # OS hash next (exact byte-hash match → likely same release). OS text
 # last (drift-prone — different release entirely).
@@ -480,7 +483,7 @@ def process_bt_file(job_id: str):
       1. whisper      → /artifact/_sources/.../<stem>.whisper.srt
       2. candidates   → /artifact/_sources/.../<stem>.{bundled,opensubtitles-*}.srt
       3. verify+sync  → /artifact/_sources/.../<stem>.verified.srt
-                        (winner from step 2 → ffsubsync; or whisper itself
+                        (winner from step 2 → alass; or whisper itself
                          if no candidate passed the WER gate)
       4. annotate     → /artifact/.../<stem>.srt   (atomic mv tmp → canonical)
 
@@ -554,14 +557,14 @@ def process_bt_file(job_id: str):
             if _resync(video, cand_path, verified_src):
                 winner_tag = tag
                 break
-            # ffsubsync failed — try next candidate. Un-synced candidate
+            # alass failed — try next candidate. Un-synced candidate
             # isn't worth using; timing drift over a 50-min episode is
             # worse than whisper output.
-            print(f"[pipeline] {video.name!r}: {tag} ffsubsync failed; trying next", flush=True)
+            print(f"[pipeline] {video.name!r}: {tag} alass failed; trying next", flush=True)
 
         if winner_tag is None:
             # No candidate passed. Whisper IS the verified output (it's
-            # already audio-aligned, no ffsubsync needed).
+            # already audio-aligned, no alass needed).
             try:
                 verified_src.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(whisper_src), str(verified_src))

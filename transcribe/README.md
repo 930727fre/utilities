@@ -24,7 +24,7 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Subs finder | OpenSubtitles REST API — fetches hash-search and text-search candidates into `_sources/<stem>.opensubtitles-{hash,text}.srt`. Never writes the canonical SRT directly |
 | Metadata verifier | Claude (haiku) — confirms an OS search-result's release / title / year matches the local filename. Runs BEFORE download to avoid burning OS quota on the wrong file |
 | Content verifier | `jiwer` — word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold (≤ 0.5) from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
-| Subs sync | `ffsubsync` — VAD on the video's audio aligns the verified candidate's cue timing before it lands at the canonical path (handles release-mismatch drift) |
+| Subs sync | `alass` — Rust binary that does piecewise drift detection on the video's audio + candidate's cues, aligning each segment independently. Picked over ffsubsync because it can handle releases that differ in cold-open / recap structure (not just uniform offset drift) |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
 
 ## On-disk layout
@@ -64,7 +64,7 @@ data/artifact/_sources/                         per-stage pipeline output —
     Title (Year).opensubtitles-hash.srt         raw (OS hash hit)
     Title (Year).opensubtitles-text.srt         raw (OS text hit)
     Title (Year).verified.srt                   processed (winner picked +
-                                                  ffsubsync'd; annotation
+                                                  alass-aligned; annotation
                                                   reads this and writes
                                                   canonical above)
   TV/Title (Year)/Season 01/                    each file is the cached
@@ -161,12 +161,12 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
        - concat all cue text → strip SRT formatting + punctuation,
          lowercase → compute WER vs whisper (reference) → pass if
          WER ≤ 0.5
-     Timing is ignored on purpose — ffsubsync handles alignment later;
+     Timing is ignored on purpose — alass handles alignment later;
      verify's only job is "same transcript content." WER alone catches
      forced subs (WER ~1 from deletions), bilingual / commentary-bundled
      subs (WER >1 from insertions), and different content (>0.7).
-     First-pass-wins. First passing candidate → ffsubsync against the
-     video's audio → _sources/<stem>.verified.srt.
+     First-pass-wins. First passing candidate → alass aligns against
+     the video's audio → _sources/<stem>.verified.srt.
      All candidates fail → cp whisper.srt → verified.srt.
 
 6. Annotation (Sonnet) — reads _sources/<stem>.verified.srt, returns
@@ -203,7 +203,7 @@ Each pipeline stage has its own cached output under `_sources/`. Delete just wha
 | Re-run | Delete |
 |---|---|
 | Just re-annotate | canonical `/artifact/.../X.srt` (≈ $0.05 Sonnet) |
-| Re-verify + re-ffsubsync + re-annotate | `_sources/X.verified.srt` + canonical (≈ $0.05 + ffsubsync) |
+| Re-verify + re-align + re-annotate | `_sources/X.verified.srt` + canonical (≈ $0.05 + alass) |
 | Refetch OS candidates from scratch | `_sources/X.opensubtitles-*.srt` + `_sources/X.verified.srt` + canonical (OS quota + downstream) |
 | Re-whisper everything | `rmtree _sources/<path>` + canonical (GPU + full pipeline) |
 

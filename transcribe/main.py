@@ -665,7 +665,7 @@ async def bt_upgrade_english(req: BtUpgradeEnglishRequest):
                     print(f"[upgrade-english] unlink {cand.name!r}: {e}", flush=True)
         # Drop the cached verified.srt — it was derived from candidates
         # we just nuked (or from whisper-fallback), so re-running the
-        # verify+ffsubsync stage is required for any OS hit to land.
+        # verify+resync stage is required for any OS hit to land.
         verified = _sources_path(video, "verified")
         if verified.exists():
             try:
