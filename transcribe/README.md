@@ -23,7 +23,7 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Main-feature classifier | Claude (haiku) at bt_filter time — one call per torrent: assigns each video its canonical title / year / S+E and flags bonus-content directories. Subtitle selection is NOT Haiku's job — the WER gate downstream handles "is this `.srt` the right one for this video" via content match |
 | Subs finder | OpenSubtitles REST API — fetches hash-search and text-search candidates into `_sources/<stem>.opensubtitles-{hash,text}.srt`. Never writes the canonical SRT directly |
 | Metadata verifier | Claude (haiku) — confirms an OS search-result's release / title / year matches the local filename. Runs BEFORE download to avoid burning OS quota on the wrong file |
-| Content verifier | `jiwer` — cue-density gate plus word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
+| Content verifier | `jiwer` — word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold (≤ 0.5) from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
 | Subs sync | `ffsubsync` — VAD on the video's audio aligns the verified candidate's cue timing before it lands at the canonical path (handles release-mismatch drift) |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
 
@@ -158,13 +158,13 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
 
 5. Content gate (jiwer / WER, deterministic, ~$0)
      For each candidate in order (bundled → OS hash → OS text):
-       - cue-density gate: reject if candidate has <40% or >250% of
-         whisper's cue count (catches forced subs / wrong content)
        - concat all cue text → strip SRT formatting + punctuation,
          lowercase → compute WER vs whisper (reference) → pass if
          WER ≤ 0.5
      Timing is ignored on purpose — ffsubsync handles alignment later;
-     verify's only job is "same transcript content."
+     verify's only job is "same transcript content." WER alone catches
+     forced subs (WER ~1 from deletions), bilingual / commentary-bundled
+     subs (WER >1 from insertions), and different content (>0.7).
      First-pass-wins. First passing candidate → ffsubsync against the
      video's audio → _sources/<stem>.verified.srt.
      All candidates fail → cp whisper.srt → verified.srt.

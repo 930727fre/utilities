@@ -145,12 +145,6 @@ def verify_candidate(video: Path, candidates: list[dict]) -> Optional[dict]:
 
 # ── Content-level verification against whisper (WER) ──────────────────────
 
-# Density gate: cheap pre-filter for forced subs / pathologically
-# mismatched lengths. WER would also reject these but density check is
-# O(1) vs WER's O(n*m). Symmetric so a candidate that's MUCH longer than
-# whisper (rare; over-eager SDH) gets rejected too.
-_DENSITY_MIN_RATIO = 0.4
-
 # WER threshold. Calibration from the whisper / ASR-eval literature:
 # clean human transcript vs whisper-large output on the same audio
 # usually scores 0.1–0.3. With the extra noise of release-mismatch (CC
@@ -158,6 +152,15 @@ _DENSITY_MIN_RATIO = 0.4
 # content WER lands around 0.2–0.5. Different content / wrong cut /
 # wrong language climbs >0.7. 0.5 is the conventional pass cutoff and
 # leaves safety margin in both directions.
+#
+# No cue-density pre-filter — WER alone catches every case density was
+# meant to: forced subs land at WER ~1 (massive deletions vs whisper);
+# bilingual / commentary-bundled subs land at WER >1 (massive insertions);
+# different content lands at WER >0.7. The density gate we used to have
+# false-rejected legitimate candidates when whisper produced anomalously
+# few cues for an episode (E03 case: 257-cue whisper vs 957-cue OS-text,
+# density 0.27, but WER 0.28 — the candidate was correct, whisper was
+# the outlier). Trust WER directly.
 _WER_PASS_MAX = 0.5
 
 # Strip SRT formatting tags before normalization — `<i>...</i>`,
@@ -205,16 +208,12 @@ def verify_against_whisper(
 ) -> tuple[bool, str]:
     """WER-based content gate. Returns (pass, reason).
 
-    Stage 1 — density check: reject if candidate's cue count is less
-    than 40% (or more than 250%) of whisper's. Catches forced subs and
-    wildly mismatched lengths without paying the WER's quadratic cost.
-
-    Stage 2 — WER: concat all cue text from each side, strip SRT
-    formatting + punctuation, lowercase. Compute word error rate
-    between whisper (reference) and candidate (hypothesis); pass if
-    WER ≤ 0.5. jiwer is the canonical ASR-eval library used across the
-    whisper / Common Voice / etc. ecosystem, so the threshold has
-    well-known calibration.
+    Concat all cue text from each side, strip SRT formatting +
+    punctuation, lowercase. Compute word error rate between whisper
+    (reference) and candidate (hypothesis); pass if WER ≤ 0.5.
+    jiwer is the canonical ASR-eval library used across the whisper /
+    Common Voice / etc. ecosystem, so the threshold has well-known
+    calibration.
 
     Timing is deliberately not considered — ffsubsync handles alignment
     after this gate passes. Verify's only job is "is this the same
@@ -228,16 +227,6 @@ def verify_against_whisper(
     if not c_cues:
         return False, "candidate SRT empty or unparseable"
 
-    # Stage 1 — density
-    density = min(len(w_cues), len(c_cues)) / max(len(w_cues), len(c_cues))
-    if density < _DENSITY_MIN_RATIO:
-        return False, (
-            f"cue density {density:.2f} below {_DENSITY_MIN_RATIO} "
-            f"(whisper={len(w_cues)}, candidate={len(c_cues)} — likely forced subs "
-            f"or wrong content)"
-        )
-
-    # Stage 2 — WER
     w_text = _normalized_full_text(w_cues)
     c_text = _normalized_full_text(c_cues)
     if not w_text or not c_text:
@@ -249,8 +238,8 @@ def verify_against_whisper(
         return False, f"WER computation failed: {e}"
 
     if wer <= _WER_PASS_MAX:
-        return True, f"WER {wer:.2f} ≤ {_WER_PASS_MAX} (density {density:.2f})"
+        return True, f"WER {wer:.2f} ≤ {_WER_PASS_MAX}"
     return False, (
-        f"WER {wer:.2f} > {_WER_PASS_MAX} (density {density:.2f}) — "
-        f"likely different content / wrong cut / wrong language"
+        f"WER {wer:.2f} > {_WER_PASS_MAX} — likely different content / "
+        f"wrong cut / wrong language"
     )
