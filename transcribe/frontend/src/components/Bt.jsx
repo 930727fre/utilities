@@ -1,8 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import Hls from 'hls.js'
-import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh, translateFileZh, upgradeEnglishTorrent, resolvePlay, reportProgress } from '../api'
-
-const PROGRESS_REPORT_INTERVAL_SEC = 1
+import { listBt, listTorrents, submitMagnet, deleteTorrent, retryBtFile, translateTorrentZh, translateFileZh, upgradeEnglishTorrent } from '../api'
 
 // bt tab has two regions: the magnet form + active-torrent list at the
 // top (each row = one wrapper folder, phase derived from filesystem + an
@@ -29,7 +26,6 @@ export default function Bt() {
   const [magnet, setMagnet] = useState('')
   const [expanded, setExpanded] = useState(() => new Set())
   const [expandedRows, setExpandedRows] = useState(() => new Set())
-  const [playing, setPlaying] = useState(null)  // { path, name } when modal is open
   const submittingRef = useRef(false)
 
   async function refresh() {
@@ -295,153 +291,16 @@ export default function Bt() {
                 isExpanded={rowExpanded}
                 onToggle={() => toggleRowExpand(item.path)}
                 onRetry={handleRetry}
-                onTranslate={handleTranslateFile}
-                onPlay={() => setPlaying({ path: item.path, name: item.name })} />
+                onTranslate={handleTranslateFile} />
             )
           })}
         </div>
       ))}
-
-      {playing && <PlayerModal path={playing.path} name={playing.name} onClose={() => setPlaying(null)} />}
     </div>
   )
 }
 
-function PlayerModal({ path, name, onClose }) {
-  const videoRef = useRef(null)
-  const [resolved, setResolved] = useState(null)
-  const [error, setError] = useState(null)
-  // One play session id per modal mount. Jellyfin uses this to dedupe
-  // "started" against later "progress" / "stopped" events on the same
-  // playback so the watch history doesn't list one episode twice.
-  const playSessionId = useRef(crypto.randomUUID())
-  // Track last-reported position so we throttle progress beats to ~10s
-  // even though the video element fires timeupdate every ~250ms.
-  const lastReportRef = useRef(0)
-
-  // Fetch the master.m3u8 URL + subtitle list from transcribe's resolver.
-  useEffect(() => {
-    let cancelled = false
-    resolvePlay(path)
-      .then(r => { if (!cancelled) setResolved(r) })
-      .catch(e => { if (!cancelled) setError(e.message) })
-    return () => { cancelled = true }
-  }, [path])
-
-  // Attach HLS to <video>. Safari plays HLS natively; everything else needs hls.js.
-  useEffect(() => {
-    if (!resolved || !videoRef.current) return
-    const video = videoRef.current
-    const url = resolved.master_url
-    let hls = null
-    if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      video.src = url
-    } else if (Hls.isSupported()) {
-      hls = new Hls()
-      hls.loadSource(url)
-      hls.attachMedia(video)
-    } else {
-      setError('HLS not supported by this browser')
-    }
-
-    // Resume to the position Jellyfin stored from prior playback (any
-    // device). Set on loadedmetadata so currentTime is honored — setting
-    // it before metadata loads is a no-op in some browsers.
-    function onLoaded() {
-      if (resolved.resume_at_seconds > 0 && video.duration > resolved.resume_at_seconds + 2) {
-        video.currentTime = resolved.resume_at_seconds
-      }
-    }
-    video.addEventListener('loadedmetadata', onLoaded)
-
-    return () => {
-      video.removeEventListener('loadedmetadata', onLoaded)
-      if (hls) hls.destroy()
-    }
-  }, [resolved])
-
-  // Playback event reporting. "started" once on first play, "progress"
-  // every 10s while playing, "stopped" on close / ended. unmount sends
-  // a final stopped beat with the last currentTime — keepalive=true
-  // makes it survive page nav too.
-  useEffect(() => {
-    if (!resolved || !videoRef.current) return
-    const video = videoRef.current
-    const itemId = resolved.item_id
-    const sessionId = playSessionId.current
-    let started = false
-
-    function fire(event, isPaused = false) {
-      reportProgress({
-        itemId,
-        positionSeconds: video.currentTime || 0,
-        event,
-        playSessionId: sessionId,
-        isPaused,
-      })
-    }
-
-    function onPlay() {
-      if (!started) { fire('started'); started = true }
-      else { fire('progress', false) }
-    }
-    function onPause() { if (started) fire('progress', true) }
-    function onTimeUpdate() {
-      if (!started) return
-      const now = video.currentTime
-      if (Math.abs(now - lastReportRef.current) >= PROGRESS_REPORT_INTERVAL_SEC) {
-        lastReportRef.current = now
-        fire('progress', video.paused)
-      }
-    }
-    function onEnded() { if (started) fire('stopped') }
-
-    video.addEventListener('play', onPlay)
-    video.addEventListener('pause', onPause)
-    video.addEventListener('timeupdate', onTimeUpdate)
-    video.addEventListener('ended', onEnded)
-
-    return () => {
-      video.removeEventListener('play', onPlay)
-      video.removeEventListener('pause', onPause)
-      video.removeEventListener('timeupdate', onTimeUpdate)
-      video.removeEventListener('ended', onEnded)
-      // Final stopped beat — modal close, route change, or page unload
-      // all land here. keepalive in reportProgress() ensures it ships.
-      if (started) fire('stopped')
-    }
-  }, [resolved])
-
-  // Esc to close.
-  useEffect(() => {
-    function onKey(e) { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-
-  return (
-    <div style={styles.modalBackdrop} onClick={onClose}>
-      <div style={styles.modalBody} onClick={e => e.stopPropagation()}>
-        <div style={styles.modalHeader}>
-          <div style={styles.modalTitle}>{name}</div>
-          <button onClick={onClose} style={styles.modalClose} title="Close (Esc)">✕</button>
-        </div>
-        {error && <div style={styles.modalError}>{error}</div>}
-        {!resolved && !error && <div style={styles.modalLoading}>Resolving…</div>}
-        {resolved && (
-          <video ref={videoRef} controls autoPlay crossOrigin="anonymous" style={styles.video}>
-            {resolved.subtitles.map((s, i) => (
-              <track key={s.src} kind="subtitles" label={s.label} srcLang={s.srclang}
-                src={s.src} default={i === 0} />
-            ))}
-          </video>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate, onPlay }) {
+function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate }) {
   const engState = deriveEngState(item)
   const zhState = deriveZhState(item)
   const engErrMsg = item.whisper_error || item.annotate_error || ''
@@ -478,11 +337,6 @@ function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate, onPlay }) {
       {isExpanded && (
         <div style={styles.actionRow}>
           <div style={{ flex: 1 }} />
-          {engState === 'done' && (
-            <button style={styles.translateBtn}
-              title="Play in browser"
-              onClick={e => { e.stopPropagation(); onPlay() }}>▸</button>
-          )}
           {engState === 'done' && zhState === 'absent' && (
             <button style={styles.translateBtn}
               title="Translate this episode to 繁體中文"
@@ -607,29 +461,4 @@ const styles = {
     fontFamily: MONO,
   },
 
-  modalBackdrop: {
-    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)',
-    zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center',
-    padding: 16,
-  },
-  modalBody: {
-    background: '#1c1c1e', borderRadius: 12, border: '1px solid #3a3a3c',
-    width: '100%', maxWidth: 1200, maxHeight: '92vh',
-    display: 'flex', flexDirection: 'column', overflow: 'hidden',
-  },
-  modalHeader: {
-    display: 'flex', alignItems: 'center', gap: 12,
-    padding: '12px 16px', borderBottom: '1px solid #3a3a3c',
-  },
-  modalTitle: {
-    flex: 1, fontFamily: MONO, fontSize: 13, color: '#e8e3d9',
-    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-  },
-  modalClose: {
-    background: 'none', border: 'none', color: '#636366',
-    fontSize: 18, padding: 0, cursor: 'pointer', lineHeight: 1,
-  },
-  modalLoading: { color: '#aeaeb2', padding: 24, textAlign: 'center', fontFamily: MONO, fontSize: 13 },
-  modalError: { color: '#c79968', padding: 24, textAlign: 'center', fontFamily: MONO, fontSize: 13 },
-  video: { width: '100%', height: 'auto', maxHeight: '85vh', background: '#000', display: 'block' },
 }
