@@ -55,7 +55,9 @@ def _extract_tool_input(resp_json: dict) -> dict:
 def generate_json(prompt: str, response_schema: dict, *,
                   temperature: float = 0.2, model: Optional[str] = None,
                   max_tokens: int = DEFAULT_MAX_TOKENS,
-                  timeout: tuple = (10, 180)) -> Any:
+                  timeout: tuple = (10, 180),
+                  web_search: bool = False,
+                  web_search_max_uses: int = 3) -> Any:
     import requests
 
     model = model or os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
@@ -66,17 +68,35 @@ def generate_json(prompt: str, response_schema: dict, *,
         "anthropic-version": API_VERSION,
         "content-type": "application/json",
     }
+
+    tools: list[dict] = [{
+        "name": _TOOL_NAME,
+        "description": "Return the structured response.",
+        "input_schema": schema,
+    }]
+    if web_search:
+        # Server-side tool: Anthropic executes search queries within the
+        # same API call and feeds results back to the model. `max_uses`
+        # caps queries to bound cost (each is billed).
+        tools.append({
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": web_search_max_uses,
+        })
+
     body = {
         "model": model,
         "max_tokens": max_tokens,
         "temperature": temperature,
         "messages": [{"role": "user", "content": prompt}],
-        "tools": [{
-            "name": _TOOL_NAME,
-            "description": "Return the structured response.",
-            "input_schema": schema,
-        }],
-        "tool_choice": {"type": "tool", "name": _TOOL_NAME},
+        "tools": tools,
+        # With web_search the model must be free to call it mid-turn,
+        # so `tool` (forces respond immediately, no other tools allowed)
+        # won't work. `any` forces ending on some tool call — model
+        # chooses between web_search and respond, naturally lands on
+        # respond as the "delivery" step.
+        "tool_choice": {"type": "any"} if web_search
+                       else {"type": "tool", "name": _TOOL_NAME},
     }
 
     last_exc: Optional[Exception] = None

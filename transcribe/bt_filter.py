@@ -124,9 +124,12 @@ released 2001 but year=1999).
    - For TV only: include `season` and `episode`. S01E01 → season=1, \
 episode=1. Always emit both for TV files.
 
-   Use your knowledge of mainstream titles; if a release is genuinely \
-unknown, do your best from the filename. Skip bonus / extras videos \
-(they're handled in B below).
+   Use your knowledge of mainstream titles. For any title you're \
+not confident about — especially recent releases that may post-date \
+your training data — use the web_search tool to look up the canonical \
+title and first-air / release year before answering. A wrong year \
+breaks Jellyfin's metadata lookup downstream. Skip bonus / extras \
+videos (they're handled in B below).
 
 B) Identify BONUS-CONTENT directories whose videos are NOT the main \
 feature. List their relative paths in `bonus_dirs`. Typical names:
@@ -366,7 +369,8 @@ def filter_wrapper(wrapper: Path) -> None:
     # ── 1. LLM: canonical naming + bonus-dir classification ──────────
     prompt = _PROMPT_TEMPLATE.format(wrapper_name=wrapper.name, tree="\n".join(tree))
     try:
-        result = generate_json(prompt, _SCHEMA, model=_MODEL, temperature=0.0)
+        result = generate_json(prompt, _SCHEMA, model=_MODEL, temperature=0.0,
+                               web_search=True)
     except Exception as e:
         print(f"[filter {short}] LLM call failed ({e}); writing sentinel to avoid retry storm", flush=True)
         _write_sentinel(wrapper.name, [])
