@@ -28,6 +28,7 @@ from srt_source import (
     annotate_failed_path,
     read_failure_reason,
     whisper_failed_path,
+    whisper_polluted_path,
 )
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from translator import translate_video_zh, translator_executor
@@ -50,10 +51,12 @@ BT_SCAN_INTERVAL = 30
 # State model: file existence alone — no marker reads, no jobs.json
 # overlay. canonical SRT exists = the pipeline finished verifying +
 # annotating; <stem>.whisper-failed sidecar = pipeline halted at
-# whisper; <stem>.annotate-failed sidecar = pipeline halted at
-# annotation. The ↻ button deletes canonical + both sidecars to let
-# the scan loop re-queue the pipeline; cached `_sources/` candidates
-# are kept so replay only re-does the stages that were missing.
+# whisper; <stem>.whisper-polluted sidecar = whisper produced a
+# hallucination loop and no candidate was available to substitute;
+# <stem>.annotate-failed sidecar = pipeline halted at annotation. The
+# ↻ button deletes canonical + every sidecar to let the scan loop
+# re-queue the pipeline; cached `_sources/` candidates are kept so
+# replay only re-does the stages that were missing.
 
 # In-flight translate-to-zh futures keyed by absolute video path. Set when
 # the translate-zh endpoint submits a worker, cleared (via a `finally` in
@@ -360,6 +363,7 @@ def _scan_bt() -> list[dict]:
             # try to load them as subtitles. Canonical SRT existence
             # alone is the "fully done" signal — no marker reads.
             whisper_error = read_failure_reason(whisper_failed_path(video))
+            whisper_polluted_error = read_failure_reason(whisper_polluted_path(video))
             annotate_error = read_failure_reason(annotate_failed_path(video))
             # Chinese sub state (user-triggered translate-zh button output).
             # `.zh-tw.srt` is the sidecar; `.zh-tw.srt.error` records a
@@ -387,6 +391,7 @@ def _scan_bt() -> list[dict]:
                 "root": str(root),
                 "has_srt": has_srt,
                 "whisper_error": whisper_error,
+                "whisper_polluted_error": whisper_polluted_error,
                 "annotate_error": annotate_error,
                 "has_zh_srt": has_zh_srt,
                 "zh_in_flight": zh_in_flight,
@@ -798,7 +803,8 @@ class BtRetryRequest(BaseModel):
 async def bt_retry(req: BtRetryRequest):
     """Clear failure state for a video so the scan loop replays its pipeline.
 
-    Deletes: the canonical SRT + `<stem>.whisper-failed` + `<stem>.annotate-failed`.
+    Deletes: the canonical SRT + every failure sidecar
+    (`.whisper-failed`, `.whisper-polluted`, `.annotate-failed`).
     Keeps the `_sources/` candidate cache — whisper output and OS hits
     stick around so the next pipeline run replays cheaply (no GPU re-pass,
     no OS quota re-burn). For a hard reset that wipes cached sources too,
@@ -808,6 +814,7 @@ async def bt_retry(req: BtRetryRequest):
     for target in (
         path.with_suffix(".srt"),
         whisper_failed_path(path),
+        whisper_polluted_path(path),
         annotate_failed_path(path),
     ):
         if target.exists():
@@ -877,6 +884,8 @@ def _queue_pending_bt_work():
       - canonical SRT exists      → SKIP (pipeline finished; canonical is
                                     only written atomically after annotation)
       - whisper-failed sidecar    → SKIP (user must ↻ to retry)
+      - whisper-polluted sidecar  → SKIP (whisper hallucinated; user must
+                                    drop a candidate or refetch OS then ↻)
       - annotate-failed sidecar   → SKIP (user must ↻ to retry)
       - none of the above         → queue process_bt_file (which itself
                                     resumes at whichever pipeline stage
@@ -899,7 +908,8 @@ def _queue_pending_bt_work():
     for item in items:
         if item["path"] in in_flight_paths:
             continue
-        if item["has_srt"] or item["whisper_error"] or item["annotate_error"]:
+        if (item["has_srt"] or item["whisper_error"]
+                or item["whisper_polluted_error"] or item["annotate_error"]):
             continue
         job_id = str(uuid.uuid4())
         job = _new_bt_job(job_id, item["path"])

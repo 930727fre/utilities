@@ -25,22 +25,24 @@ from srt_source import (
     annotate_failed_path,
     stamp_annotate_failed,
     stamp_whisper_failed,
+    stamp_whisper_polluted,
     whisper_failed_path,
+    whisper_polluted_path,
 )
 from subs_finder import find_candidate_hash, find_candidate_text
-from subs_verifier import verify_against_whisper
+from subs_verifier import verify_against_whisper, whisper_is_polluted
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 
-DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
-TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
-RESYNC_TIMEOUT = 5 * 60           # alass on a long movie tops out well under this
-MKVMERGE_PROBE_TIMEOUT = 30       # JSON track probe — milliseconds in practice
-MKVEXTRACT_TIMEOUT = 60           # demux one SRT track — seconds on a movie-sized mkv
-PGS_OCR_TIMEOUT = 10 * 60         # tesseract OCR of a 50-min episode's PGS — ~1-3 min typical
-FFMPEG_AUDIO_TIMEOUT = 5 * 60     # transcoding a movie to 16kHz mono AAC — ~30-60s typical
+DOWNLOAD_TIMEOUT = 60 * 60         # 1 hour
+TRANSCRIBE_TIMEOUT = 4 * 60 * 60   # 4 hours
+RESYNC_TIMEOUT = 5 * 60            # alass on a long movie tops out well under this
+FFPROBE_PROBE_TIMEOUT = 30         # JSON stream probe — milliseconds in practice
+FFMPEG_SUB_EXTRACT_TIMEOUT = 60    # demux one subtitle stream (no transcode) — seconds on a movie-sized container
+PGS_OCR_TIMEOUT = 10 * 60          # tesseract OCR of a 50-min episode's PGS — ~1-3 min typical
+FFMPEG_AUDIO_TIMEOUT = 5 * 60      # transcoding a movie to 16kHz mono AAC — ~30-60s typical
 
 # Single worker — pipeline (whisper + verify + alass + annotation) runs
 # end-to-end on one thread so per-job state mutations stay serial and the
@@ -504,22 +506,30 @@ def _find_bt_wrapper_by_inode(canonical_video: Path) -> Path | None:
 
 
 def _find_subtitle_track(video: Path, codec_match) -> tuple[int, str] | None:
-    """Probe `video` (mkv) for the best subtitle track of a given codec
-    family. Returns `(track_id, lang_label)` where lang_label is "eng"
-    or "und" depending on which fallback tier matched. None if no track
-    matches the predicate.
+    """Probe `video` for the best subtitle stream of a given codec family.
+    Returns `(stream_index, lang_label)` where `stream_index` is the
+    global stream index usable with `ffmpeg -map 0:<idx>`, and
+    `lang_label` is "eng" / "und" depending on which fallback tier
+    matched. None if no stream matches the predicate.
 
-    `codec_match(codec_lowered: str) -> bool` decides which codec
-    strings count — pass `lambda c: "subrip" in c or "srt" in c` for
-    text SubRip tracks, `lambda c: "pgs" in c` for PGS image tracks.
+    Container-agnostic via ffprobe — mkv (SubRip / PGS), mp4 (mov_text),
+    WebM (WebVTT), mov, ts, etc.
 
-    Tracks marked `forced_track: true` are skipped — those only
+    `codec_match(codec_lowered: str) -> bool` decides which ffprobe
+    codec_name strings count. Examples:
+      lambda c: c in ("subrip", "mov_text", "webvtt")  # text subs
+      lambda c: c == "hdmv_pgs_subtitle"                # PGS only
+
+    Tracks with `disposition.forced` set are skipped — those only
     translate non-dialogue visual elements (foreign signs, paper
     notes, on-screen text) and are useless against a whisper
     transcript that covers the full spoken dialogue. WER would catch
     a forced-track winner, but skipping at the probe layer avoids
-    wasted OCR / extraction work and lets a sibling full track in
-    the same container be picked instead.
+    wasted extraction / OCR work and lets a sibling full track in
+    the same container be picked instead. Concrete failure mode this
+    handles: HBO Chernobyl muxes a forced English PGS track BEFORE
+    the full English PGS one; without this skip we'd OCR the forced
+    one and get 12 cues per episode.
 
     Two-pass selection: explicit eng/en tag wins; otherwise the first
     track tagged und/zxx/empty is taken as a content fallback (BluRay
@@ -528,12 +538,16 @@ def _find_subtitle_track(video: Path, codec_match) -> tuple[int, str] | None:
     """
     try:
         probe = subprocess.run(
-            ["mkvmerge", "-J", str(video)],
+            ["ffprobe", "-v", "error",
+             "-select_streams", "s",
+             "-show_streams",
+             "-print_format", "json",
+             str(video)],
             capture_output=True,
-            timeout=MKVMERGE_PROBE_TIMEOUT,
+            timeout=FFPROBE_PROBE_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        print(f"[mkvmerge] probe failed for {video.name!r}: {e}", flush=True)
+        print(f"[ffprobe] probe failed for {video.name!r}: {e}", flush=True)
         return None
     if probe.returncode != 0:
         return None
@@ -544,33 +558,26 @@ def _find_subtitle_track(video: Path, codec_match) -> tuple[int, str] | None:
 
     english_id: int | None = None
     fallback_id: int | None = None
-    for track in info.get("tracks") or []:
-        if track.get("type") != "subtitles":
+    for stream in info.get("streams") or []:
+        # `-select_streams s` already filtered to subtitle streams,
+        # but defend against malformed probe output anyway.
+        if stream.get("codec_type") != "subtitle":
             continue
-        codec = str(track.get("codec") or "").lower()
+        codec = str(stream.get("codec_name") or "").lower()
         if not codec_match(codec):
             continue
-        props = track.get("properties") or {}
-        # Skip forced subtitle tracks — they only translate non-dialogue
-        # visual elements (foreign signs, paper notes, on-screen text)
-        # and produce 10-30 cues per episode of fragments that look like
-        # subtitle content but cover none of the actual spoken dialogue.
-        # WER would reject them downstream anyway, but skipping at the
-        # probe layer avoids a wasted mkvextract + tesseract pass and
-        # lets us prefer a sibling full track in the same container.
-        # Concrete failure mode: HBO Chernobyl muxes a forced English
-        # PGS track BEFORE the full English PGS track; without this
-        # skip we'd OCR the forced one and get 12 cues per episode.
-        if props.get("forced_track"):
+        disposition = stream.get("disposition") or {}
+        if disposition.get("forced"):
             continue
-        lang = str(props.get("language") or "").lower()
-        track_id = track.get("id")
-        if track_id is None:
+        tags = stream.get("tags") or {}
+        lang = str(tags.get("language") or "").lower()
+        idx = stream.get("index")
+        if idx is None:
             continue
         if lang in ("eng", "en") and english_id is None:
-            english_id = track_id
+            english_id = idx
         elif lang in ("", "und", "zxx") and fallback_id is None:
-            fallback_id = track_id
+            fallback_id = idx
 
     if english_id is not None:
         return english_id, "eng"
@@ -579,85 +586,106 @@ def _find_subtitle_track(video: Path, codec_match) -> tuple[int, str] | None:
     return None
 
 
+# Text-based subtitle codecs ffmpeg can convert to SubRip via `-c:s srt`.
+# `ass` / `ssa` are excluded — their override-tag parsing is finicky and
+# the resulting cues often carry styling residue that hurts WER + annotation.
+_TEXT_SUB_CODECS = {"subrip", "mov_text", "webvtt"}
+
+
 def _extract_embedded(video: Path, dest: Path) -> Path | None:
-    """Extract the first usable English SubRip track from the video's mkv
-    container to `dest`. Returns dest on success, None if no extractable
+    """Extract the first usable English text-subtitle track from `video`
+    to `dest` as SubRip. Returns dest on success, None if no extractable
     track exists.
 
-    Same-source extraction: the subtitle stream was authored against the
-    same master as the video, so timing is exact — the pipeline skips
+    Container-agnostic — works on mkv (subrip), mp4 (mov_text), WebM
+    (webvtt), etc. ffmpeg's `-c:s srt` transcodes any text-based
+    subtitle codec into SubRip format on the way out.
+
+    Same-source extraction: the subtitle stream was authored against
+    the same master as the video, so timing is exact — pipeline skips
     alass for this candidate. PGS / VobSub tracks are NOT picked here;
     they go through `_extract_pgs_ocr` separately (different cost +
     quality profile).
-
-    Non-mkv containers (mp4, avi, ...) currently return None even if they
-    contain a subtitle stream — mkvtoolnix only handles Matroska. Could
-    add ffmpeg-based extraction later if needed; >95% of TV/movie rips
-    are mkv anyway.
     """
-    if video.suffix.lower() != ".mkv":
-        return None
-
-    found = _find_subtitle_track(video, lambda c: "subrip" in c or "srt" in c)
+    found = _find_subtitle_track(video, lambda c: c in _TEXT_SUB_CODECS)
     if found is None:
         return None
-    track_id, lang_label = found
+    stream_idx, lang_label = found
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         r = subprocess.run(
-            ["mkvextract", "tracks", str(video), f"{track_id}:{dest}"],
+            ["ffmpeg", "-y", "-loglevel", "error",
+             "-i", str(video),
+             "-map", f"0:{stream_idx}",
+             "-c:s", "srt",
+             str(dest)],
             capture_output=True,
-            timeout=MKVEXTRACT_TIMEOUT,
+            timeout=FFMPEG_SUB_EXTRACT_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        print(f"[embedded] mkvextract failed for {video.name!r}: {e}", flush=True)
+        print(f"[embedded] ffmpeg extract failed for {video.name!r}: {e}", flush=True)
         return None
     if r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+        stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+        if stderr:
+            print(f"[embedded] ffmpeg rc={r.returncode} for {video.name!r}: {stderr[-200:]}", flush=True)
         return None
 
-    print(f"[embedded] extracted track {track_id} ({lang_label}) → {dest.name}", flush=True)
+    print(f"[embedded] extracted stream {stream_idx} ({lang_label}) → {dest.name}", flush=True)
     return dest
 
 
 def _extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
-    """Extract a PGS (bitmap) subtitle track from the mkv and OCR it to
-    SRT via pgsrip → tesseract. Same-source extraction like
-    `_extract_embedded`: timing is byte-perfect with the video master,
-    so alass is skipped downstream. WER gate still applies — catches
-    gross OCR failures (gibberish output) and forced-subs-only tracks
-    (low cue count).
+    """Extract a PGS (bitmap) subtitle track and OCR it to SRT via
+    pgsrip → tesseract. Same-source extraction like `_extract_embedded`:
+    timing is byte-perfect with the video master, so alass is skipped
+    downstream. WER gate still applies — catches gross OCR failures
+    (gibberish output) and forced-subs-only tracks (low cue count).
 
-    OCR character accuracy on modern Blu-ray PGS rendering (clean sans-
-    serif fonts) is ~95%. Italics and music / em-dash glyphs OCR worse.
-    Acceptable as a fallback for releases that don't ship a SubRip
-    track (e.g. Chernobyl and other HBO Blu-rays that only mux PGS).
+    Container-agnostic — primarily targets mkv (the canonical PGS
+    carrier from Blu-ray rips), but ffmpeg also handles mp4/mov when a
+    `hdmv_pgs_subtitle` stream is present. PGS in mp4 is rare but real
+    (some HEVC mp4 remuxes preserve the original PGS tracks).
+
+    OCR character accuracy on modern Blu-ray PGS rendering (clean
+    sans-serif fonts) is ~95%. Italics and music / em-dash glyphs OCR
+    worse. Acceptable as a fallback for releases that don't ship a
+    text subtitle track (e.g. Chernobyl and other HBO Blu-rays that
+    only mux PGS).
     """
-    if video.suffix.lower() != ".mkv":
-        return None
-
-    found = _find_subtitle_track(video, lambda c: "pgs" in c)
+    found = _find_subtitle_track(video, lambda c: c == "hdmv_pgs_subtitle")
     if found is None:
         return None
-    track_id, lang_label = found
+    stream_idx, lang_label = found
 
     with tempfile.TemporaryDirectory(prefix="pgsocr-") as tmpdir:
         tmp = Path(tmpdir)
         sup_path = tmp / "track.sup"
 
-        # 1. mkvextract PGS to a temp .sup file. Writing to tmpfs (or at
-        # worst a temp dir) keeps the OCR-side scratch invisible to
-        # Jellyfin / Infuse, which scan /artifact recursively.
+        # 1. ffmpeg demux PGS bitstream to a temp .sup file. `-c:s copy`
+        # keeps the raw PGS packets intact (no transcode); `-f sup`
+        # picks the raw-PGS muxer explicitly. Writing to tmpfs / temp
+        # keeps the OCR-side scratch invisible to Jellyfin / Infuse,
+        # which scan /artifact recursively.
         try:
             r = subprocess.run(
-                ["mkvextract", "tracks", str(video), f"{track_id}:{sup_path}"],
+                ["ffmpeg", "-y", "-loglevel", "error",
+                 "-i", str(video),
+                 "-map", f"0:{stream_idx}",
+                 "-c:s", "copy",
+                 "-f", "sup",
+                 str(sup_path)],
                 capture_output=True,
-                timeout=MKVEXTRACT_TIMEOUT,
+                timeout=FFMPEG_SUB_EXTRACT_TIMEOUT,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-            print(f"[pgs-ocr] mkvextract failed for {video.name!r}: {e}", flush=True)
+            print(f"[pgs-ocr] ffmpeg PGS demux failed for {video.name!r}: {e}", flush=True)
             return None
         if r.returncode != 0 or not sup_path.exists() or sup_path.stat().st_size == 0:
+            stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+            if stderr:
+                print(f"[pgs-ocr] ffmpeg rc={r.returncode} for {video.name!r}: {stderr[-200:]}", flush=True)
             return None
 
         # 2. pgsrip CLI consumes the .sup directly. It picks language
@@ -694,7 +722,7 @@ def _extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
             print(f"[pgs-ocr] copy to {dest} failed: {exc}", flush=True)
             return None
 
-    print(f"[pgs-ocr] OCR'd PGS track {track_id} ({lang_label}) → {dest.name}", flush=True)
+    print(f"[pgs-ocr] OCR'd PGS stream {stream_idx} ({lang_label}) → {dest.name}", flush=True)
     return dest
 
 
@@ -837,6 +865,17 @@ def process_bt_file(job_id: str):
 
     # ── 2 & 3. Verified.srt (cached) ──────────────────────────────────
     if not verified_src.exists():
+        # Detect whisper hallucination loops upfront: if the decoder
+        # got stuck in a "No. No. No." loop the resulting transcript
+        # makes WER a useless reference (every honest candidate's WER
+        # vs polluted whisper is huge, all get rejected, polluted
+        # whisper itself gets promoted to verified). When polluted,
+        # WER is bypassed and the first available candidate wins
+        # (forced/lang filters upstream remain in effect).
+        polluted, polluted_reason = whisper_is_polluted(whisper_src)
+        if polluted:
+            print(f"[pipeline] {video.name!r}: whisper polluted — {polluted_reason}; WER disabled this run", flush=True)
+
         winner_tag: str | None = None
         for tag in _CANDIDATE_TAGS:
             cand_dest = _sources_path(video, tag)
@@ -844,10 +883,18 @@ def process_bt_file(job_id: str):
             if cand_path is None:
                 continue
 
-            ok, reason = verify_against_whisper(whisper_src, cand_path)
-            if not ok:
-                print(f"[pipeline] {video.name!r}: {tag} REJECT — {reason}", flush=True)
-                continue
+            if polluted:
+                # Whisper isn't a usable reference; take the first
+                # candidate we materialize. Upstream filters (forced
+                # tracks excluded, lang preference, Haiku metadata
+                # gate for OS hits) are still in effect, so this
+                # isn't "accept anything".
+                reason = f"whisper polluted ({polluted_reason}); skipping WER"
+            else:
+                ok, reason = verify_against_whisper(whisper_src, cand_path)
+                if not ok:
+                    print(f"[pipeline] {video.name!r}: {tag} REJECT — {reason}", flush=True)
+                    continue
             print(f"[pipeline] {video.name!r}: {tag} ACCEPT — {reason}", flush=True)
 
             if tag in ("embedded", "pgs-ocr"):
@@ -876,8 +923,20 @@ def process_bt_file(job_id: str):
             print(f"[pipeline] {video.name!r}: {tag} alass failed; trying next", flush=True)
 
         if winner_tag is None:
-            # No candidate passed. Whisper IS the verified output (it's
-            # already audio-aligned, no alass needed).
+            if polluted:
+                # Polluted whisper + no usable candidate → refuse to
+                # promote junk to canonical. Stamp the sidecar so the
+                # scan loop stops retrying and the UI surfaces the
+                # state for the user to intervene (drop a bundled
+                # SRT, refetch OS once quota recovers, etc.).
+                try:
+                    stamp_whisper_polluted(video, polluted_reason)
+                except OSError:
+                    pass
+                _fail(job_id, f"whisper polluted, no usable candidate ({polluted_reason})")
+                return
+            # Whisper is clean and no candidate passed — fallback to
+            # whisper-as-verified (already audio-aligned, no alass).
             try:
                 verified_src.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(whisper_src), str(verified_src))
@@ -924,7 +983,11 @@ def process_bt_file(job_id: str):
 
     # Successfully produced the canonical SRT — clear any stale failure
     # sidecars from a prior run so the file isn't accidentally skipped.
-    for sidecar in (whisper_failed_path(video), annotate_failed_path(video)):
+    for sidecar in (
+        whisper_failed_path(video),
+        whisper_polluted_path(video),
+        annotate_failed_path(video),
+    ):
         try:
             sidecar.unlink(missing_ok=True)
         except OSError:

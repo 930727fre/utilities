@@ -21,7 +21,7 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Transcriber | Client-side `ffmpeg -vn -ac 1 -ar 16000` to a small AAC file, then HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`). Pre-transcoding keeps uploads uniformly ~30-50 MB regardless of source size — avoids sporadic connection drops observed on multi-GB Blu-ray mkv uploads |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
 | Main-feature classifier | Claude (haiku) at bt_filter time — one call per torrent: assigns each video its canonical title / year / S+E and flags bonus-content directories. Subtitle selection is NOT Haiku's job — the WER gate downstream handles "is this `.srt` the right one for this video" via content match |
-| Subs finder | `mkvtoolnix` (extract embedded SubRip tracks from the mkv) + `pgsrip` + `tesseract-ocr` (OCR for PGS bitmap subtitle tracks — covers Blu-ray releases like Chernobyl that only mux PGS) + OpenSubtitles REST API (hash + text searches). Container-extracted sources are preferred — same source as the video, byte-perfect timing |
+| Subs finder | `ffmpeg` + `ffprobe` (container-agnostic stream probe + extraction — mkv SubRip, mp4 mov_text, WebM WebVTT all land as SubRip via `-c:s srt`) + `pgsrip` + `tesseract-ocr` (OCR for PGS bitmap subtitle tracks — covers Blu-ray releases like Chernobyl that only mux PGS) + OpenSubtitles REST API (hash + text searches). Container-extracted sources are preferred — same source as the video, byte-perfect timing |
 | Metadata verifier | Claude (haiku) — confirms an OS search-result's release / title / year matches the local filename. Runs BEFORE download to avoid burning OS quota on the wrong file |
 | Content verifier | `jiwer` — word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold (≤ 0.5) from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
 | Subs sync | `alass` — Rust binary that does piecewise drift detection on the video's audio + candidate's cues, aligning each segment independently. Picked over ffsubsync because it can handle releases that differ in cold-open / recap structure (not just uniform offset drift). Only runs for candidates whose timing isn't already correct (bundled / OS); the embedded extraction path skips alass entirely |
@@ -151,17 +151,20 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
 2. whisper (HTTP to shared service, GPU-gated)
      → _sources/<stem>.whisper.srt
 
-3. Embedded candidate extraction (lazy, per video — mkv only)
-     → mkvmerge -J probes subtitle tracks; first English (or undefined)
-       SubRip track gets `mkvextract`-ed to
-       _sources/<stem>.embedded.srt.
+3. Embedded text-subtitle extraction (lazy, per video)
+     → ffprobe enumerates subtitle streams; first English (or
+       undefined) text-codec stream (subrip, mov_text, webvtt) is
+       ffmpeg-extracted with `-c:s srt` so any text format lands as
+       SubRip at _sources/<stem>.embedded.srt. Container-agnostic
+       — mkv, mp4, WebM, mov all handled the same way.
 
-4. PGS-OCR candidate extraction (lazy, per video — mkv only)
-     → If no SubRip track exists but a PGS (bitmap) track does, the
-       PGS gets `mkvextract`-ed to a tempfile and fed through
-       `pgsrip → tesseract` (English LSTM model), writing to
-       _sources/<stem>.pgs-ocr.srt. ~95% character accuracy on modern
-       Blu-ray rendering; OCR errors on italics + music glyphs.
+4. PGS-OCR candidate extraction (lazy, per video)
+     → If no text subtitle stream exists but a PGS (bitmap) stream
+       does, ffmpeg copies the PGS bitstream to a tempfile (raw .sup)
+       and feeds it through `pgsrip → tesseract` (English LSTM
+       model), writing to _sources/<stem>.pgs-ocr.srt. ~95%
+       character accuracy on modern Blu-ray rendering; OCR errors on
+       italics + music glyphs.
 
 5. Bundled candidate discovery (lazy, per video)
      → scans the bt-side wrapper for `.srt` files; for each, runs the
@@ -190,6 +193,14 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
      → _sources/<stem>.verified.srt.
      All candidates fail → cp whisper.srt → verified.srt.
 
+     If whisper is detected as polluted (≥10 consecutive identical
+     cues = hallucination loop signature), the WER gate is bypassed
+     for this run — first available candidate wins (forced / lang
+     filters remain in effect). If no candidate is available under
+     a polluted whisper, the pipeline refuses to promote junk and
+     stamps a `<stem>.whisper-polluted` sidecar for the user to
+     investigate. See "State model" below.
+
 8. Annotation (Sonnet) — reads _sources/<stem>.verified.srt, returns
    annotated SRT text. NO marker cue inserted.
      → atomic write to /artifact/.../<stem>.srt (canonical)
@@ -205,6 +216,13 @@ The background loop inspects the filesystem alone — no jobs.json overlay, no S
 canonical /artifact/.../<stem>.srt exists       → done; skip
 <stem>.whisper-failed sidecar exists            → pipeline halted at whisper
                                                    (skip until ↻)
+<stem>.whisper-polluted sidecar exists          → whisper hallucinated a loop
+                                                   ("No.×N", "Thank you.×N") and
+                                                   no candidate was available
+                                                   to substitute. Junk whisper
+                                                   was NOT promoted to canonical;
+                                                   user must drop a candidate
+                                                   or refetch OS, then ↻
 <stem>.annotate-failed sidecar exists           → pipeline halted at annotation
                                                    (skip until ↻; _sources/.verified.srt
                                                    is kept so ↻ only re-does annotation)
@@ -213,7 +231,7 @@ canonical /artifact/.../<stem>.srt exists       → done; skip
                                                    _sources/ stage
 ```
 
-Failure sidecars are extension-less plain-text files holding the error reason — Jellyfin / Infuse never load them as subtitles, but `cat <stem>.whisper-failed` shows you what broke. The UI ↻ button clears canonical + both sidecars; cached `_sources/` files are preserved so replay only re-does the missing stages.
+Failure sidecars are extension-less plain-text files holding the error reason — Jellyfin / Infuse never load them as subtitles, but `cat <stem>.whisper-failed` (or `.whisper-polluted`, `.annotate-failed`) shows you what broke. The UI ↻ button clears canonical + every sidecar; cached `_sources/` files are preserved so replay only re-does the missing stages.
 
 Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch them. Drop into `_sources/<stem>.bundled.srt` instead if you want the WER content gate to evaluate your candidate (and to get the automatic annotation pass).
 
@@ -282,5 +300,5 @@ Two workers at the episode level (`translator_executor` with `max_workers=2`); i
 
 - `jobs.json` is file-locked, not a real DB. Single-user is fine; for concurrent users move to SQLite.
 - Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
-- bt mode handles embedded SubRip tracks (mkv only — `mkvextract` is used as the first candidate source) and PGS bitmap tracks via OCR (`pgsrip → tesseract`, second candidate). VobSub / SSA tracks are still skipped: VobSub is image-based but rarer than PGS (DVD-era format, almost no modern rip uses it), SSA is styled-text but the override-tag parsing isn't done. Non-mkv containers (mp4, avi, …) skip both extraction steps even when they have a subtitle stream; >95% of TV/movie rips are mkv anyway.
+- bt mode handles text-based embedded subtitles across containers (mkv subrip, mp4 mov_text, WebM webvtt; ffmpeg's `-c:s srt` converts to SubRip on extraction) and PGS bitmap tracks via OCR (`pgsrip → tesseract`, second candidate). ASS / SSA tracks are skipped: styled-text whose override-tag parsing carries styling residue that hurts WER + annotation. VobSub (DVD-era image format) is also skipped — almost no modern rip uses it.
 - The Chinese translation cascade has no whisper fallback (whisper produces English, which would defeat the point). If a batch's API call fails or the validator can't recover from a missing-cue response, the missing cues silently keep their English lines (the rest of the SRT is still useful). If the whole translation raises (e.g. all calls hit a long Gemini outage), the video lands at `中 !` and stays there until the user clicks the torrent's button again to retry.

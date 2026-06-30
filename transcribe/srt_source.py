@@ -1,11 +1,16 @@
 """Sidecar files that record pipeline failure for a video.
 
-Two failure modes the background scan loop needs to remember:
+Three failure modes the background scan loop needs to remember:
 
-  <stem>.whisper-failed   — whisper run did not produce an SRT
-  <stem>.annotate-failed  — annotation pass crashed (SRT still playable
-                            at <stem>.srt; only the ※ annotation work
-                            never landed)
+  <stem>.whisper-failed     — whisper run did not produce an SRT
+  <stem>.whisper-polluted   — whisper produced an SRT but it's a
+                              hallucination loop ("No. No. No." × 100s).
+                              Pipeline detected the pattern, no candidate
+                              was available to substitute, so it refused
+                              to promote the junk to canonical.
+  <stem>.annotate-failed    — annotation pass crashed (SRT still playable
+                              at <stem>.srt; only the ※ annotation work
+                              never landed)
 
 Body is the (short, single-line) error message so the user can see WHY
 without opening docker logs. Filename, not file extension, is the
@@ -33,6 +38,11 @@ def whisper_failed_path(video: Path) -> Path:
     return video.with_suffix(".whisper-failed")
 
 
+def whisper_polluted_path(video: Path) -> Path:
+    """Path of the whisper-polluted sidecar for a given video."""
+    return video.with_suffix(".whisper-polluted")
+
+
 def annotate_failed_path(video: Path) -> Path:
     """Path of the annotate-failed sidecar for a given video."""
     return video.with_suffix(".annotate-failed")
@@ -44,6 +54,17 @@ def stamp_whisper_failed(video: Path, error: str) -> None:
     p = whisper_failed_path(video)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(_short(error) + "\n", encoding="utf-8")
+
+
+def stamp_whisper_polluted(video: Path, reason: str) -> None:
+    """Write a `<stem>.whisper-polluted` sidecar so the scan loop stops
+    retrying. Body is the detected loop signature (e.g. `437 consecutive
+    identical cues 'no.'`). User intervention is needed — dropping a
+    bundled SRT into `/bt`, refetching OS, or accepting the limitation
+    on this episode."""
+    p = whisper_polluted_path(video)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_short(reason) + "\n", encoding="utf-8")
 
 
 def stamp_annotate_failed(video: Path, error: str) -> None:

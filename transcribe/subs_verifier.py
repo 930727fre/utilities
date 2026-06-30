@@ -202,6 +202,65 @@ def _normalized_full_text(cues: list[dict]) -> str:
     return s.strip()
 
 
+_POLLUTION_RUN_THRESHOLD = 10
+
+
+def whisper_is_polluted(whisper_srt: Path) -> tuple[bool, str]:
+    """Detect a hallucination loop in `whisper_srt`. Returns (True, reason)
+    when polluted, (False, "") otherwise.
+
+    Whisper's autoregressive decoder occasionally falls into a state
+    where it emits the same short phrase repeatedly across many cues
+    ("No.", "Thank you.", "I don't know." etc.). Signature: long run
+    of consecutive cues with identical normalized text.
+
+    Threshold of 10 is well above plausible real-dialogue repetition
+    (a rapid "yes/yes/yes" affirmation typically peaks at 3-5 cues;
+    even comedy bits / catchphrases rarely run consecutively past
+    that). Hallucination loops are by definition consecutive, since
+    the decoder gets "stuck" in the looped state. Typical
+    hallucination runs are dozens to hundreds of consecutive
+    repeats, so the threshold lands deep inside the safe zone.
+
+    When this signals true, the pipeline disables the WER gate for
+    candidate selection (whisper isn't a usable reference anymore)
+    and takes the first available candidate from _CANDIDATE_TAGS —
+    forced/lang filters upstream still apply. If no candidate is
+    available, the pipeline stamps a `.whisper-polluted` sidecar
+    instead of promoting the junk whisper output to canonical.
+    """
+    cues = _real_cues(whisper_srt)
+    if len(cues) < _POLLUTION_RUN_THRESHOLD:
+        return False, ""
+
+    max_run = 1
+    cur_run = 1
+    prev_text: str | None = None
+    max_run_phrase = ""
+    for c in cues:
+        flat = _cue_text(c).strip().lower()
+        if not flat:
+            # Skip empty cue body; don't penalize the run counter but
+            # don't extend it either — reset to break any false chain
+            # that happened to span an empty cue.
+            cur_run = 1
+            prev_text = None
+            continue
+        if flat == prev_text:
+            cur_run += 1
+            if cur_run > max_run:
+                max_run = cur_run
+                max_run_phrase = flat
+        else:
+            cur_run = 1
+        prev_text = flat
+
+    if max_run >= _POLLUTION_RUN_THRESHOLD:
+        snippet = max_run_phrase[:40] + ("…" if len(max_run_phrase) > 40 else "")
+        return True, f"{max_run} consecutive identical cues '{snippet}'"
+    return False, ""
+
+
 def verify_against_whisper(
     whisper_srt: Path,
     candidate_srt: Path,
