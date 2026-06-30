@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ \
         python3-dev \
         mkvtoolnix \
+        tesseract-ocr \
+        tesseract-ocr-eng \
     && rm -rf /var/lib/apt/lists/*
 
 # alass — subtitle-to-video alignment. Picked over ffsubsync because alass

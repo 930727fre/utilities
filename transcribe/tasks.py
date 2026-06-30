@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
 RESYNC_TIMEOUT = 5 * 60           # alass on a long movie tops out well under this
 MKVMERGE_PROBE_TIMEOUT = 30       # JSON track probe — milliseconds in practice
 MKVEXTRACT_TIMEOUT = 60           # demux one SRT track — seconds on a movie-sized mkv
+PGS_OCR_TIMEOUT = 10 * 60         # tesseract OCR of a 50-min episode's PGS — ~1-3 min typical
 
 # Single worker — pipeline (whisper + verify + alass + annotation) runs
 # end-to-end on one thread so per-job state mutations stay serial and the
@@ -359,6 +361,13 @@ def _run_transcription(job_id: str, staging_mp4: str):
 #                        tag. Common in BluRay / WEB-DL rips (PSA, NTb,
 #                        FLUX...). When present this is unambiguously the
 #                        best source — no community / OS roulette.
+#   pgs-ocr            — PGS (bitmap) subtitle track from the mkv, OCR'd
+#                        to SRT via pgsrip → tesseract. Same-source so
+#                        timing is byte-perfect (alass skipped), but
+#                        text quality is ~95% character accuracy at
+#                        best — italics / music / em-dash glyphs OCR
+#                        worse. Covers releases that ship PGS only
+#                        (Chernobyl + many HBO Blu-rays).
 #   bundled            — .srt sidecar in the bt-side wrapper. Usually from
 #                        the same release, may need minor alignment.
 #   opensubtitles-hash — exact video-hash match on OpenSubtitles. Quality
@@ -371,7 +380,7 @@ def _run_transcription(job_id: str, staging_mp4: str):
 #   opensubtitles-text — text-search fallback. Drift-prone (different
 #                        release entirely) and metadata can lie (wrong
 #                        S/E in the file we get back). WER catches those.
-_CANDIDATE_TAGS = ("embedded", "bundled", "opensubtitles-hash", "opensubtitles-text")
+_CANDIDATE_TAGS = ("embedded", "pgs-ocr", "bundled", "opensubtitles-hash", "opensubtitles-text")
 
 
 def _find_bt_wrapper(canonical_video: Path) -> Path | None:
@@ -431,26 +440,29 @@ def _find_bt_wrapper_by_inode(canonical_video: Path) -> Path | None:
     return None
 
 
-def _extract_embedded(video: Path, dest: Path) -> Path | None:
-    """Extract the first usable English SubRip track from the video's mkv
-    container to `dest`. Returns dest on success, None if no extractable
-    track exists.
+def _find_subtitle_track(video: Path, codec_match) -> tuple[int, str] | None:
+    """Probe `video` (mkv) for the best subtitle track of a given codec
+    family. Returns `(track_id, lang_label)` where lang_label is "eng"
+    or "und" depending on which fallback tier matched. None if no track
+    matches the predicate.
 
-    Same-source extraction: the subtitle stream was authored against the
-    same master as the video, so timing is exact — the pipeline skips
-    alass for this candidate. PGS / VobSub tracks are skipped: they're
-    image-based and would need OCR (out of scope). Language preference
-    is explicit `eng`/`en` first, falling back to undefined/unknown if
-    no English track is tagged (WER will gate it).
+    `codec_match(codec_lowered: str) -> bool` decides which codec
+    strings count — pass `lambda c: "subrip" in c or "srt" in c` for
+    text SubRip tracks, `lambda c: "pgs" in c` for PGS image tracks.
 
-    Non-mkv containers (mp4, avi, ...) currently return None even if they
-    contain a subtitle stream — mkvtoolnix only handles Matroska. Could
-    add ffmpeg-based extraction later if needed; >95% of TV/movie rips
-    are mkv anyway.
+    Tracks marked `forced_track: true` are skipped — those only
+    translate non-dialogue visual elements (foreign signs, paper
+    notes, on-screen text) and are useless against a whisper
+    transcript that covers the full spoken dialogue. WER would catch
+    a forced-track winner, but skipping at the probe layer avoids
+    wasted OCR / extraction work and lets a sibling full track in
+    the same container be picked instead.
+
+    Two-pass selection: explicit eng/en tag wins; otherwise the first
+    track tagged und/zxx/empty is taken as a content fallback (BluRay
+    rips frequently ship English subs without language metadata). The
+    WER gate downstream verifies the content is actually English.
     """
-    if video.suffix.lower() != ".mkv":
-        return None
-
     try:
         probe = subprocess.run(
             ["mkvmerge", "-J", str(video)],
@@ -458,7 +470,7 @@ def _extract_embedded(video: Path, dest: Path) -> Path | None:
             timeout=MKVMERGE_PROBE_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        print(f"[embedded] mkvmerge probe failed for {video.name!r}: {e}", flush=True)
+        print(f"[mkvmerge] probe failed for {video.name!r}: {e}", flush=True)
         return None
     if probe.returncode != 0:
         return None
@@ -467,19 +479,27 @@ def _extract_embedded(video: Path, dest: Path) -> Path | None:
     except (json.JSONDecodeError, ValueError):
         return None
 
-    # Two-pass: prefer explicit English, fall back to undefined/unknown.
     english_id: int | None = None
     fallback_id: int | None = None
     for track in info.get("tracks") or []:
         if track.get("type") != "subtitles":
             continue
         codec = str(track.get("codec") or "").lower()
-        # SubRip = text-based SRT (what we want). HDMV PGS / VobSub /
-        # DVB are image-based; ASS/SSA are styled text but parsing is
-        # extra work — skip both for now.
-        if "subrip" not in codec and "srt" not in codec:
+        if not codec_match(codec):
             continue
         props = track.get("properties") or {}
+        # Skip forced subtitle tracks — they only translate non-dialogue
+        # visual elements (foreign signs, paper notes, on-screen text)
+        # and produce 10-30 cues per episode of fragments that look like
+        # subtitle content but cover none of the actual spoken dialogue.
+        # WER would reject them downstream anyway, but skipping at the
+        # probe layer avoids a wasted mkvextract + tesseract pass and
+        # lets us prefer a sibling full track in the same container.
+        # Concrete failure mode: HBO Chernobyl muxes a forced English
+        # PGS track BEFORE the full English PGS track; without this
+        # skip we'd OCR the forced one and get 12 cues per episode.
+        if props.get("forced_track"):
+            continue
         lang = str(props.get("language") or "").lower()
         track_id = track.get("id")
         if track_id is None:
@@ -489,14 +509,41 @@ def _extract_embedded(video: Path, dest: Path) -> Path | None:
         elif lang in ("", "und", "zxx") and fallback_id is None:
             fallback_id = track_id
 
-    chosen = english_id if english_id is not None else fallback_id
-    if chosen is None:
+    if english_id is not None:
+        return english_id, "eng"
+    if fallback_id is not None:
+        return fallback_id, "und"
+    return None
+
+
+def _extract_embedded(video: Path, dest: Path) -> Path | None:
+    """Extract the first usable English SubRip track from the video's mkv
+    container to `dest`. Returns dest on success, None if no extractable
+    track exists.
+
+    Same-source extraction: the subtitle stream was authored against the
+    same master as the video, so timing is exact — the pipeline skips
+    alass for this candidate. PGS / VobSub tracks are NOT picked here;
+    they go through `_extract_pgs_ocr` separately (different cost +
+    quality profile).
+
+    Non-mkv containers (mp4, avi, ...) currently return None even if they
+    contain a subtitle stream — mkvtoolnix only handles Matroska. Could
+    add ffmpeg-based extraction later if needed; >95% of TV/movie rips
+    are mkv anyway.
+    """
+    if video.suffix.lower() != ".mkv":
         return None
+
+    found = _find_subtitle_track(video, lambda c: "subrip" in c or "srt" in c)
+    if found is None:
+        return None
+    track_id, lang_label = found
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         r = subprocess.run(
-            ["mkvextract", "tracks", str(video), f"{chosen}:{dest}"],
+            ["mkvextract", "tracks", str(video), f"{track_id}:{dest}"],
             capture_output=True,
             timeout=MKVEXTRACT_TIMEOUT,
         )
@@ -506,7 +553,85 @@ def _extract_embedded(video: Path, dest: Path) -> Path | None:
     if r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
         return None
 
-    print(f"[embedded] extracted track {chosen} ({'eng' if english_id == chosen else 'und'}) → {dest.name}", flush=True)
+    print(f"[embedded] extracted track {track_id} ({lang_label}) → {dest.name}", flush=True)
+    return dest
+
+
+def _extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
+    """Extract a PGS (bitmap) subtitle track from the mkv and OCR it to
+    SRT via pgsrip → tesseract. Same-source extraction like
+    `_extract_embedded`: timing is byte-perfect with the video master,
+    so alass is skipped downstream. WER gate still applies — catches
+    gross OCR failures (gibberish output) and forced-subs-only tracks
+    (low cue count).
+
+    OCR character accuracy on modern Blu-ray PGS rendering (clean sans-
+    serif fonts) is ~95%. Italics and music / em-dash glyphs OCR worse.
+    Acceptable as a fallback for releases that don't ship a SubRip
+    track (e.g. Chernobyl and other HBO Blu-rays that only mux PGS).
+    """
+    if video.suffix.lower() != ".mkv":
+        return None
+
+    found = _find_subtitle_track(video, lambda c: "pgs" in c)
+    if found is None:
+        return None
+    track_id, lang_label = found
+
+    with tempfile.TemporaryDirectory(prefix="pgsocr-") as tmpdir:
+        tmp = Path(tmpdir)
+        sup_path = tmp / "track.sup"
+
+        # 1. mkvextract PGS to a temp .sup file. Writing to tmpfs (or at
+        # worst a temp dir) keeps the OCR-side scratch invisible to
+        # Jellyfin / Infuse, which scan /artifact recursively.
+        try:
+            r = subprocess.run(
+                ["mkvextract", "tracks", str(video), f"{track_id}:{sup_path}"],
+                capture_output=True,
+                timeout=MKVEXTRACT_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            print(f"[pgs-ocr] mkvextract failed for {video.name!r}: {e}", flush=True)
+            return None
+        if r.returncode != 0 or not sup_path.exists() or sup_path.stat().st_size == 0:
+            return None
+
+        # 2. pgsrip CLI consumes the .sup directly. It picks language
+        # from the .sup metadata; if `und`, the output filename will
+        # carry `.und.srt` instead of `.eng.srt` — we glob to find it.
+        try:
+            r = subprocess.run(
+                ["pgsrip", str(sup_path)],
+                capture_output=True,
+                timeout=PGS_OCR_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            print(f"[pgs-ocr] pgsrip failed for {video.name!r}: {e}", flush=True)
+            return None
+        if r.returncode != 0:
+            tail = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:]
+            print(f"[pgs-ocr] pgsrip rc={r.returncode} for {video.name!r}: {tail}", flush=True)
+            return None
+
+        produced = sorted(tmp.glob("track*.srt"))
+        if not produced:
+            print(f"[pgs-ocr] no .srt produced by pgsrip for {video.name!r}", flush=True)
+            return None
+        ocr_output = produced[0]
+        if ocr_output.stat().st_size == 0:
+            return None
+
+        # 3. Promote to dest (under _sources/). Use shutil.copy2 — the
+        # tempdir cleanup at scope exit will reap the OCR scratch.
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(str(ocr_output), str(dest))
+        except OSError as exc:
+            print(f"[pgs-ocr] copy to {dest} failed: {exc}", flush=True)
+            return None
+
+    print(f"[pgs-ocr] OCR'd PGS track {track_id} ({lang_label}) → {dest.name}", flush=True)
     return dest
 
 
@@ -561,6 +686,9 @@ def _fetch_candidate(tag: str, video: Path, dest: Path, whisper_src: Path) -> Pa
     if tag == "embedded":
         return _extract_embedded(video, dest)
 
+    if tag == "pgs-ocr":
+        return _extract_pgs_ocr(video, dest)
+
     if tag == "bundled":
         return _pick_bundled(video, dest, whisper_src)
 
@@ -582,13 +710,14 @@ def process_bt_file(job_id: str):
     progress survives crashes / restarts / manual deletions:
 
       1. whisper      → /artifact/_sources/.../<stem>.whisper.srt
-      2. candidates   → /artifact/_sources/.../<stem>.{embedded,bundled,
+      2. candidates   → /artifact/_sources/.../<stem>.{embedded,pgs-ocr,
+                                                       bundled,
                                                        opensubtitles-*}.srt
       3. verify+sync  → /artifact/_sources/.../<stem>.verified.srt
-                        (winner from step 2 → alass; embedded wins skip
-                         alass since timing is already aligned with the
-                         video master; or whisper itself if no candidate
-                         passed the WER gate)
+                        (winner from step 2 → alass; embedded / pgs-ocr
+                         wins skip alass since timing is already aligned
+                         with the video master; or whisper itself if no
+                         candidate passed the WER gate)
       4. annotate     → /artifact/.../<stem>.srt   (atomic mv tmp → canonical)
 
     State recovery on restart: a pipeline that died mid-run leaves
@@ -658,19 +787,21 @@ def process_bt_file(job_id: str):
                 continue
             print(f"[pipeline] {video.name!r}: {tag} ACCEPT — {reason}", flush=True)
 
-            if tag == "embedded":
-                # Embedded subtitle stream was authored against the same
-                # master as the video — timing is byte-perfect. Running
-                # alass here would only introduce drift on a stream that
-                # was already correct, so we promote it directly.
+            if tag in ("embedded", "pgs-ocr"):
+                # Both candidate kinds come out of the mkv container
+                # itself — the subtitle stream was authored against the
+                # same master as the video, so timing is byte-perfect.
+                # Running alass here would only introduce drift on a
+                # stream that was already correct, so we promote
+                # directly.
                 try:
                     verified_src.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(cand_path), str(verified_src))
-                    print(f"[pipeline] {video.name!r}: embedded → verified.srt (alass skipped, same-source timing)", flush=True)
+                    print(f"[pipeline] {video.name!r}: {tag} → verified.srt (alass skipped, same-source timing)", flush=True)
                     winner_tag = tag
                     break
                 except OSError as exc:
-                    print(f"[pipeline] {video.name!r}: embedded → verified copy failed: {exc}", flush=True)
+                    print(f"[pipeline] {video.name!r}: {tag} → verified copy failed: {exc}", flush=True)
                     continue
 
             if _resync(video, cand_path, verified_src):
