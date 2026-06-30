@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc \
         g++ \
         python3-dev \
+        mkvtoolnix \
     && rm -rf /var/lib/apt/lists/*
 
 # alass — subtitle-to-video alignment. Picked over ffsubsync because alass

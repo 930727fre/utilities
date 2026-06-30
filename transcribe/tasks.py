@@ -1,4 +1,5 @@
 import functools
+import json
 import os
 import re
 import shutil
@@ -35,6 +36,8 @@ WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 DOWNLOAD_TIMEOUT = 60 * 60        # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60  # 4 hours
 RESYNC_TIMEOUT = 5 * 60           # alass on a long movie tops out well under this
+MKVMERGE_PROBE_TIMEOUT = 30       # JSON track probe — milliseconds in practice
+MKVEXTRACT_TIMEOUT = 60           # demux one SRT track — seconds on a movie-sized mkv
 
 # Single worker — pipeline (whisper + verify + alass + annotation) runs
 # end-to-end on one thread so per-job state mutations stay serial and the
@@ -347,12 +350,28 @@ def _run_transcription(job_id: str, staging_mp4: str):
 
 # ── BT video pipeline ─────────────────────────────────────────────────────
 
-# Candidate sources we try in order. Bundled-SRT comes first because it's
-# from the same release as the video (zero drift before alass) and
-# already passed the bt_filter Haiku preview test for English / dialogue.
-# OS hash next (exact byte-hash match → likely same release). OS text
-# last (drift-prone — different release entirely).
-_CANDIDATE_TAGS = ("bundled", "opensubtitles-hash", "opensubtitles-text")
+# Candidate sources we try in order, from "same source as the video" to
+# "different release entirely":
+#
+#   embedded           — SubRip track inside the mkv container itself.
+#                        Authored against the same master as the video,
+#                        timing is byte-perfect; alass is skipped for this
+#                        tag. Common in BluRay / WEB-DL rips (PSA, NTb,
+#                        FLUX...). When present this is unambiguously the
+#                        best source — no community / OS roulette.
+#   bundled            — .srt sidecar in the bt-side wrapper. Usually from
+#                        the same release, may need minor alignment.
+#   opensubtitles-hash — exact video-hash match on OpenSubtitles. Quality
+#                        is correlated with whether the release ships its
+#                        own subs: releases with embedded SRT attract few
+#                        OS uploads, so OS-hash for those is statistically
+#                        junk (some uploader mis-tagged a different cut's
+#                        sub against this hash). Hence embedded-first
+#                        ordering above.
+#   opensubtitles-text — text-search fallback. Drift-prone (different
+#                        release entirely) and metadata can lie (wrong
+#                        S/E in the file we get back). WER catches those.
+_CANDIDATE_TAGS = ("embedded", "bundled", "opensubtitles-hash", "opensubtitles-text")
 
 
 def _find_bt_wrapper(canonical_video: Path) -> Path | None:
@@ -412,6 +431,85 @@ def _find_bt_wrapper_by_inode(canonical_video: Path) -> Path | None:
     return None
 
 
+def _extract_embedded(video: Path, dest: Path) -> Path | None:
+    """Extract the first usable English SubRip track from the video's mkv
+    container to `dest`. Returns dest on success, None if no extractable
+    track exists.
+
+    Same-source extraction: the subtitle stream was authored against the
+    same master as the video, so timing is exact — the pipeline skips
+    alass for this candidate. PGS / VobSub tracks are skipped: they're
+    image-based and would need OCR (out of scope). Language preference
+    is explicit `eng`/`en` first, falling back to undefined/unknown if
+    no English track is tagged (WER will gate it).
+
+    Non-mkv containers (mp4, avi, ...) currently return None even if they
+    contain a subtitle stream — mkvtoolnix only handles Matroska. Could
+    add ffmpeg-based extraction later if needed; >95% of TV/movie rips
+    are mkv anyway.
+    """
+    if video.suffix.lower() != ".mkv":
+        return None
+
+    try:
+        probe = subprocess.run(
+            ["mkvmerge", "-J", str(video)],
+            capture_output=True,
+            timeout=MKVMERGE_PROBE_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        print(f"[embedded] mkvmerge probe failed for {video.name!r}: {e}", flush=True)
+        return None
+    if probe.returncode != 0:
+        return None
+    try:
+        info = json.loads(probe.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    # Two-pass: prefer explicit English, fall back to undefined/unknown.
+    english_id: int | None = None
+    fallback_id: int | None = None
+    for track in info.get("tracks") or []:
+        if track.get("type") != "subtitles":
+            continue
+        codec = str(track.get("codec") or "").lower()
+        # SubRip = text-based SRT (what we want). HDMV PGS / VobSub /
+        # DVB are image-based; ASS/SSA are styled text but parsing is
+        # extra work — skip both for now.
+        if "subrip" not in codec and "srt" not in codec:
+            continue
+        props = track.get("properties") or {}
+        lang = str(props.get("language") or "").lower()
+        track_id = track.get("id")
+        if track_id is None:
+            continue
+        if lang in ("eng", "en") and english_id is None:
+            english_id = track_id
+        elif lang in ("", "und", "zxx") and fallback_id is None:
+            fallback_id = track_id
+
+    chosen = english_id if english_id is not None else fallback_id
+    if chosen is None:
+        return None
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(
+            ["mkvextract", "tracks", str(video), f"{chosen}:{dest}"],
+            capture_output=True,
+            timeout=MKVEXTRACT_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        print(f"[embedded] mkvextract failed for {video.name!r}: {e}", flush=True)
+        return None
+    if r.returncode != 0 or not dest.exists() or dest.stat().st_size == 0:
+        return None
+
+    print(f"[embedded] extracted track {chosen} ({'eng' if english_id == chosen else 'und'}) → {dest.name}", flush=True)
+    return dest
+
+
 def _pick_bundled(video: Path, dest: Path, whisper_src: Path) -> Path | None:
     """Scan the bt-side wrapper for `.srt` files and find one whose content
     matches the whisper transcript (via WER). First match (sorted by
@@ -460,6 +558,9 @@ def _fetch_candidate(tag: str, video: Path, dest: Path, whisper_src: Path) -> Pa
     if dest.exists():
         return dest
 
+    if tag == "embedded":
+        return _extract_embedded(video, dest)
+
     if tag == "bundled":
         return _pick_bundled(video, dest, whisper_src)
 
@@ -481,10 +582,13 @@ def process_bt_file(job_id: str):
     progress survives crashes / restarts / manual deletions:
 
       1. whisper      → /artifact/_sources/.../<stem>.whisper.srt
-      2. candidates   → /artifact/_sources/.../<stem>.{bundled,opensubtitles-*}.srt
+      2. candidates   → /artifact/_sources/.../<stem>.{embedded,bundled,
+                                                       opensubtitles-*}.srt
       3. verify+sync  → /artifact/_sources/.../<stem>.verified.srt
-                        (winner from step 2 → alass; or whisper itself
-                         if no candidate passed the WER gate)
+                        (winner from step 2 → alass; embedded wins skip
+                         alass since timing is already aligned with the
+                         video master; or whisper itself if no candidate
+                         passed the WER gate)
       4. annotate     → /artifact/.../<stem>.srt   (atomic mv tmp → canonical)
 
     State recovery on restart: a pipeline that died mid-run leaves
@@ -553,6 +657,21 @@ def process_bt_file(job_id: str):
                 print(f"[pipeline] {video.name!r}: {tag} REJECT — {reason}", flush=True)
                 continue
             print(f"[pipeline] {video.name!r}: {tag} ACCEPT — {reason}", flush=True)
+
+            if tag == "embedded":
+                # Embedded subtitle stream was authored against the same
+                # master as the video — timing is byte-perfect. Running
+                # alass here would only introduce drift on a stream that
+                # was already correct, so we promote it directly.
+                try:
+                    verified_src.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(cand_path), str(verified_src))
+                    print(f"[pipeline] {video.name!r}: embedded → verified.srt (alass skipped, same-source timing)", flush=True)
+                    winner_tag = tag
+                    break
+                except OSError as exc:
+                    print(f"[pipeline] {video.name!r}: embedded → verified copy failed: {exc}", flush=True)
+                    continue
 
             if _resync(video, cand_path, verified_src):
                 winner_tag = tag

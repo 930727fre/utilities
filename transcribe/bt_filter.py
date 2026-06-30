@@ -252,10 +252,10 @@ def _sources_path(canonical_video: Path, source_tag: str) -> Path:
       /artifact/TV/Title (Year)/Season 01/Title (Year) - S01E01.mkv
         →  /artifact/_sources/TV/Title (Year)/Season 01/Title (Year) - S01E01.<tag>.srt
 
-    `source_tag` is one of: "whisper", "bundled",
-    "opensubtitles-hash", "opensubtitles-text". The tag becomes part of
-    the filename so multiple candidates for the same video sit side-by-
-    side and can be inspected with `ls`.
+    `source_tag` is one of: "whisper", "embedded", "bundled",
+    "opensubtitles-hash", "opensubtitles-text", "verified". The tag
+    becomes part of the filename so multiple candidates for the same
+    video sit side-by-side and can be inspected with `ls`.
     """
     try:
         rel = canonical_video.relative_to(ARTIFACT_ROOT)
