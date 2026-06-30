@@ -40,6 +40,7 @@ RESYNC_TIMEOUT = 5 * 60           # alass on a long movie tops out well under th
 MKVMERGE_PROBE_TIMEOUT = 30       # JSON track probe — milliseconds in practice
 MKVEXTRACT_TIMEOUT = 60           # demux one SRT track — seconds on a movie-sized mkv
 PGS_OCR_TIMEOUT = 10 * 60         # tesseract OCR of a 50-min episode's PGS — ~1-3 min typical
+FFMPEG_AUDIO_TIMEOUT = 5 * 60     # transcoding a movie to 16kHz mono AAC — ~30-60s typical
 
 # Single worker — pipeline (whisper + verify + alass + annotation) runs
 # end-to-end on one thread so per-job state mutations stay serial and the
@@ -182,46 +183,108 @@ def _unique_basename(base: str) -> str:
     return candidate
 
 
+def _extract_audio_for_whisper(media_path: Path, out_path: Path) -> None:
+    """Transcode `media_path`'s audio to a 16 kHz mono AAC file at
+    `out_path`. Raises on ffmpeg failure.
+
+    Whisper's first internal step is exactly this same `-vn -ac 1
+    -ar 16000` ffmpeg pass. Doing it client-side instead of letting
+    whisper-server's ffmpeg do it server-side means the HTTP body we
+    POST is ~30-50 MB regardless of source resolution / video bitrate
+    / subtitle-track count, instead of the 1-3 GB the source mkv is.
+
+    Concrete reason this matters: PSA Chernobyl Blu-rays are 2.3-2.5
+    GB each (HEVC 1080p video + 11 PGS subtitle tracks). Uploading
+    those over the docker bridge to whisper-server hits a sporadic
+    "Connection aborted" — root cause unidentified but consistently
+    correlated with file size (1.1 GB GoT episodes upload first-try,
+    2.5 GB Chernobyl episodes need 3-4 retries). Pre-transcoding
+    sidesteps the whole class by keeping uploads small + uniform.
+
+    The output is `.m4a` (AAC in mp4 container). 64 kbps is plenty
+    headroom for the 16 kHz mono signal whisper consumes; quality
+    parity with letting whisper-server downsample server-side.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-loglevel", "error",
+                "-i", str(media_path),
+                "-vn",           # drop video stream
+                "-ac", "1",      # mono — whisper downmixes anyway
+                "-ar", "16000",  # 16 kHz — whisper's internal sample rate
+                "-c:a", "aac",
+                "-b:a", "64k",
+                str(out_path),
+            ],
+            capture_output=True,
+            timeout=FFMPEG_AUDIO_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        raise RuntimeError(f"ffmpeg audio extraction failed: {e}") from e
+    if r.returncode != 0:
+        stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"ffmpeg audio extraction returned {r.returncode}: {stderr[-300:]}"
+        )
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise RuntimeError("ffmpeg audio extraction produced empty output")
+
+
 def _run_whisper(job_id: str, media_path: Path, srt_path: Path):
-    """POST media to the shared whisper service; write returned SRT to srt_path.
+    """Transcode `media_path` to a small audio file, POST it to the
+    shared whisper service, write the returned SRT to `srt_path`.
 
-    Holds the cross-container GPU lock around the HTTP call so this consumer
-    doesn't race marker-pipeline for VRAM. faster-whisper-server has its own
-    internal queue for whisper-only contention.
+    Holds the cross-container GPU lock around the HTTP call so this
+    consumer doesn't race marker-pipeline for VRAM. faster-whisper-server
+    has its own internal queue for whisper-only contention.
 
-    Pre-flight DELETED check; raises on HTTP / server error.
+    Audio extraction runs OUTSIDE the GPU lock — it's pure CPU work
+    (ffmpeg), no reason to block other GPU consumers while we transcode.
+    See `_extract_audio_for_whisper` for why we extract client-side.
+
+    Pre-flight DELETED check; raises on ffmpeg or HTTP / server error.
     """
     current = get_job(job_id)
     if not current or current["status"] == "DELETED":
         return
 
-    with gpu_lock("transcribe-app", f"whisper:{job_id}"):
-        # Re-check after acquiring the lock (could have been deleted while we waited).
-        current = get_job(job_id)
-        if not current or current["status"] == "DELETED":
+    with tempfile.TemporaryDirectory(prefix="whisper-audio-") as tmpdir:
+        audio_path = Path(tmpdir) / "audio.m4a"
+        _extract_audio_for_whisper(media_path, audio_path)
+
+        if _is_job_deleted(job_id):
             return
 
-        try:
-            with open(media_path, "rb") as f:
-                resp = requests.post(
-                    f"{WHISPER_URL}/v1/audio/transcriptions",
-                    files={"file": (media_path.name, f, "application/octet-stream")},
-                    data={
-                        "model": "whisper-1",  # ignored by fedirz; uses WHISPER__MODEL
-                        "response_format": "srt",
-                        "temperature": "0",
-                        # silero VAD strips silence/music sections before whisper
-                        # processes — kills the hallucination loops ("CastingWords",
-                        # "Thank you" etc.) that whisper falls into on long files
-                        # with extended non-speech audio (movies, podcasts with
-                        # instrumental segments). condition_on_previous_text isn't
-                        # exposed by fedirz, so VAD is the only knob we have.
-                        "vad_filter": "true",
-                    },
-                    timeout=(10, TRANSCRIBE_TIMEOUT),
-                )
-        except requests.RequestException as e:
-            raise RuntimeError(f"Whisper service call failed: {e}") from e
+        with gpu_lock("transcribe-app", f"whisper:{job_id}"):
+            # Re-check after acquiring the lock (could have been deleted while we waited).
+            current = get_job(job_id)
+            if not current or current["status"] == "DELETED":
+                return
+
+            try:
+                with open(audio_path, "rb") as f:
+                    resp = requests.post(
+                        f"{WHISPER_URL}/v1/audio/transcriptions",
+                        files={"file": (audio_path.name, f, "audio/mp4")},
+                        data={
+                            "model": "whisper-1",  # ignored by fedirz; uses WHISPER__MODEL
+                            "response_format": "srt",
+                            "temperature": "0",
+                            # silero VAD strips silence/music sections before whisper
+                            # processes — kills the hallucination loops ("CastingWords",
+                            # "Thank you" etc.) that whisper falls into on long files
+                            # with extended non-speech audio (movies, podcasts with
+                            # instrumental segments). condition_on_previous_text isn't
+                            # exposed by fedirz, so VAD is the only knob we have.
+                            "vad_filter": "true",
+                        },
+                        timeout=(10, TRANSCRIBE_TIMEOUT),
+                    )
+            except requests.RequestException as e:
+                raise RuntimeError(f"Whisper service call failed: {e}") from e
 
     if resp.status_code != 200:
         raise RuntimeError(f"Whisper service returned {resp.status_code}: {resp.text[:300]}")
