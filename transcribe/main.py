@@ -484,25 +484,25 @@ def _enumerate_deletion_targets(wrapper: str) -> dict:
                 except OSError:
                     pass
 
+    # Glob `<stem>.*` covers every pipeline-written file next to a
+    # canonical video — the .mkv/.mp4 itself, .srt, .zh-tw.srt[.error],
+    # .whisper-failed, .whisper-polluted, .annotate-failed. Literal `.`
+    # after stem prevents prefix collisions (e.g. `S01E01a.mkv` vs
+    # `S01E01.mkv`). New sidecar types added later are covered for free.
+    # Same idea in _sources/ — bounded by `.srt` suffix to stay strictly
+    # inside the candidate-cache set.
     canonical_files: list[Path] = []
     sources_files: list[Path] = []
     for video in canonical_videos:
-        zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
-        for p in (
-            video,
-            video.with_suffix(".srt"),
-            zh_path,
-            Path(str(zh_path) + ".error"),
-            whisper_failed_path(video),
-            annotate_failed_path(video),
-        ):
-            if p.is_file():
-                canonical_files.append(p)
-        for tag in ("whisper", "bundled", "opensubtitles-hash",
-                    "opensubtitles-text", "verified"):
-            sp = _sources_path(video, tag)
-            if sp.is_file():
-                sources_files.append(sp)
+        if video.parent.is_dir():
+            for f in sorted(video.parent.glob(f"{video.stem}.*")):
+                if f.is_file():
+                    canonical_files.append(f)
+        sources_dir = _sources_path(video, "x").parent  # tag arbitrary; dir same
+        if sources_dir.is_dir():
+            for f in sorted(sources_dir.glob(f"{video.stem}.*.srt")):
+                if f.is_file():
+                    sources_files.append(f)
 
     sentinel = bt_filter_sentinel_for(wrapper)
 
@@ -603,9 +603,7 @@ async def delete_torrent(wrapper: str):
     swept: set[Path] = set()
     for video in canonical_videos:
         swept.add(video.parent)
-        for tag in ("whisper", "bundled", "opensubtitles-hash",
-                    "opensubtitles-text", "verified"):
-            swept.add(_sources_path(video, tag).parent)
+        swept.add(_sources_path(video, "x").parent)  # tag arbitrary; dir same
     for d in swept:
         _rmdir_empty_walk_up(d)
 
