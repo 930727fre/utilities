@@ -153,7 +153,7 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
 
 3. Embedded text-subtitle extraction (lazy, per video)
      → ffprobe enumerates subtitle streams; first English (or
-       undefined) text-codec stream (subrip, mov_text, webvtt) is
+       undefined) text-codec stream (subrip, mov_text, webvtt, ass) is
        ffmpeg-extracted with `-c:s srt` so any text format lands as
        SubRip at _sources/<stem>.embedded.srt. Container-agnostic
        — mkv, mp4, WebM, mov all handled the same way.
@@ -167,10 +167,11 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
        italics + music glyphs.
 
 5. Bundled candidate discovery (lazy, per video)
-     → scans the bt-side wrapper for `.srt` files; for each, runs the
-       WER gate (step 7) against the whisper output; first passing
-       SRT (sorted by filename) gets copied to
-       _sources/<stem>.bundled.srt and used as the bundled candidate
+     → scans the bt-side wrapper for `.srt`, `.ass`, `.ssa` files;
+       ASS/SSA get ffmpeg-converted to SRT (override tags stripped)
+       before the check; for each, runs the WER gate (step 7) against
+       the whisper output; first passing candidate (sorted by filename)
+       gets copied to _sources/<stem>.bundled.srt
 
 6. OS candidate fetch (lazy, per video)
      → _sources/<stem>.opensubtitles-hash.srt   (if hash search hits)
@@ -300,5 +301,5 @@ Two workers at the episode level (`translator_executor` with `max_workers=2`); i
 
 - `jobs.json` is file-locked, not a real DB. Single-user is fine; for concurrent users move to SQLite.
 - Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
-- bt mode handles text-based embedded subtitles across containers (mkv subrip, mp4 mov_text, WebM webvtt; ffmpeg's `-c:s srt` converts to SubRip on extraction) and PGS bitmap tracks via OCR (`pgsrip → tesseract`, second candidate). ASS / SSA tracks are skipped: styled-text whose override-tag parsing carries styling residue that hurts WER + annotation. VobSub (DVD-era image format) is also skipped — almost no modern rip uses it.
+- bt mode handles text-based embedded subtitles across containers (mkv subrip, mp4 mov_text, WebM webvtt, mkv/mp4 ASS/SSA; ffmpeg's `-c:s srt` strips override tags and converts everything to SubRip on extraction) and PGS bitmap tracks via OCR (`pgsrip → tesseract`, second candidate). Heavy ASS typesetting (anime karaoke, sign translations) can leave styling residue — the WER gate catches gross cases and the pipeline falls through to the next candidate. VobSub (DVD-era image format) is skipped — almost no modern rip uses it.
 - The Chinese translation cascade has no whisper fallback (whisper produces English, which would defeat the point). If a batch's API call fails or the validator can't recover from a missing-cue response, the missing cues silently keep their English lines (the rest of the SRT is still useful). If the whole translation raises (e.g. all calls hit a long Gemini outage), the video lands at `中 !` and stays there until the user clicks the torrent's button again to retry.

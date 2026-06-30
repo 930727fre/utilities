@@ -517,8 +517,8 @@ def _find_subtitle_track(video: Path, codec_match) -> tuple[int, str] | None:
 
     `codec_match(codec_lowered: str) -> bool` decides which ffprobe
     codec_name strings count. Examples:
-      lambda c: c in ("subrip", "mov_text", "webvtt")  # text subs
-      lambda c: c == "hdmv_pgs_subtitle"                # PGS only
+      lambda c: c in ("subrip", "mov_text", "webvtt", "ass")  # text subs
+      lambda c: c == "hdmv_pgs_subtitle"                       # PGS only
 
     Tracks with `disposition.forced` set are skipped — those only
     translate non-dialogue visual elements (foreign signs, paper
@@ -587,9 +587,11 @@ def _find_subtitle_track(video: Path, codec_match) -> tuple[int, str] | None:
 
 
 # Text-based subtitle codecs ffmpeg can convert to SubRip via `-c:s srt`.
-# `ass` / `ssa` are excluded — their override-tag parsing is finicky and
-# the resulting cues often carry styling residue that hurts WER + annotation.
-_TEXT_SUB_CODECS = {"subrip", "mov_text", "webvtt"}
+# ASS/SSA included: ffmpeg strips `{\an8}` / `\N` override tags on the way
+# out. Heavy typesetting (anime karaoke, sign translations) can leave
+# residue — WER gate catches the worst of it and the pipeline falls
+# through to the next candidate.
+_TEXT_SUB_CODECS = {"subrip", "mov_text", "webvtt", "ass", "ssa"}
 
 
 def _extract_embedded(video: Path, dest: Path) -> Path | None:
@@ -726,10 +728,17 @@ def _extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
     return dest
 
 
+_BUNDLED_SUB_EXTS = (".srt", ".ass", ".ssa")
+
+
 def _pick_bundled(video: Path, dest: Path, whisper_src: Path) -> Path | None:
-    """Scan the bt-side wrapper for `.srt` files and find one whose content
-    matches the whisper transcript (via WER). First match (sorted by
-    filename) wins, gets copied to `dest`, and is returned.
+    """Scan the bt-side wrapper for subtitle sidecars (`.srt`, `.ass`,
+    `.ssa`) and find one whose content matches the whisper transcript
+    (via WER). First match (sorted by filename) wins, lands at `dest`.
+
+    ASS/SSA files are ffmpeg-converted to SubRip before the WER check;
+    `{\\an8}` / `\\N` override tags get stripped on the way through.
+    The converted SRT (not the original `.ass`) becomes the candidate.
 
     Filename ordering matters for season packs — `01_English.srt` <
     `01_SDH.srt` alphabetically means the plain English track gets tried
@@ -743,19 +752,57 @@ def _pick_bundled(video: Path, dest: Path, whisper_src: Path) -> Path | None:
     if wrapper is None:
         return None
 
-    for srt in sorted(wrapper.rglob("*.srt")):
+    candidates: list[Path] = []
+    for ext in _BUNDLED_SUB_EXTS:
+        candidates.extend(wrapper.rglob(f"*{ext}"))
+    candidates.sort()
+
+    for sub in candidates:
         try:
-            rel = srt.relative_to(wrapper)
+            rel = sub.relative_to(wrapper)
         except ValueError:
             continue
-        ok, reason = verify_against_whisper(whisper_src, srt)
+
+        if sub.suffix.lower() in (".ass", ".ssa"):
+            with tempfile.TemporaryDirectory(prefix="bundled-ass-") as tmpdir:
+                converted = Path(tmpdir) / "converted.srt"
+                try:
+                    r = subprocess.run(
+                        ["ffmpeg", "-y", "-loglevel", "error",
+                         "-i", str(sub),
+                         "-c:s", "srt",
+                         str(converted)],
+                        capture_output=True,
+                        timeout=FFMPEG_SUB_EXTRACT_TIMEOUT,
+                    )
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                    print(f"[bundled-scan] {video.name!r}: REJECT {rel} — ASS convert failed: {e}", flush=True)
+                    continue
+                if r.returncode != 0 or not converted.exists() or converted.stat().st_size == 0:
+                    stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+                    print(f"[bundled-scan] {video.name!r}: REJECT {rel} — ASS convert empty (rc={r.returncode}) {stderr[-100:]}", flush=True)
+                    continue
+                ok, reason = verify_against_whisper(whisper_src, converted)
+                if not ok:
+                    print(f"[bundled-scan] {video.name!r}: REJECT {rel} — {reason}", flush=True)
+                    continue
+                print(f"[bundled-scan] {video.name!r}: PICK {rel} (ASS→SRT) — {reason}", flush=True)
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(converted), str(dest))
+                except OSError as exc:
+                    print(f"[bundled-scan] copy failed: {exc}", flush=True)
+                    return None
+                return dest
+
+        ok, reason = verify_against_whisper(whisper_src, sub)
         if not ok:
             print(f"[bundled-scan] {video.name!r}: REJECT {rel} — {reason}", flush=True)
             continue
         print(f"[bundled-scan] {video.name!r}: PICK {rel} — {reason}", flush=True)
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(srt), str(dest))
+            shutil.copy2(str(sub), str(dest))
         except OSError as exc:
             print(f"[bundled-scan] copy failed: {exc}", flush=True)
             return None
