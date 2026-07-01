@@ -307,8 +307,8 @@ export default function Bt() {
                         {(100 * t.progress.completed / t.progress.total).toFixed(1)}%
                       </span>
                     )}
-                    {label && (
-                      <span className={t.phase === 'downloading' ? 'status-pulse' : ''} style={styles.statusGlyph} title={PHASE_TITLE[t.phase] || t.phase}>{label}</span>
+                    {label && t.phase !== 'downloading' && (
+                      <span style={styles.statusGlyph} title={PHASE_TITLE[t.phase] || t.phase}>{label}</span>
                     )}
                   </div>
                 </div>
