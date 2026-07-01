@@ -301,6 +301,12 @@ export default function Bt() {
                     <div style={styles.cardTitle}>{t.name}</div>
                   </div>
                   <div style={styles.statusSlot}>
+                    {t.progress && t.phase === 'downloading' && (
+                      <span style={styles.progressText}
+                            title={`${formatBytes(t.progress.completed)} / ${formatBytes(t.progress.total)}`}>
+                        {(100 * t.progress.completed / t.progress.total).toFixed(1)}%
+                      </span>
+                    )}
                     {label && (
                       <span className={t.phase === 'downloading' ? 'status-pulse' : ''} style={styles.statusGlyph} title={PHASE_TITLE[t.phase] || t.phase}>{label}</span>
                     )}
@@ -450,7 +456,11 @@ const styles = {
   topRow: { display: 'flex', alignItems: 'center', gap: 12 },
   info: { flex: 1, minWidth: 0 },
   cardTitle: { fontSize: 14, color: '#e8e3d9', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  statusSlot: { display: 'flex', alignItems: 'center', flexShrink: 0 },
+  statusSlot: { display: 'flex', alignItems: 'center', flexShrink: 0, gap: 8 },
+  progressText: {
+    color: '#aeaeb2', fontSize: 12, fontFamily: MONO,
+    fontVariantNumeric: 'tabular-nums', cursor: 'default',
+  },
   statusGlyph: {
     color: '#aeaeb2', fontSize: 18, fontWeight: 700, lineHeight: 1,
     cursor: 'default', fontFamily: MONO,

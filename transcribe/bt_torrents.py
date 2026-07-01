@@ -20,6 +20,7 @@ the moment all pieces are verified. That's a clean filesystem-level
 """
 import re
 import shutil
+import struct
 import subprocess
 import threading
 from pathlib import Path
@@ -167,6 +168,54 @@ def resume_all() -> None:
         _spawn(wrapper, str(torrent_file))
 
 
+def read_progress(wrapper: Path) -> tuple[int, int] | None:
+    """Parse the `.aria2` control file to return `(downloaded_bytes,
+    total_bytes)`. Returns None if no control file exists (torrent is not
+    downloading — either done, seeding, or never started) or the file is
+    unreadable / has an unexpected format.
+
+    Reading .aria2 is the only accurate progress signal — aria2's default
+    `--file-allocation=prealloc` reserves full target size upfront, so
+    `du`/`ls` show 100% before the first byte is downloaded.
+
+    Control file format (aria2 v1, stable since v1.36):
+        2  version (big-endian uint16, currently always 1)
+        4  extension flags
+        4  infohash length N
+        N  infohash bytes
+        4  piece length (bytes per piece)
+        8  total length (uint64 big-endian)
+        8  upload length
+        4  bitfield length M
+        M  bitfield (1 bit per piece — set = piece verified complete)
+        ...
+
+    downloaded = popcount(bitfield) * piece_length, clamped to total_length
+    (the last piece may be smaller than piece_length, and it's simpler to
+    saturate at 100% than special-case the tail piece).
+    """
+    ctl = next(iter(wrapper.rglob("*.aria2")), None)
+    if ctl is None:
+        return None
+    try:
+        data = ctl.read_bytes()
+        off = 0
+        _version = struct.unpack_from(">H", data, off)[0]; off += 2
+        off += 4  # extension
+        ihash_len = struct.unpack_from(">I", data, off)[0]; off += 4
+        off += ihash_len
+        piece_len = struct.unpack_from(">I", data, off)[0]; off += 4
+        total_len = struct.unpack_from(">Q", data, off)[0]; off += 8
+        off += 8  # upload
+        bf_len = struct.unpack_from(">I", data, off)[0]; off += 4
+        bitfield = data[off:off + bf_len]
+    except (struct.error, OSError, IndexError):
+        return None
+    completed_pieces = sum(bin(b).count("1") for b in bitfield)
+    downloaded = min(completed_pieces * piece_len, total_len)
+    return (downloaded, total_len)
+
+
 def _phase(wrapper: Path, proc: subprocess.Popen | None) -> str:
     """Derive `downloading` / `seeding` / `done` / `orphaned` from disk + proc state.
 
@@ -205,10 +254,18 @@ def list_torrents() -> list[dict]:
             continue
         proc = procs_snapshot.get(wrapper.name)
         phase = _phase(wrapper, proc)
-        out.append({
+        row = {
             "name": wrapper.name,
             "phase": phase,
-        })
+        }
+        if phase == "downloading":
+            progress = read_progress(wrapper)
+            if progress is not None:
+                row["progress"] = {
+                    "completed": progress[0],
+                    "total": progress[1],
+                }
+        out.append(row)
     return out
 
 
