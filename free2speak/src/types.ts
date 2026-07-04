@@ -11,6 +11,8 @@ export interface ErrorCandidate {
   title: string;
   you_said: string;
   native: string;
+  register?: string;
+  l1_diagnosis?: string;
   note?: string;
 }
 

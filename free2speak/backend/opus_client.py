@@ -27,23 +27,29 @@ def _client() -> Anthropic:
 
 
 def emit_tool(prompt: str, tool: dict, *, model: str | None = None,
-              max_tokens: int = DEFAULT_MAX_TOKENS) -> dict[str, Any]:
+              max_tokens: int = DEFAULT_MAX_TOKENS,
+              temperature: float | None = None) -> dict[str, Any]:
     """Send `prompt`, force the model to invoke `tool`, return tool_use.input.
 
     Tool-use is Anthropic's structured-output pattern. We pin tool_choice to
     require the named tool, so the model can't return prose by accident.
 
-    Note: `temperature` is intentionally omitted — Claude Opus 4.7 deprecated it
-    in favor of internal extended-thinking-style sampling.
+    `temperature` is opt-in — Opus 4.7 deprecated it (extended-thinking-style
+    sampling is internal), but Sonnet 4.6 still honors it. Pass a low value
+    (0.2ish) for analysis tasks where consistency matters; leave None for
+    creative-generation tasks (roleplay/drill) that want default variance.
     """
+    kwargs: dict[str, Any] = {
+        "model": model or DEFAULT_MODEL,
+        "max_tokens": max_tokens,
+        "tools": [tool],
+        "tool_choice": {"type": "tool", "name": tool["name"]},
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
     try:
-        resp = _client().messages.create(
-            model=model or DEFAULT_MODEL,
-            max_tokens=max_tokens,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": tool["name"]},
-            messages=[{"role": "user", "content": prompt}],
-        )
+        resp = _client().messages.create(**kwargs)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Opus call failed: {e}")
 

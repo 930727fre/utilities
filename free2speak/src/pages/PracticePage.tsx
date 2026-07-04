@@ -400,23 +400,38 @@ function MultiLineHighlight({ text, color, italic }: { text: string; color: stri
   );
 }
 
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <Text c="var(--text-dim)" size="xs"
+      style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
+      {children}
+    </Text>
+  );
+}
+
 function AdditionBody({ c }: { c: ErrorCandidate }) {
   return (
     <Stack gap="md" mt="lg">
       <Box>
-        <Text c="var(--text-dim)" size="xs"
-          style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
-          you said
-        </Text>
+        <SectionLabel>you said</SectionLabel>
         <MultiLineHighlight text={c.you_said} color="#ff8a8a" italic />
       </Box>
       <Box>
-        <Text c="var(--text-dim)" size="xs"
-          style={{ fontFamily: 'var(--mono)', letterSpacing: 1, textTransform: 'uppercase' }}>
-          native
-        </Text>
+        <SectionLabel>native</SectionLabel>
         <MultiLineHighlight text={c.native} color="var(--accent)" />
       </Box>
+      {c.register && (
+        <Box>
+          <SectionLabel>register</SectionLabel>
+          <Text c="var(--text-h)" mt="xs">{c.register}</Text>
+        </Box>
+      )}
+      {c.l1_diagnosis && (
+        <Box>
+          <SectionLabel>why (l1 diagnosis)</SectionLabel>
+          <Text c="var(--text-h)" mt="xs">{c.l1_diagnosis}</Text>
+        </Box>
+      )}
     </Stack>
   );
 }

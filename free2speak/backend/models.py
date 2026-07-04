@@ -6,6 +6,8 @@ class ErrorCandidate(BaseModel):
     title: str
     you_said: str
     native: str
+    register: str = ""
+    l1_diagnosis: str = ""
     note: str = ""
 
 
