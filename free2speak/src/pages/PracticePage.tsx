@@ -94,6 +94,14 @@ export default function PracticePage() {
 
 // ─── Step 1: Roleplay ────────────────────────────────────────────────────────
 
+// Extract the fenced code block under `## Gemini 開場 prompt` so the user can
+// one-click copy it into Gemini Live. Returns null if the section is missing
+// (older 1.0-imported roleplays have a slightly different structure).
+function extractGeminiPrompt(script: string): string | null {
+  const m = script.match(/##\s*Gemini\s*開場\s*prompt\s*\n+```[^\n]*\n([\s\S]*?)\n```/);
+  return m ? m[1] : null;
+}
+
 function RoleplayStep({ onDone }: { onDone: (mode: UploadMode) => void }) {
   const { data: roleplay, isLoading, isFetching } = useQuery({
     queryKey: ['today-roleplay'],
@@ -108,6 +116,15 @@ function RoleplayStep({ onDone }: { onDone: (mode: UploadMode) => void }) {
   // Cached data is shown while a background refetch is in flight (stale-while-revalidate).
   // Surface that to the user with a pulsing indicator so they know an Opus regen is happening.
   const refreshing = isFetching && !isLoading;
+  const geminiPrompt = roleplay ? extractGeminiPrompt(roleplay.script) : null;
+  const [copied, setCopied] = useState(false);
+  const copyGeminiPrompt = () => {
+    if (!geminiPrompt) return;
+    navigator.clipboard.writeText(geminiPrompt).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
 
   return (
     <>
@@ -141,6 +158,24 @@ function RoleplayStep({ onDone }: { onDone: (mode: UploadMode) => void }) {
           )}
         </Stack>
       </CardShell>
+      {geminiPrompt && (
+        <Button
+          size="md"
+          radius={8}
+          onClick={copyGeminiPrompt}
+          style={{
+            background: 'transparent',
+            color: copied ? 'var(--accent)' : 'var(--text-dim)',
+            border: `1px solid ${copied ? 'var(--accent)' : 'var(--border)'}`,
+            fontFamily: 'var(--mono)',
+            fontSize: 13,
+            letterSpacing: 1,
+            transition: 'color 120ms, border-color 120ms',
+          }}
+        >
+          {copied ? 'Copied ✓' : 'Copy Gemini prompt'}
+        </Button>
+      )}
       <Group grow gap="sm">
         <Button
           size="lg"

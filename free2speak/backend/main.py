@@ -12,16 +12,11 @@ from fastapi import FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 
 import storage
+from analyzer import analyze as claude_analyze
 from opus_client import emit_tool as opus_emit_tool
 from prompts.gemini_transcribe import SCHEMA as TRANSCRIBE_SCHEMA, build as build_transcribe_prompt
-from prompts.claude_analyze import TOOL as ANALYZE_TOOL, build as build_analyze_prompt
 from prompts.opus_drill import TOOL as DRILL_TOOL, build as build_drill_prompt
 from prompts.opus_roleplay import TOOL as ROLEPLAY_TOOL, build as build_roleplay_prompt
-
-# Sonnet 4.6 for analysis — cheaper than Opus, English intuition strong enough
-# for collocation/register calls. Opus 4.7 is reserved for the roleplay/drill
-# generation calls which want the extra creative reasoning.
-ANALYZE_MODEL = os.environ.get("ANTHROPIC_ANALYZE_MODEL", "claude-sonnet-4-6")
 from models import (
     Roleplay,
     ErrorCandidate,
@@ -112,14 +107,6 @@ def _gemini_transcribe(audio_bytes: bytes, mime: str) -> str:
         raise HTTPException(status_code=502, detail=f"Gemini returned bad JSON: {e}")
 
 
-def _claude_analyze(transcript: str, active_errors: list) -> dict:
-    """Send transcript + active errors to Claude Sonnet, return the structured
-    analysis dict (summary, fluency_notes, additions, graduations).
-
-    Uses a low temperature so cards are consistent session-to-session.
-    """
-    prompt = build_analyze_prompt(transcript, active_errors)
-    return opus_emit_tool(prompt, ANALYZE_TOOL, model=ANALYZE_MODEL, temperature=0.2)
 
 
 @app.get("/health")
@@ -221,7 +208,7 @@ async def upload_audio(file: UploadFile = File(...), mode: str = Form(...)):
 
     print("[upload] claude analyzing...", flush=True)
     t1 = time.perf_counter()
-    analysis = _claude_analyze(transcript, active_errors)
+    analysis = claude_analyze(transcript, active_errors)
     print(f"[upload] analyzed ({time.perf_counter() - t1:.1f}s, "
           f"{len(analysis.get('additions', []))} additions, "
           f"{len(analysis.get('graduations', []))} graduations)", flush=True)
@@ -356,6 +343,7 @@ def decide(session_id: str, decision: Decision):
             title=c.get("title", "(untitled)"),
             body_md=body_md,
             source_session_id=session_id,
+            source_candidate_id=decision.candidate_id,
             today_iso=today_iso,
         )
     elif decision.action == "graduated":

@@ -120,7 +120,11 @@ def count_active_errors() -> int:
 
 
 def add_error(*, title: str, body_md: str, source_session_id: str | None,
-              today_iso: str) -> int:
+              source_candidate_id: str | None, today_iso: str) -> int:
+    """`source_candidate_id` is the `add-N` id from the session's
+    raw_response.additions that this card was materialized from. Preserved so
+    audits can jump from an edited error card back to the frozen LLM output
+    it was born from (session.raw_response.additions[?id=source_candidate_id])."""
     err_id = _next_error_id()
     meta = {
         "id": err_id,
@@ -129,6 +133,7 @@ def add_error(*, title: str, body_md: str, source_session_id: str | None,
         "first_seen_date": today_iso,
         "last_seen_date": today_iso,
         "source_session_id": source_session_id,
+        "source_candidate_id": source_candidate_id,
         "created_at": datetime.now(TZ).isoformat(timespec="seconds"),
     }
     path = ERRORS / "active" / f"{err_id:04d}-{_slugify(title)}.md"
