@@ -174,7 +174,24 @@ def get_today_roleplay():
 
 
 @app.post("/upload")
-async def upload_audio(file: UploadFile = File(...), mode: str = Form(...)):
+async def upload_audio(
+    file: UploadFile = File(...),
+    mode: str = Form(...),
+    auto_analyze: bool = Form(True),
+):
+    """Two flows:
+
+    - `auto_analyze=true` (default): Gemini transcribes → Claude analyzes →
+      structured additions/graduations end up in raw_response. Frontend
+      routes to tinder-swipe review.
+
+    - `auto_analyze=false` ("discuss mode"): Gemini transcribes only. No
+      Claude call. Session stored with empty raw_response — decisions come
+      later via `apply_review.py` (Claude + user talk it through, then a
+      script writes the agreed additions/graduations). In roleplay mode we
+      finalize the roleplay immediately since the practice portion is done;
+      the review just materializes async.
+    """
     if mode not in ("roleplay", "freestyle"):
         raise HTTPException(status_code=400, detail=f"mode must be 'roleplay' or 'freestyle', got {mode!r}")
 
@@ -189,37 +206,34 @@ async def upload_audio(file: UploadFile = File(...), mode: str = Form(...)):
     mime = (file.content_type or "audio/webm").split(";")[0].strip()
 
     active_errors = storage.list_active_errors(limit=ACTIVE_ERROR_LIMIT)
-    # In roleplay mode link the session to the active roleplay so completing
-    # the review later can transition that roleplay to 'done'. In freestyle
-    # mode leave roleplay_id NULL — review completion won't consume anything.
     rp_id = None
     if mode == "roleplay":
         active = storage.get_active_roleplay()
         rp_id = active["id"] if active else None
 
-    # Two-pass pipeline: Gemini transcribes (fast, cheap, no analysis) →
-    # Claude Sonnet analyzes the text (better English collocation intuition,
-    # doesn't fall back to descriptive-prose diagnoses on non-obvious cards).
     print("[upload] gemini transcribing...", flush=True)
     t0 = time.perf_counter()
     transcript = _gemini_transcribe(audio_bytes, mime)
     print(f"[upload] transcribed ({time.perf_counter() - t0:.1f}s, {len(transcript)} chars)",
           flush=True)
 
-    print("[upload] claude analyzing...", flush=True)
-    t1 = time.perf_counter()
-    analysis = claude_analyze(transcript, active_errors)
-    print(f"[upload] analyzed ({time.perf_counter() - t1:.1f}s, "
-          f"{len(analysis.get('additions', []))} additions, "
-          f"{len(analysis.get('graduations', []))} graduations)", flush=True)
-
-    # Fold the transcript back into the analysis dict so the on-disk
-    # `raw_response` shape stays the same as the old Gemini-does-everything
-    # era. Downstream (review, decide, drill prompts) never had to know
-    # transcript came from a separate call.
+    if auto_analyze:
+        print("[upload] claude analyzing...", flush=True)
+        t1 = time.perf_counter()
+        analysis = claude_analyze(transcript, active_errors)
+        print(f"[upload] analyzed ({time.perf_counter() - t1:.1f}s, "
+              f"{len(analysis.get('additions', []))} additions, "
+              f"{len(analysis.get('graduations', []))} graduations)", flush=True)
+    else:
+        print("[upload] discuss-mode: skipping claude analyze", flush=True)
+        analysis = {
+            "summary": "",
+            "fluency_notes": "",
+            "additions": [],
+            "graduations": [],
+        }
     analysis["transcript"] = transcript
 
-    # Persist the audio file so we can re-analyze later if prompts change.
     session_id = storage.new_session_id()
     ext = mime.split("/")[-1]
     (storage.SESSIONS / f"{session_id}.{ext}").write_bytes(audio_bytes)
@@ -235,7 +249,13 @@ async def upload_audio(file: UploadFile = File(...), mode: str = Form(...)):
         raw_response=analysis,
     )
 
-    return {"session_id": session_id, "mode": mode}
+    # Discuss-mode + roleplay: retire the roleplay now. Review will be
+    # applied async via apply_review.py without touching roleplay state.
+    if not auto_analyze and mode == "roleplay" and rp_id:
+        storage.finish_roleplay(rp_id)
+        print(f"[upload] discuss-mode: finished roleplay {rp_id}", flush=True)
+
+    return {"session_id": session_id, "mode": mode, "auto_analyzed": auto_analyze}
 
 
 @app.get("/today/practice/state", response_model=PracticeState)

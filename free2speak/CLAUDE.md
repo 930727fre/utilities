@@ -31,6 +31,9 @@ data/
 - prompt template 改動 = 修改 `backend/prompts/*.py` + 重啟 container
 - LLM 整合已上線：Gemini 處理錄音分析（`/upload`），Opus 處理 roleplay/drill 生成。`GEMINI_API_KEY` 與 `ANTHROPIC_API_KEY` 必須先在 host shell `export` 起來，compose parse 時若缺會直接 fail
 - **Roleplay lifecycle**：`roleplays/active/` 至多一個檔（filesystem-level 保證單一 active，不需 partial unique index）。`mode='roleplay'` 的 session 完成完整 review 時把 active 檔 `mv` 到 `done/`；`mode='freestyle'` 不消耗 active roleplay，所以 user 下次回來會繼續看到同一個劇本。每一筆 swipe decision 都會即時 append 到 `<sid>.decisions.jsonl`，所以中途關掉 tab 不會掉資料
+- **兩種 analysis mode**：
+  - **auto**（default）：`/upload` 走 Gemini transcribe → Claude analyze → 前端 tinder-swipe review。快、consistent、不需人在
+  - **discuss**：`/upload?auto_analyze=false`（前端 "discuss with Claude" toggle）。只跑 Gemini transcribe，session `raw_response` 空。Roleplay 立即 finalize（因為 practice 已完成）。之後 user 拿 session_id 跟 Claude 討論，決定完由 `apply_review.py` 寫進 error book。輸入格式：`{additions: [{title, you_said, native, register, l1_diagnosis, note}], graduations: [error_id, ...]}` from stdin。手動來源的 error card `source_candidate_id` 是 null，跟 tinder-swipe 卡區分
 - **Review 完成判定**：不存 `review_done` flag，用 decisions 檔跟 `raw_response.additions + graduations` 的 candidate 集合比對，全 covered = review done。狀態純推導，不會 drift。
 
 ## 設計語言

@@ -27,16 +27,17 @@ export const api = {
 
   getTodayRoleplay: () => apiFetch<Roleplay>('/today/roleplay'),
 
-  uploadAudio: async (file: File, mode: UploadMode) => {
+  uploadAudio: async (file: File, mode: UploadMode, autoAnalyze: boolean = true) => {
     const form = new FormData();
     form.append('file', file);
     form.append('mode', mode);
+    form.append('auto_analyze', autoAnalyze ? 'true' : 'false');
     const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: form });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error((err as { detail?: string }).detail ?? `HTTP ${res.status}`);
     }
-    return res.json() as Promise<{ session_id: string; mode: UploadMode }>;
+    return res.json() as Promise<{ session_id: string; mode: UploadMode; auto_analyzed: boolean }>;
   },
 
   getReview: () => apiFetch<ReviewBundle>('/today/review'),

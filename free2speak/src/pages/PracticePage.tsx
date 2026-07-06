@@ -13,10 +13,12 @@ import type { ErrorCandidate, GraduateCandidate, PracticeStep, UploadMode } from
 import PageShell from '../components/PageShell';
 import CardShell from '../components/CardShell';
 
-// Local step adds 'upload' (transient — not persisted server-side). The backend
-// step machine is roleplay → additions → graduations; 'upload' lives only on the
-// frontend between "Done practicing" and the per-card review screens.
-type LocalStep = 'init' | PracticeStep | 'upload';
+// Local step adds 'upload' and 'discuss-ready' (transient — not persisted
+// server-side). The backend step machine is roleplay → additions → graduations;
+// 'upload' lives only between "Done practicing" and the review screens;
+// 'discuss-ready' is the discuss-mode terminus (upload succeeded but no
+// auto-analysis — user goes to a Claude conversation with the session id).
+type LocalStep = 'init' | PracticeStep | 'upload' | 'discuss-ready';
 
 export default function PracticePage() {
   const navigate = useNavigate();
@@ -66,11 +68,14 @@ export default function PracticePage() {
                 file={audioFile}
                 mode={mode}
                 onFileChange={setAudioFile}
-                onUploaded={(sid) => {
+                onUploaded={(sid, autoAnalyzed) => {
                   setSessionId(sid);
-                  setStep('additions');
+                  setStep(autoAnalyzed ? 'additions' : 'discuss-ready');
                 }}
               />
+            )}
+            {step === 'discuss-ready' && sessionId && (
+              <DiscussReadyStep sessionId={sessionId} onDone={finish} />
             )}
             {step === 'additions' && sessionId && (
               <AdditionsStep
@@ -220,21 +225,21 @@ function UploadStep({
   file: File | null;
   mode: UploadMode;
   onFileChange: (f: File | null) => void;
-  onUploaded: (sessionId: string) => void;
+  onUploaded: (sessionId: string, autoAnalyzed: boolean) => void;
 }) {
   const resetRef = useRef<() => void>(() => {});
   const queryClient = useQueryClient();
+  const [discussMode, setDiscussMode] = useState(false);
 
   const upload = useMutation({
     mutationFn: () => {
       if (!file) throw new Error('No file selected');
-      return api.uploadAudio(file, mode);
+      return api.uploadAudio(file, mode, !discussMode);
     },
     onSuccess: async (result) => {
-      // Freshly-uploaded session means /today/review now returns its candidates.
-      // Invalidate so the next mount of AdditionsStep refetches.
       await queryClient.invalidateQueries({ queryKey: ['today-review'] });
-      onUploaded(result.session_id);
+      await queryClient.invalidateQueries({ queryKey: ['practice-state'] });
+      onUploaded(result.session_id, result.auto_analyzed);
     },
   });
 
@@ -273,10 +278,29 @@ function UploadStep({
             </Text>
           )}
 
+          {/* Discuss-mode toggle — skips Claude auto-analysis; the transcript
+              lands and the actual card decisions come out of a Claude
+              conversation later (applied via apply_review.py). */}
+          <Button
+            variant="subtle"
+            size="xs"
+            onClick={() => setDiscussMode((v) => !v)}
+            style={{
+              color: discussMode ? 'var(--accent)' : 'var(--text-dim)',
+              fontFamily: 'var(--mono)',
+              fontSize: 12,
+              letterSpacing: 1,
+            }}
+          >
+            {discussMode ? '[✓] discuss with Claude (no auto analysis)'
+                         : '[ ] discuss with Claude (no auto analysis)'}
+          </Button>
+
           {upload.isPending && (
             <Text c="var(--text)" className="glyph-pulse"
               style={{ fontFamily: 'var(--mono)' }}>
-              ○ Analyzing with Gemini ...
+              ○ {discussMode ? 'Transcribing (skip analysis) ...'
+                             : 'Analyzing with Gemini ...'}
             </Text>
           )}
           {upload.isError && (
@@ -298,7 +322,68 @@ function UploadStep({
           fontFamily: 'var(--mono)',
         }}
       >
-        Analyze
+        {discussMode ? 'Transcribe' : 'Analyze'}
+      </Button>
+    </>
+  );
+}
+
+
+// ─── Discuss-mode terminus ──────────────────────────────────────────────────
+
+function DiscussReadyStep({ sessionId, onDone }: { sessionId: string; onDone: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const copySid = () => {
+    navigator.clipboard.writeText(sessionId).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <>
+      <CardShell>
+        <Stack gap="lg" align="center" justify="center" p={{ base: 'lg', sm: 32 }}
+          style={{ flex: 1, minHeight: 0 }}>
+          <Text c="var(--text-dim)" size="xs"
+            style={{ fontFamily: 'var(--mono)', letterSpacing: 2, textTransform: 'uppercase' }}>
+            transcript ready — discuss with claude
+          </Text>
+          <Text c="var(--text-h)" size="sm" ta="center" style={{ maxWidth: 420 }}>
+            Session transcribed. Copy the id below, open a Claude conversation,
+            and share it — we'll agree on which errors + graduations belong in the
+            book, and apply_review.py writes them.
+          </Text>
+          <Button
+            size="md"
+            radius={8}
+            onClick={copySid}
+            style={{
+              background: 'transparent',
+              color: copied ? 'var(--accent)' : 'var(--text-h)',
+              border: `1px solid ${copied ? 'var(--accent)' : 'var(--border)'}`,
+              fontFamily: 'var(--mono)',
+              fontSize: 13,
+              letterSpacing: 1,
+              padding: '10px 18px',
+              transition: 'color 120ms, border-color 120ms',
+            }}
+          >
+            {copied ? `Copied ✓  ${sessionId}` : sessionId}
+          </Button>
+        </Stack>
+      </CardShell>
+      <Button
+        size="lg"
+        radius={8}
+        onClick={onDone}
+        style={{
+          background: 'var(--accent)',
+          color: 'var(--bg)',
+          height: 54,
+          fontFamily: 'var(--mono)',
+        }}
+      >
+        Done
       </Button>
     </>
   );
