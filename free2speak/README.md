@@ -10,15 +10,22 @@
 你是 upper-intermediate 英文使用者，主要 bottleneck 是「中文查表 → 錯 register 英文」（Chinglish at register/collocation level），靠 daily free2speak session + 每天 30 分鐘 native podcast/影集 input + 對陌生 native chunk 建立信任 + freestyle 主動 recycle 剛學的 phrase 這四件事複利，12-24 個月能質變成 native texture。
 
 **Chinglish path fingerprint**：
-- 中文情境詞 → 查字典最直接對應的英文 → 選錯 register
-- 已知 pattern：預約→reservation（應 appointment）、修改→modification（應 change）、白天→on the day（應 during the day）、撞到→collide（應 conflict）、回饋→feedback（應 hear back / response）、核准→validated（應 approved）、上線→online（應 launch / deployment）
-- 特徵：文法對、詞認識、register 落在 formal / 公文 / 物理層面，不是日常對話
+- 中文情境詞 → 查字典最直接對應的英文 → 該英文詞本身沒錯，但**用在錯的 register / context**
+- 已知 pattern（左邊是中文情境，中間是我會查到的英文，右邊是該情境的 native 說法）：
+  - 醫療「預約」→ `reservation`（其實 reservation 是餐廳/飯店/機票）→ 應 `appointment`
+  - 日常客服「修改預約」→ `modification`（其實 modification 是公文/法律語體）→ 應 `change`
+  - 白天時段「白天接不到電話」→ `on the day`（其實 on the day 指某特定日子）→ 應 `during the day`
+  - 時間「跟會議撞到」→ `collide`（其實 collide 專指物理碰撞）→ 應 `conflict with`
+  - 保險等回音「沒回饋」→ `feedback`（其實 feedback 是意見評分）→ 應 `hear back` / `no response`
+  - 保險理賠「核准」→ `validated`（其實 validated 是驗證資料/停車票）→ 應 `approved` / `covered`
+  - 系統上線事件「上線後」→ `after online`（其實 online 是狀態形容詞，不是事件名詞）→ 應 `after launch` / `after deployment`
+- 特徵：文法對、詞認識、每個錯詞在**別的 context 都是對的英文**，只是這個場景該用別的詞
 
 **每張 card 的品質底線**：一張 card 進 error book 前（不論 Sonnet 自動產的還是 discuss mode 討論後手動寫的）要符合這幾條，不符合就打回重寫或 skip：
 
 1. `l1_diagnosis` 要具體指名「我這次講錯是因為中文 X 直譯成英文 Y」— 不是抽象規則描述、不是講英文用法而已
 2. `native` 要日常慣用（`hear back`），不要 stilted 翻譯腔（`receive information`）
-3. `register` 一個短 phrase 就好，不要 slash-list 排排站（`medical / dental` 對，`medical / customer / general / insurance` 錯）
+3. `register` 一個短 phrase 就好，不要 slash-list 排排站（`medical appointments` 對，`medical / customer / general / insurance` 錯）
 4. 一張卡對應一條 rule，不能混（missing plural + uncountable-noun 誤用要拆兩張）
 
 ## Tool 幹嘛
@@ -31,9 +38,9 @@
 
 ## 兩種 review mode
 
-**auto**（default）：upload → Sonnet 自動分析 → 前端 tinder-swipe。日常 90% 走這條。
+**discuss**（我目前的主力）：upload 時勾 `[✓] discuss with Claude` toggle。session 只存 transcript。之後我拿 session_id 找 Claude 討論 → `apply_review.py` 從 stdin JSON 寫進 error book。對每張卡的品質底線比較踏實，適合我對 auto pipeline 還沒完全信任的階段。
 
-**discuss**：upload 時勾 `[✓] discuss with Claude` toggle。session 只存 transcript。之後我拿 session_id 找 Claude 討論 → `apply_review.py` 從 stdin JSON 寫進 error book。適合品質要求高的 session。
+**auto**（fallback）：upload → Sonnet 自動分析 → 前端 tinder-swipe。快、不綁 Claude availability。目前用在 Claude 不在的時段、或想快速消化一場 session 但不追細節時。等 auto 品質累積夠多可靠 session 我才會反轉主力。
 
 ## Daily flow
 
@@ -41,7 +48,7 @@
 2. Gemini Live 貼 prompt 演完 → 錄音
 3. Upload → auto or discuss
 4. Swipe（或 ping Claude 討論後 apply_review）→ 進 error book
-5. `/drill` 每天 10 張卡 recall
+5. `/drill` 每天 recall 10 張卡
 
 ## Data layout
 

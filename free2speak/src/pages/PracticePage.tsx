@@ -229,7 +229,10 @@ function UploadStep({
 }) {
   const resetRef = useRef<() => void>(() => {});
   const queryClient = useQueryClient();
-  const [discussMode, setDiscussMode] = useState(false);
+  // Discuss is the primary mode — user + Claude decide cards together rather
+  // than trusting Sonnet's structured output to swipe unreviewed. Untick when
+  // Claude isn't available and speed matters more than per-card confidence.
+  const [discussMode, setDiscussMode] = useState(true);
 
   const upload = useMutation({
     mutationFn: () => {
