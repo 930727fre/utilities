@@ -59,8 +59,7 @@ data/
 ├── errors/{active,graduated}/NNNN-<slug>.md
 ├── roleplays/{active,done}/<date>-<topic>*.md
 ├── sessions/<YYYY-MM-DDTHH-MM-SS-hash8>.{json,decisions.jsonl,ext}
-├── drills/<YYYY-MM-DD>.json
-└── legacy/                    # 1.0 archive, runtime 不碰
+└── drills/<YYYY-MM-DD>.json
 ```
 
 `errors/` 跟 `roleplays/` 用 YAML front-matter + markdown body，可 vim 直接編。session JSON / drill JSON 是機器產物。

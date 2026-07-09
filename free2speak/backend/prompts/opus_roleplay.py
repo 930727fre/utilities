@@ -1,8 +1,8 @@
 """Opus roleplay-generation prompt.
 
-Adapted from `1.0-archive/prompts/roleplay-generation.md`. 1.0 produced freeform
-markdown files; 2.0 asks for a structured JSON envelope so we can persist the
-script to the DB and return clean fields to the frontend.
+Emits a structured JSON envelope (topic + rationale + body_md) so we can
+persist the script as an errors/roleplays markdown file with front-matter
+and return clean fields to the frontend.
 """
 
 # Opus tool-use schema. The model is asked to invoke `emit_roleplay` so we get

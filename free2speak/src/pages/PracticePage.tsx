@@ -100,8 +100,7 @@ export default function PracticePage() {
 // ─── Step 1: Roleplay ────────────────────────────────────────────────────────
 
 // Extract the fenced code block under `## Gemini 開場 prompt` so the user can
-// one-click copy it into Gemini Live. Returns null if the section is missing
-// (older 1.0-imported roleplays have a slightly different structure).
+// one-click copy it into Gemini Live. Returns null if the section is missing.
 function extractGeminiPrompt(script: string): string | null {
   const m = script.match(/##\s*Gemini\s*開場\s*prompt\s*\n+```[^\n]*\n([\s\S]*?)\n```/);
   return m ? m[1] : null;

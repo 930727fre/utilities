@@ -1,8 +1,8 @@
 """Opus drill-generation prompt.
 
-Adapted from `1.0-archive/prompts/drill-generation.md`. 1.0 produced freeform
-markdown with collapsible answers; 2.0 stores each card as a row in
-`drill_cards` so the frontend can render them as Tinder-swipe flashcards.
+Emits one drill set (rationale + 10 cards) per day. Cards persist as a
+JSON array inside `data/drills/<YYYY-MM-DD>.json`; the frontend renders
+them as Tinder-swipe flashcards.
 """
 
 # Opus tool-use schema. Returns a single drill set (rationale + N cards).

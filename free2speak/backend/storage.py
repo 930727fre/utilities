@@ -14,9 +14,7 @@ Design contract:
   * Session decisions land in an append-only jsonl beside the metadata —
     every swipe = one line, race-free without file locks.
 
-Legacy 1.0-archive markdown lives under `/data/legacy/` and is never touched
-by the runtime; it's kept for grep/audit and matches the memory-note user
-philosophy: "state 全在檔案系統，刪檔即 reset".
+Matches the memory-note user philosophy: "state 全在檔案系統，刪檔即 reset".
 """
 import json
 import re
