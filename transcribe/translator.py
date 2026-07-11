@@ -325,6 +325,10 @@ def translate_video_zh(video: Path) -> None:
     try:
         translate_to_zh(eng_srt, zh_path)
         print(f"[translate-zh] wrote {zh_path.name!r}", flush=True)
+        # Mirror to data/archive/ so a future delete_torrent + re-download
+        # can reuse the Chinese SRT alongside the English one (see archive.py).
+        from archive import mirror_to_archive
+        mirror_to_archive(zh_path)
     except Exception as exc:
         traceback.print_exc()
         try:

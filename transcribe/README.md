@@ -60,6 +60,12 @@ data/artifact/_processed/                       pipeline state
 data/artifact/_sources/                         per-stage pipeline output —
   Movies/Title (Year)/                          mirrors Movies/TV.
     Title (Year).whisper.srt                    raw (whisper output)
+    Title (Year).archive.srt                    raw (previously-canonical SRT
+                                                  from data/archive/; Gemini
+                                                  picks the folder + SxxExx
+                                                  key locates the file; first
+                                                  tier tried, skips annotate
+                                                  when it wins)
     Title (Year).embedded.srt                   raw (mkvextract of the mkv's
                                                   own SubRip track, if any)
     Title (Year).pgs-ocr.srt                    raw (mkvextract of PGS track
@@ -79,6 +85,13 @@ data/artifact/_sources/                         per-stage pipeline output —
     Title (Year) - S01E01.bundled.srt           stage. Delete any one to
     Title (Year) - S01E01.verified.srt          replay that stage forward;
                                                 earlier-stage cache is kept
+
+data/archive/Title (Year)/                      ← durable SRT preservation
+  Title (Year).srt                              (movies: flat)              (auto-mirrored on every
+  Title (Year).zh-tw.srt                                                    canonical write; survives
+  Season 01/                                    (TV: seasoned tree)         delete_torrent so a
+    Title (Year) - S01E01.srt                                               re-download hits the
+    Title (Year) - S01E01.zh-tw.srt                                         archive tier for free)
 ```
 
 Jellyfin's docker-compose mounts only `data/artifact/Movies` and `data/artifact/TV` — `_processed` and `_sources` are invisible to it.
@@ -180,7 +193,7 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
    to avoid burning OS quota on the wrong file.
 
 7. Content gate (jiwer / WER, deterministic, ~$0)
-     For each candidate in order (embedded → pgs-ocr → bundled → OS hash → OS text):
+     For each candidate in order (archive → embedded → pgs-ocr → bundled → OS hash → OS text):
        - concat all cue text → strip SRT formatting + punctuation,
          lowercase → compute WER vs whisper (reference) → pass if
          WER ≤ 0.5
@@ -205,6 +218,18 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
 8. Annotation (Sonnet) — reads _sources/<stem>.verified.srt, returns
    annotated SRT text. NO marker cue inserted.
      → atomic write to /artifact/.../<stem>.srt (canonical)
+     SKIPPED when the archive tier won: verified.srt is already an
+     annotated SRT from a previous run, so we copy it straight to
+     canonical + promote sibling zh-tw if the archive has one. Skips
+     the Sonnet annotate + Gemini translate calls (~$0.05-0.10 per
+     episode). Archive tier itself does spend one tiny Gemini call for
+     title matching (~$0.0005). See `archive.py`.
+
+9. Mirror to data/archive/ (only when a non-archive tier wrote canonical)
+     → data/archive/<title>/<season>/<stem>.srt
+     Auto-preserves every English + Chinese canonical SRT the pipeline
+     ever produces, so a future delete_torrent + re-download hits the
+     archive tier at step 7 and short-circuits.
 ```
 
 Canonical SRT existence IS the "fully done" signal — no marker reads anywhere. Atomic write (tmp file + rename) means any downstream reader (Jellyfin scan, Infuse browse) sees either the prior file or the new fully-annotated file, never a half-written intermediate.
@@ -242,6 +267,7 @@ Each pipeline stage has its own cached output under `_sources/`. Delete just wha
 
 | Re-run | Delete |
 |---|---|
+| Force re-annotate ignoring archive | `data/archive/<title>/…/X.srt` + `_sources/X.archive.srt` + `_sources/X.verified.srt` + canonical |
 | Just re-annotate | canonical `/artifact/.../X.srt` (≈ $0.05 Sonnet) |
 | Re-verify + re-align + re-annotate | `_sources/X.verified.srt` + canonical (≈ $0.05 + alass) |
 | Re-extract embedded SRT from the mkv | `_sources/X.embedded.srt` + `_sources/X.verified.srt` + canonical (free, no quota burn) |
