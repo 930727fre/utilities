@@ -34,8 +34,8 @@ from srt_source import (
     whisper_failed_path,
     whisper_polluted_path,
 )
-from subs_finder import find_candidate_hash, find_candidate_text
-from subs_verifier import verify_against_whisper, whisper_is_polluted
+from subs_finder import find_candidate_hash, find_candidate_text, find_candidates_topn
+from subs_verifier import verify_against_whisper, wer_score, whisper_is_polluted
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
@@ -455,6 +455,11 @@ def _run_transcription(job_id: str, staging_mp4: str):
 # Sonnet / Gemini costs again. See archive.py for the mirror + lookup rules.
 _CANDIDATE_TAGS = ("archive", "embedded", "pgs-ocr", "bundled", "opensubtitles-hash", "opensubtitles-text")
 
+# Set >1 with a paid OpenSubtitles subscription to fetch top-N candidates per
+# OS tier, WER them all, and promote the lowest-WER passing one. Default 1 =
+# current behavior (top-1 via Haiku metadata gate, no extra downloads).
+OS_TOP_N = max(1, int(os.environ.get("OS_TOP_N", "1")))
+
 
 def _find_bt_wrapper(canonical_video: Path) -> Path | None:
     """Reverse-lookup the /bt/<wrapper>/ directory a canonical video was
@@ -854,12 +859,71 @@ def _fetch_candidate(tag: str, video: Path, dest: Path, whisper_src: Path) -> Pa
         return _pick_bundled(video, dest, whisper_src)
 
     if tag == "opensubtitles-hash":
+        if OS_TOP_N > 1:
+            return _fetch_os_topn(video, dest, whisper_src, mode="hash")
         return find_candidate_hash(video, "en", dest)
 
     if tag == "opensubtitles-text":
+        if OS_TOP_N > 1:
+            return _fetch_os_topn(video, dest, whisper_src, mode="text")
         return find_candidate_text(video, "en", dest)
 
     return None
+
+
+def _fetch_os_topn(video: Path, dest: Path, whisper_src: Path, mode: str) -> Path | None:
+    """Top-N OpenSubtitles fetch — grab up to OS_TOP_N indexed candidates,
+    score each with jiwer WER against whisper, copy the lowest-WER-passing
+    one to `dest` (the outer-loop-visible single path) and return it.
+
+    Indexed sources live at `<dest_no_ext>-<i>.srt` alongside `dest`, so a
+    replay can inspect / debug / reuse individual downloads. `dest` gets
+    the winner copy so the outer loop's WER re-verify + alass path work
+    unchanged.
+
+    Returns None if every downloaded candidate fails WER, or if the OS
+    search returned zero results (upstream caches the miss).
+    """
+    # dest is `_sources/<stem>.opensubtitles-hash.srt`; strip .srt to build
+    # the indexed pattern `<stem>.opensubtitles-hash-{i}.srt` beside it.
+    base = str(dest)
+    if base.endswith(".srt"):
+        pattern = base[:-4] + "-{i}.srt"
+    else:
+        pattern = base + "-{i}.srt"
+
+    candidates = find_candidates_topn(video, "en", pattern, mode=mode, top_n=OS_TOP_N)
+    if not candidates:
+        return None
+
+    # Pick the lowest passing WER. `verify_against_whisper`'s threshold
+    # (0.5) is the same one the outer loop applies, so any candidate that
+    # scores ≤ 0.5 here will re-pass the outer loop's re-verify too.
+    scored: list[tuple[float, Path]] = []
+    for cand in candidates:
+        wer = wer_score(whisper_src, cand)
+        if wer is None:
+            continue
+        if wer <= 0.5:
+            scored.append((wer, cand))
+        print(f"[pipeline] {video.name!r}: {mode} top-N WER "
+              f"{wer:.2f} for {cand.name}", flush=True)
+
+    if not scored:
+        return None
+    scored.sort()
+    best_wer, best_path = scored[0]
+    print(f"[pipeline] {video.name!r}: {mode} top-N winner {best_path.name} "
+          f"WER {best_wer:.2f} of {len(scored)}/{len(candidates)} passing", flush=True)
+
+    # Promote the winner to the canonical single-path dest expected by the
+    # outer loop. Losing candidates stay at their indexed paths.
+    try:
+        shutil.copy2(str(best_path), str(dest))
+    except OSError as exc:
+        print(f"[pipeline] {video.name!r}: {mode} top-N copy to dest failed — {exc}", flush=True)
+        return None
+    return dest
 
 
 @_catch_unhandled

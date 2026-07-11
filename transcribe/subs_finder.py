@@ -398,3 +398,112 @@ def find_candidate_text(video: Path, languages: str, dest: Path) -> Optional[Pat
     print(f"[subs-finder] text candidate written: release="
           f"{attrs.get('release', '?')!r} → {dest.name}", flush=True)
     return dest
+
+
+# ── Top-N variants ────────────────────────────────────────────────────────
+# Used when a paid OpenSubtitles subscription lifts the daily quota above
+# 20 (free tier). Downloads up to `top_n` metadata-passing candidates so
+# the caller can rank them by WER and pick the lowest — more resilient
+# against uploader mis-tags, forced-subs bundles, wrong-cut hits than the
+# top-1 flow. Uses `dest_pattern` with `{i}` placeholder for indexed
+# cache filenames, e.g. `_sources/<stem>.opensubtitles-hash-{i}.srt`.
+
+def _search_raw_hash(video: Path, languages: str) -> list[dict]:
+    """Same as `_search_by_hash` but returns the full hash-exact list
+    (no Haiku top-1 pick). Empty list on any miss."""
+    try:
+        h = _osdb_hash(video)
+    except (OSError, ValueError):
+        return []
+    try:
+        r = requests.get(
+            f"{API_BASE}/subtitles",
+            params={"moviehash": h, "languages": languages},
+            headers=_headers(),
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json().get("data") or []
+    except requests.RequestException:
+        return []
+    return [d for d in data if (d.get("attributes") or {}).get("moviehash_match")]
+
+
+def _search_raw_text(video: Path, languages: str) -> list[dict]:
+    """Same as `_search_by_text` but returns the full result list capped
+    at 10 (no Haiku top-1 pick). Empty list on any miss."""
+    info = _parse_filename(video)
+    if not info["title"]:
+        return []
+    params: dict = {"query": info["title"], "languages": languages}
+    if info["season"] is not None and info["episode"] is not None:
+        params["season_number"] = info["season"]
+        params["episode_number"] = info["episode"]
+    elif info["year"]:
+        params["year"] = info["year"]
+    try:
+        r = requests.get(
+            f"{API_BASE}/subtitles",
+            params=params,
+            headers=_headers(),
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json().get("data") or []
+    except requests.RequestException:
+        return []
+    return data[:10]
+
+
+def find_candidates_topn(
+    video: Path,
+    languages: str,
+    dest_pattern: str,
+    mode: str,
+    top_n: int,
+) -> list[Path]:
+    """Fetch up to `top_n` OpenSubtitles candidates for `mode` ('hash' or
+    'text') and write them to `dest_pattern.format(i=1..N)`. Returns list
+    of successfully written paths.
+
+    No Haiku metadata pre-filter — WER downstream is the trust gate;
+    quota economics for top-N assume a paid subscription. Existing
+    indexed files are reused as-is (cache-friendly, same as top-1 flow's
+    single-file dest check).
+
+    24h transient cache is set if EVERY download attempt failed
+    (typical: HTTP 406 quota exhausted). Permanent cache is NOT set even
+    when top_n candidates all miss — a partial success doesn't mean the
+    (video, mode) tuple is permanently barren.
+    """
+    if mode == "hash":
+        raw = _search_raw_hash(video, languages)
+    elif mode == "text":
+        raw = _search_raw_text(video, languages)
+    else:
+        return []
+    if not raw:
+        return []
+
+    key = (str(video), languages, mode)
+    picks = raw[:top_n]
+    written: list[Path] = []
+    all_failed = True
+    for i, pick in enumerate(picks, 1):
+        dest = Path(dest_pattern.format(i=i))
+        if dest.exists():
+            written.append(dest)
+            all_failed = False
+            continue
+        if _download_candidate(pick, dest):
+            written.append(dest)
+            all_failed = False
+            attrs = pick.get("attributes") or {}
+            print(f"[subs-finder] {mode} top-{i} candidate written: release="
+                  f"{attrs.get('release', '?')!r} → {dest.name}", flush=True)
+
+    if all_failed and not written:
+        # Complete quota / API meltdown → transient cache so we don't
+        # burn more quota next tick.
+        _cache_transient(key)
+    return written

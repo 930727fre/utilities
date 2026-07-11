@@ -261,6 +261,26 @@ def whisper_is_polluted(whisper_srt: Path) -> tuple[bool, str]:
     return False, ""
 
 
+def wer_score(whisper_srt: Path, candidate_srt: Path) -> Optional[float]:
+    """Raw WER float between whisper (reference) and candidate. Returns
+    None if either side can't be parsed or WER computation fails.
+    Same normalization as `verify_against_whisper` — the two agree on
+    what "same content" means; this just skips the pass/fail decision so
+    callers can rank multiple candidates by raw score."""
+    w_cues = _real_cues(whisper_srt)
+    c_cues = _real_cues(candidate_srt)
+    if not w_cues or not c_cues:
+        return None
+    w_text = _normalized_full_text(w_cues)
+    c_text = _normalized_full_text(c_cues)
+    if not w_text or not c_text:
+        return None
+    try:
+        return float(jiwer.wer(w_text, c_text))
+    except ValueError:
+        return None
+
+
 def verify_against_whisper(
     whisper_srt: Path,
     candidate_srt: Path,

@@ -72,8 +72,13 @@ data/artifact/_sources/                         per-stage pipeline output —
                                                   → pgsrip/tesseract OCR;
                                                   ~95% char accuracy)
     Title (Year).bundled.srt                    raw (from /bt)
-    Title (Year).opensubtitles-hash.srt         raw (OS hash hit)
-    Title (Year).opensubtitles-text.srt         raw (OS text hit)
+    Title (Year).opensubtitles-hash.srt         raw (OS hash hit — this is
+                                                  the WER winner when OS_TOP_N=1;
+                                                  or the picked winner among
+                                                  Title (Year).opensubtitles-hash-<i>.srt
+                                                  when OS_TOP_N>1)
+    Title (Year).opensubtitles-text.srt         raw (OS text hit; same top-N
+                                                  scheme as -hash above)
     Title (Year).verified.srt                   processed (winner picked +
                                                   alass-aligned, or
                                                   embedded/pgs-ocr promoted
@@ -107,7 +112,10 @@ Prereqs:
 - `GEMINI_API_KEY` exported — required for the bt "translate to 中" button (10-cue Gemini Flash Lite batches). Get one at https://aistudio.google.com/apikey.
 - `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
 
-All five use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
+Optional:
+- `OS_TOP_N` (default 1) — with a paid OpenSubtitles subscription that lifts daily quota well above 20, set this to 3–5 to fetch top-N candidates per OS tier, WER them all, and promote the lowest-WER passing one. Extra downloads land as indexed sidecars at `_sources/<stem>.opensubtitles-<mode>-<i>.srt`. Free-tier users leave this at 1 — top-N would exhaust quota within a handful of episodes.
+
+All five required vars use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
 
 ```sh
 export ANTHROPIC_API_KEY=…
@@ -193,7 +201,9 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
    to avoid burning OS quota on the wrong file.
 
 7. Content gate (jiwer / WER, deterministic, ~$0)
-     For each candidate in order (archive → embedded → pgs-ocr → bundled → OS hash → OS text):
+     For each candidate in order (archive → embedded → pgs-ocr → bundled → OS hash → OS text).
+     OS tiers download top-1 by default; setting `OS_TOP_N` in the env to N>1
+     grabs N candidates, WERs each, and promotes the lowest-scoring passer:
        - concat all cue text → strip SRT formatting + punctuation,
          lowercase → compute WER vs whisper (reference) → pass if
          WER ≤ 0.5
