@@ -21,6 +21,11 @@ services:
       - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:?OPENSUBTITLES_API_KEY must be exported before docker compose up}
       - OPENSUBTITLES_USERNAME=${OPENSUBTITLES_USERNAME:?OPENSUBTITLES_USERNAME must be exported before docker compose up}
       - OPENSUBTITLES_PASSWORD=${OPENSUBTITLES_PASSWORD:?OPENSUBTITLES_PASSWORD must be exported before docker compose up}
+      # OS_TOP_N: with a paid OpenSubtitles subscription that lifts daily
+      # quota above the free-tier 20, set 3–5 to fetch top-N candidates
+      # per OS tier and WER-rank them. `:-1` keeps it optional; default 1
+      # is the top-1-via-Haiku behavior.
+      - OS_TOP_N=${OS_TOP_N:-1}
     restart: unless-stopped
     networks:
       - default
