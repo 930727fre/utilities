@@ -8,7 +8,7 @@ Three ways in:
 
 For the yt + bt branches, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
 
-`data/downloads/` holds the yt-tab output; `data/bt/` holds the BT downloads (mounted at `/bt`), with `.zh-tw.srt` sidecars sitting next to their videos when produced. [webdav](../webdav) reads both for Infuse playback (read-only). The bt-side pipeline never writes to `jobs.json` — every torrent is a directory under `/bt` plus (while live) an in-memory `subprocess.Popen` handle. Chinese sub state is also a filesystem-only signal: `<stem>.zh-tw.srt` present = done, `<stem>.zh-tw.srt.error` present = failed.
+`data/downloads/` holds the yt-tab output; `data/bt/` holds the BT downloads (mounted at `/bt`), with `.zh-tw.srt` sidecars sitting next to their videos when produced. [jellyfin](../jellyfin) reads both for playback. The bt-side pipeline never writes to `jobs.json` — every torrent is a directory under `/bt` plus (while live) an in-memory `subprocess.Popen` handle in the [aria2](../aria2) sidecar. Chinese sub state is also a filesystem-only signal: `<stem>.zh-tw.srt` present = done, `<stem>.zh-tw.srt.error` present = failed.
 
 ## Stack
 
@@ -353,7 +353,7 @@ The bt tab and background annotation loop skip:
 
 - Dotfiles
 - Any video whose wrapper folder still contains a `.aria2` control file anywhere (aria2c uses ONE control file per torrent, not per-file; its presence anywhere under the wrapper means the whole torrent is still mid-download / mid-verify)
-- Files whose mtime is within the last 60 seconds (belt-and-suspenders for non-aria2c writers — manual drops, webdav copies, rsync)
+- Files whose mtime is within the last 60 seconds (belt-and-suspenders for non-aria2c writers — manual drops, rsync)
 (yt staging files live in `/app/data/downloads`, not `/bt`, so they're not scanned in the first place.)
 
 Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.

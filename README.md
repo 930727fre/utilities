@@ -7,7 +7,8 @@ A collection of self-hosted tools, each containerized with Docker.
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
 | [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
 | [marker-pipeline](./marker-pipeline) | Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
-| [transcribe](./transcribe) | YouTube URL **or** magnet link → mp4 + Whisper SRT + Claude `※` annotation; plus a "translate to 中" button per torrent that produces a `.zh-tw.srt` sidecar (OpenSubtitles first, Gemini fallback). Sidecar SRTs picked up by [webdav](./webdav) / Infuse. Magnets are dispatched as one-shot `aria2c` subprocesses per torrent (1440 min / ratio 1.0 seed limits) |
+| [transcribe](./transcribe) | YouTube URL **or** magnet link → mp4 + Whisper SRT + Claude `※` annotation; plus a "translate to 中" button per torrent that produces a `.zh-tw.srt` sidecar (OpenSubtitles first, Gemini fallback). Sidecar SRTs picked up by Jellyfin / Infuse via [jellyfin](./jellyfin). Magnets are dispatched to the [aria2](./aria2) sidecar (one-shot `aria2c` subprocess per torrent, 1440 min / ratio 1.0 seed limits, BT traffic routed through PIA gluetun) |
+| [aria2](./aria2) | Standalone BT downloader with PIA gluetun sidecar — one-shot `aria2c` subprocess per magnet, kill-switch via netns sharing, PIA port forwarding. Talks to transcribe over `my_network` via REST |
 | [xyt](./xyt) | Fork of transcribe |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
@@ -18,8 +19,6 @@ A collection of self-hosted tools, each containerized with Docker.
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
-| [webdav](./webdav) | Read-only WebDAV server exposing transcribe's library — Infuse on iPhone / Mac connects here for playback, handles codec + iCloud progress sync |
-| [samba](./samba) | Read-only SMB server exposing the same transcribe library — alternative to webdav for macOS Finder / IINA / VLC where Apple's native webdavfs is buggy with large videos |
 
 ## Notes
 
