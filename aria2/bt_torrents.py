@@ -25,7 +25,6 @@ the moment all pieces are verified. That's a clean filesystem-level
 "download done" signal we can read directly — no callback plumbing.
 """
 import re
-import shutil
 import struct
 import subprocess
 import threading
@@ -309,7 +308,15 @@ def list_torrents() -> list[dict]:
 
 
 def delete(wrapper_name: str) -> None:
-    """Kill the subprocess (if running) and rmtree the wrapper folder."""
+    """Kill the aria2c subprocess for this wrapper (if running).
+
+    The wrapper folder rmtree is deliberately NOT done here — the
+    caller (transcribe over the shared /data/bt bind mount, or the
+    user via `rm -rf`) is responsible for that. Splitting kill from
+    rmtree lets transcribe orchestrate cleanup atomically alongside
+    its own canonical / _sources / sentinel unlink work, and means an
+    aria2 outage doesn't leave orphaned wrapper dirs on disk that a
+    healthy transcribe could have removed."""
     with _procs_lock:
         proc = _procs.pop(wrapper_name, None)
     if proc is not None and proc.poll() is None:
@@ -318,15 +325,6 @@ def delete(wrapper_name: str) -> None:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-
-    wrapper = (BT_LIBRARY / wrapper_name).resolve()
-    # Safety: never touch anything outside /data/bt.
-    try:
-        wrapper.relative_to(BT_LIBRARY.resolve())
-    except ValueError:
-        return
-    if wrapper.exists() and wrapper.is_dir():
-        shutil.rmtree(wrapper, ignore_errors=True)
 
 
 def shutdown() -> None:

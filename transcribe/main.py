@@ -1,5 +1,6 @@
 import asyncio
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -662,9 +663,10 @@ async def delete_torrent(wrapper: str):
                    f"wait for finish or delete the job first",
         )
 
-    # Kill aria2 subprocess (via the sidecar) + rmtree /bt/<wrapper>/.
-    # Sidecar failure isn't fatal: canonical/_sources/sentinel cleanup
-    # below still runs, and the wrapper stays for the user to inspect.
+    # Kill any live aria2 subprocess via the sidecar — the sidecar owns
+    # the Popen handles, we can't SIGTERM aria2c from here even though
+    # the wrapper dir is shared. Sidecar failure isn't fatal; if aria2
+    # is down its subprocesses died with it, so nothing needs killing.
     try:
         r = _aria2_client.delete(f"/torrents/{wrapper}")
         if r.status_code >= 400 and r.status_code != 404:
@@ -673,6 +675,21 @@ async def delete_torrent(wrapper: str):
     except httpx.HTTPError as exc:
         print(f"[delete_torrent] aria2 sidecar unreachable while deleting "
               f"{wrapper!r}: {exc}", flush=True)
+
+    # rmtree /bt/<wrapper>/ from here. /bt is a shared bind-mount so
+    # either container can do it; doing it here means aria2 outages
+    # don't leave orphaned wrappers on disk. Idempotent: if the aria2
+    # sidecar already rmtreed as part of its DELETE handler, this is a
+    # no-op. Safety-check the resolved path so nothing outside BT_ROOT
+    # can be touched even under adversarial input.
+    bt_wrapper_dir = BT_ROOT / wrapper
+    try:
+        resolved = bt_wrapper_dir.resolve()
+        resolved.relative_to(BT_ROOT.resolve())
+    except (OSError, ValueError):
+        resolved = None
+    if resolved is not None and resolved.exists() and resolved.is_dir():
+        shutil.rmtree(resolved, ignore_errors=True)
 
     # Unlink everything the plan listed (canonical + _sources/ + sentinel).
     for p in plan["canonical_files"] + plan["sources_files"]:
