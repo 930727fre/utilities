@@ -34,8 +34,8 @@ from srt_source import (
     whisper_failed_path,
     whisper_polluted_path,
 )
-from subs_finder import find_candidate_hash, find_candidate_text, find_candidates_topn
-from subs_verifier import verify_against_whisper, wer_score, whisper_is_polluted
+from subs_finder import _parse_filename, iter_candidates
+from subs_verifier import find_pollution_windows, verify_against_whisper, verify_by_plot
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
@@ -45,6 +45,15 @@ DOWNLOAD_TIMEOUT = 60 * 60         # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60   # 4 hours
 RESYNC_TIMEOUT = 5 * 60            # alass on a long movie tops out well under this
 FFPROBE_PROBE_TIMEOUT = 30         # JSON stream probe — milliseconds in practice
+FFPROBE_DURATION_TIMEOUT = 15      # single format=duration lookup — sub-second in practice
+
+# If whisper's hallucination-loop windows cover more than this fraction of
+# the video runtime, no scrub can salvage the transcript — even a perfect
+# candidate would have WER dominated by whisper's missing content. Bail
+# straight to the `.whisper-polluted` sidecar and let the user drop a
+# manual candidate. 50% is aggressive on purpose: below that, whisper
+# retains enough real dialogue for single-side scrub to keep WER honest.
+_POLLUTION_COVERAGE_BAIL = 0.5
 FFMPEG_SUB_EXTRACT_TIMEOUT = 60    # demux one subtitle stream (no transcode) — seconds on a movie-sized container
 PGS_OCR_TIMEOUT = 10 * 60          # tesseract OCR of a 50-min episode's PGS — ~1-3 min typical
 FFMPEG_AUDIO_TIMEOUT = 5 * 60      # transcoding a movie to 16kHz mono AAC — ~30-60s typical
@@ -455,10 +464,38 @@ def _run_transcription(job_id: str, staging_mp4: str):
 # Sonnet / Gemini costs again. See archive.py for the mirror + lookup rules.
 _CANDIDATE_TAGS = ("archive", "embedded", "pgs-ocr", "bundled", "opensubtitles-hash", "opensubtitles-text")
 
-# Set >1 with a paid OpenSubtitles subscription to fetch top-N candidates per
-# OS tier, WER them all, and promote the lowest-WER passing one. Default 1 =
-# current behavior (top-1 via Haiku metadata gate, no extra downloads).
-OS_TOP_N = max(1, int(os.environ.get("OS_TOP_N", "1")))
+# With a paid OpenSubtitles subscription that lifts daily quota above the
+# free-tier 20, set 3–5 to k-try the top-N raw OS results per tier
+# (download, scrubbed-WER, first passer wins). Default 1 = single-slot
+# k-try (behaves the same as the old top-1 path, minus the Haiku metadata
+# gate that was removed). Quota-friendly — we only download the next
+# candidate when the previous one failed WER.
+OS_MAX_TRIES = max(1, int(os.environ.get("OS_MAX_TRIES", "1")))
+
+
+def _video_duration_seconds(video: Path) -> float | None:
+    """ffprobe the container's `format=duration`. Returns seconds as a
+    float, or None on any ffprobe failure. Sub-second latency on any
+    modern container so we don't cache — one call per pollution-bail
+    check per video."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1",
+             str(video)],
+            capture_output=True,
+            timeout=FFPROBE_DURATION_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        print(f"[ffprobe] duration lookup failed for {video.name!r}: {e}", flush=True)
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return float((r.stdout or b"").strip())
+    except ValueError:
+        return None
 
 
 def _find_bt_wrapper(canonical_video: Path) -> Path | None:
@@ -744,7 +781,12 @@ def _extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
 _BUNDLED_SUB_EXTS = (".srt", ".ass", ".ssa")
 
 
-def _pick_bundled(video: Path, dest: Path, whisper_src: Path) -> Path | None:
+def _pick_bundled(
+    video: Path,
+    dest: Path,
+    whisper_src: Path,
+    windows: list[tuple[float, float]],
+) -> Path | None:
     """Scan the bt-side wrapper for subtitle sidecars (`.srt`, `.ass`,
     `.ssa`) and find one whose content matches the whisper transcript
     (via WER). First match (sorted by filename) wins, lands at `dest`.
@@ -795,7 +837,7 @@ def _pick_bundled(video: Path, dest: Path, whisper_src: Path) -> Path | None:
                     stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
                     print(f"[bundled-scan] {video.name!r}: REJECT {rel} — ASS convert empty (rc={r.returncode}) {stderr[-100:]}", flush=True)
                     continue
-                ok, reason = verify_against_whisper(whisper_src, converted)
+                ok, reason = verify_against_whisper(whisper_src, converted, windows)
                 if not ok:
                     print(f"[bundled-scan] {video.name!r}: REJECT {rel} — {reason}", flush=True)
                     continue
@@ -808,7 +850,7 @@ def _pick_bundled(video: Path, dest: Path, whisper_src: Path) -> Path | None:
                     return None
                 return dest
 
-        ok, reason = verify_against_whisper(whisper_src, sub)
+        ok, reason = verify_against_whisper(whisper_src, sub, windows)
         if not ok:
             print(f"[bundled-scan] {video.name!r}: REJECT {rel} — {reason}", flush=True)
             continue
@@ -824,13 +866,18 @@ def _pick_bundled(video: Path, dest: Path, whisper_src: Path) -> Path | None:
     return None
 
 
-def _fetch_candidate(tag: str, video: Path, dest: Path, whisper_src: Path) -> Path | None:
+def _fetch_candidate(
+    tag: str,
+    video: Path,
+    dest: Path,
+    whisper_src: Path,
+    windows: list[tuple[float, float]],
+) -> Path | None:
     """Materialize a candidate SRT at `dest` if we don't already have it.
     Returns `dest` on success, None on miss.
 
-    Bundled candidates are discovered by scanning the bt-side wrapper
-    and picking the first `.srt` whose content matches `whisper_src` —
-    no bt_filter pre-staging, no filename heuristics."""
+    `windows` — pollution time ranges from whisper (empty list if clean).
+    Threaded into per-tier verify calls that need to scrub both sides."""
     if dest.exists():
         return dest
 
@@ -856,74 +903,161 @@ def _fetch_candidate(tag: str, video: Path, dest: Path, whisper_src: Path) -> Pa
         return _extract_pgs_ocr(video, dest)
 
     if tag == "bundled":
-        return _pick_bundled(video, dest, whisper_src)
+        return _pick_bundled(video, dest, whisper_src, windows)
 
     if tag == "opensubtitles-hash":
-        if OS_TOP_N > 1:
-            return _fetch_os_topn(video, dest, whisper_src, mode="hash")
-        return find_candidate_hash(video, "en", dest)
+        return _fetch_os_ktry(video, dest, whisper_src, windows, mode="hash")
 
     if tag == "opensubtitles-text":
-        if OS_TOP_N > 1:
-            return _fetch_os_topn(video, dest, whisper_src, mode="text")
-        return find_candidate_text(video, "en", dest)
+        return _fetch_os_ktry(video, dest, whisper_src, windows, mode="text")
 
     return None
 
 
-def _fetch_os_topn(video: Path, dest: Path, whisper_src: Path, mode: str) -> Path | None:
-    """Top-N OpenSubtitles fetch — grab up to OS_TOP_N indexed candidates,
-    score each with jiwer WER against whisper, copy the lowest-WER-passing
-    one to `dest` (the outer-loop-visible single path) and return it.
-
-    Indexed sources live at `<dest_no_ext>-<i>.srt` alongside `dest`, so a
-    replay can inspect / debug / reuse individual downloads. `dest` gets
-    the winner copy so the outer loop's WER re-verify + alass path work
-    unchanged.
-
-    Returns None if every downloaded candidate fails WER, or if the OS
-    search returned zero results (upstream caches the miss).
-    """
-    # dest is `_sources/<stem>.opensubtitles-hash.srt`; strip .srt to build
-    # the indexed pattern `<stem>.opensubtitles-hash-{i}.srt` beside it.
+def _os_ktry_indexed_pattern(dest: Path) -> str:
+    """Build `<dest_no_ext>-{i}.srt` alongside `dest` for k-try indexed
+    candidate paths."""
     base = str(dest)
     if base.endswith(".srt"):
-        pattern = base[:-4] + "-{i}.srt"
-    else:
-        pattern = base + "-{i}.srt"
+        return base[:-4] + "-{i}.srt"
+    return base + "-{i}.srt"
 
-    candidates = find_candidates_topn(video, "en", pattern, mode=mode, top_n=OS_TOP_N)
-    if not candidates:
+
+def _fetch_os_ktry(
+    video: Path,
+    dest: Path,
+    whisper_src: Path,
+    windows: list[tuple[float, float]],
+    mode: str,
+) -> Path | None:
+    """K-try OpenSubtitles fetch — download raw results one at a time, run
+    WER after each, first passer wins. Winner is copied to `dest`; losing
+    downloads stay at their indexed `<dest_no_ext>-<i>.srt` paths for
+    replay reuse.
+
+    Compared to a "download all N, pick lowest WER" strategy: strictly
+    fewer downloads (stops as soon as one passes), same worst case, no
+    ranking penalty (all passing candidates are above WER 0.5 anyway;
+    "lowest passer" and "first passer" are both correct enough — alass
+    handles the rest).
+
+    Returns None if no candidate passes, if search returned zero, or if
+    quota is exhausted (handled inside iter_candidates via its cache).
+    """
+    pattern = _os_ktry_indexed_pattern(dest)
+
+    def _accept(cand: Path) -> bool:
+        ok, reason = verify_against_whisper(whisper_src, cand, windows)
+        print(f"[pipeline] {video.name!r}: {mode} k-try {cand.name} — "
+              f"{'ACCEPT' if ok else 'REJECT'}: {reason}", flush=True)
+        return ok
+
+    winner = iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _accept)
+    if winner is None:
         return None
 
-    # Pick the lowest passing WER. `verify_against_whisper`'s threshold
-    # (0.5) is the same one the outer loop applies, so any candidate that
-    # scores ≤ 0.5 here will re-pass the outer loop's re-verify too.
-    scored: list[tuple[float, Path]] = []
-    for cand in candidates:
-        wer = wer_score(whisper_src, cand)
-        if wer is None:
-            continue
-        if wer <= 0.5:
-            scored.append((wer, cand))
-        print(f"[pipeline] {video.name!r}: {mode} top-N WER "
-              f"{wer:.2f} for {cand.name}", flush=True)
-
-    if not scored:
-        return None
-    scored.sort()
-    best_wer, best_path = scored[0]
-    print(f"[pipeline] {video.name!r}: {mode} top-N winner {best_path.name} "
-          f"WER {best_wer:.2f} of {len(scored)}/{len(candidates)} passing", flush=True)
-
-    # Promote the winner to the canonical single-path dest expected by the
-    # outer loop. Losing candidates stay at their indexed paths.
+    # Promote the winner copy to the canonical single-path dest the outer
+    # loop expects. Losing candidates stay at their indexed paths.
     try:
-        shutil.copy2(str(best_path), str(dest))
+        shutil.copy2(str(winner), str(dest))
     except OSError as exc:
-        print(f"[pipeline] {video.name!r}: {mode} top-N copy to dest failed — {exc}", flush=True)
+        print(f"[pipeline] {video.name!r}: {mode} k-try copy to dest failed — {exc}", flush=True)
         return None
     return dest
+
+
+def _polluted_fallback_pick_candidate(
+    video: Path,
+    whisper_src: Path,
+    verified_src: Path,
+) -> str | None:
+    """Coverage-bail fallback: whisper is >50% polluted, so WER can't
+    discriminate any candidate. Try tiers with content trust or LLM
+    plot-check as the accept signal.
+
+    Trust rules:
+    - `archive`: previously canonical, verified in a past clean-whisper
+      run — trust and use directly
+    - `embedded` / `pgs-ocr`: mux'd inside the video container by the
+      release group — same-source content guarantee, trust and use directly
+    - `bundled`: SRT sidecar in the torrent wrapper; without WER we have
+      no way to pick the right file among multiple — SKIP entirely
+      (safer to fall through to OS + plot-check than accept a bad guess)
+    - `opensubtitles-hash` / `opensubtitles-text`: k-try, but the accept
+      callback is `verify_by_plot` (Opus + web_search) instead of WER
+
+    Returns the winning tag or None. On success, `verified_src` is
+    written by this function (or alass, for OS tiers). The outer
+    pipeline continues to annotation as normal."""
+    info = _parse_filename(video)
+    show = info.get("title") or ""
+    season = info.get("season")
+    episode = info.get("episode")
+    if not show:
+        print(f"[pipeline] {video.name!r}: polluted-mode — could not parse show "
+              f"name from filename, plot-check impossible", flush=True)
+        return None
+
+    ep_ref = f" S{season:02d}E{episode:02d}" if season is not None and episode is not None else ""
+    print(f"[pipeline] {video.name!r}: polluted-mode candidate loop — target="
+          f"{show!r}{ep_ref}", flush=True)
+
+    for tag in _CANDIDATE_TAGS:
+        if tag == "bundled":
+            print(f"[pipeline] {video.name!r}: polluted-mode SKIP bundled "
+                  f"(no safe content check without WER)", flush=True)
+            continue
+
+        cand_dest = _sources_path(video, tag)
+
+        # For archive / embedded / pgs-ocr: materialize + trust directly
+        if tag in ("archive", "embedded", "pgs-ocr"):
+            cand_path = _fetch_candidate(tag, video, cand_dest, whisper_src, windows=[])
+            if cand_path is None:
+                continue
+            print(f"[pipeline] {video.name!r}: polluted-mode TRUST {tag} "
+                  f"(same-source / prior-verified content)", flush=True)
+            # Same-source timing → skip alass; archive was already alass-aligned
+            # in its prior run.
+            try:
+                verified_src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(cand_path), str(verified_src))
+            except OSError as exc:
+                print(f"[pipeline] {video.name!r}: polluted-mode {tag} → verified "
+                      f"copy failed: {exc}", flush=True)
+                continue
+            return tag
+
+        # OS tiers: k-try with plot-check
+        if tag in ("opensubtitles-hash", "opensubtitles-text"):
+            mode = "hash" if tag == "opensubtitles-hash" else "text"
+            pattern = _os_ktry_indexed_pattern(cand_dest)
+
+            def _plot_accept(cand: Path) -> bool:
+                ok, reason = verify_by_plot(cand, show, season, episode)
+                print(f"[pipeline] {video.name!r}: polluted-mode {mode} plot-check "
+                      f"{cand.name} — {reason}", flush=True)
+                return ok
+
+            winner = iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _plot_accept)
+            if winner is None:
+                continue
+
+            try:
+                shutil.copy2(str(winner), str(cand_dest))
+            except OSError as exc:
+                print(f"[pipeline] {video.name!r}: polluted-mode {mode} k-try copy "
+                      f"to canonical dest failed: {exc}", flush=True)
+                continue
+
+            # OS candidates need alass alignment (their timeline was authored
+            # against a different release).
+            if _resync(video, cand_dest, verified_src):
+                return tag
+            print(f"[pipeline] {video.name!r}: polluted-mode {tag} alass failed", flush=True)
+            continue
+
+    return None
 
 
 @_catch_unhandled
@@ -998,86 +1132,119 @@ def process_bt_file(job_id: str):
         return
 
     # ── 2 & 3. Verified.srt (cached) ──────────────────────────────────
+    winner_tag: str | None = None
     if not verified_src.exists():
-        # Detect whisper hallucination loops upfront: if the decoder
-        # got stuck in a "No. No. No." loop the resulting transcript
-        # makes WER a useless reference (every honest candidate's WER
-        # vs polluted whisper is huge, all get rejected, polluted
-        # whisper itself gets promoted to verified). When polluted,
-        # WER is bypassed and the first available candidate wins
-        # (forced/lang filters upstream remain in effect).
-        polluted, polluted_reason = whisper_is_polluted(whisper_src)
-        if polluted:
-            print(f"[pipeline] {video.name!r}: whisper polluted — {polluted_reason}; WER disabled this run", flush=True)
+        # Detect whisper hallucination loops upfront and return the time
+        # ranges the decoder was stuck in. WER verify below single-side-
+        # scrubs these ranges from WHISPER before scoring, so a polluted
+        # stretch doesn't tank an otherwise-matching candidate. Empty
+        # list = clean whisper, verify behaves normally.
+        #
+        # If pollution covers > _POLLUTION_COVERAGE_BAIL of the runtime,
+        # WER can't discriminate — even a perfect candidate is scored
+        # against a shredded reference. Fall back to the trust +
+        # plot-check loop; if that fails too, stamp `.whisper-polluted`.
+        windows = find_pollution_windows(whisper_src)
+        if windows:
+            total_polluted = sum(e - s for s, e in windows)
+            duration = _video_duration_seconds(video)
+            coverage = (total_polluted / duration) if duration else 0.0
+            duration_str = f"{duration:.0f}s" if duration else "unknown"
+            print(f"[pipeline] {video.name!r}: whisper has {len(windows)} polluted "
+                  f"window(s) totaling {total_polluted:.0f}s / {duration_str} "
+                  f"({coverage:.0%} coverage)", flush=True)
 
-        winner_tag: str | None = None
-        for tag in _CANDIDATE_TAGS:
-            cand_dest = _sources_path(video, tag)
-            cand_path = _fetch_candidate(tag, video, cand_dest, whisper_src)
-            if cand_path is None:
-                continue
+            if duration and coverage > _POLLUTION_COVERAGE_BAIL:
+                print(f"[pipeline] {video.name!r}: pollution > "
+                      f"{_POLLUTION_COVERAGE_BAIL:.0%} of runtime — WER "
+                      f"disabled; falling back to trust + plot-check", flush=True)
+                winner_tag = _polluted_fallback_pick_candidate(
+                    video, whisper_src, verified_src,
+                )
+                if winner_tag is None:
+                    polluted_reason = (
+                        f"pollution {coverage:.0%} of runtime, no candidate "
+                        f"passed trust / plot-check fallback"
+                    )
+                    try:
+                        stamp_whisper_polluted(video, polluted_reason)
+                    except OSError:
+                        pass
+                    _fail(job_id, f"whisper polluted, no salvage possible ({polluted_reason})")
+                    return
+                if _is_job_deleted(job_id):
+                    return
 
-            if polluted:
-                # Whisper isn't a usable reference; take the first
-                # candidate we materialize. Upstream filters (forced
-                # tracks excluded, lang preference, Haiku metadata
-                # gate for OS hits) are still in effect, so this
-                # isn't "accept anything".
-                reason = f"whisper polluted ({polluted_reason}); skipping WER"
-            else:
-                ok, reason = verify_against_whisper(whisper_src, cand_path)
+        # Normal WER candidate loop — skip when the polluted-fallback
+        # branch already wrote verified.srt.
+        if winner_tag is None:
+            for tag in _CANDIDATE_TAGS:
+                cand_dest = _sources_path(video, tag)
+                cand_path = _fetch_candidate(tag, video, cand_dest, whisper_src, windows)
+                if cand_path is None:
+                    continue
+
+                ok, reason = verify_against_whisper(whisper_src, cand_path, windows)
                 if not ok:
                     print(f"[pipeline] {video.name!r}: {tag} REJECT — {reason}", flush=True)
                     continue
-            print(f"[pipeline] {video.name!r}: {tag} ACCEPT — {reason}", flush=True)
+                print(f"[pipeline] {video.name!r}: {tag} ACCEPT — {reason}", flush=True)
 
-            if tag in ("embedded", "pgs-ocr"):
-                # Both candidate kinds come out of the mkv container
-                # itself — the subtitle stream was authored against the
-                # same master as the video, so timing is byte-perfect.
-                # Running alass here would only introduce drift on a
-                # stream that was already correct, so we promote
-                # directly.
-                try:
-                    verified_src.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(cand_path), str(verified_src))
-                    print(f"[pipeline] {video.name!r}: {tag} → verified.srt (alass skipped, same-source timing)", flush=True)
+                if tag in ("embedded", "pgs-ocr"):
+                    # Both candidate kinds come out of the mkv container
+                    # itself — the subtitle stream was authored against the
+                    # same master as the video, so timing is byte-perfect.
+                    # Running alass here would only introduce drift on a
+                    # stream that was already correct, so we promote
+                    # directly.
+                    try:
+                        verified_src.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(cand_path), str(verified_src))
+                        print(f"[pipeline] {video.name!r}: {tag} → verified.srt (alass skipped, same-source timing)", flush=True)
+                        winner_tag = tag
+                        break
+                    except OSError as exc:
+                        print(f"[pipeline] {video.name!r}: {tag} → verified copy failed: {exc}", flush=True)
+                        continue
+
+                if _resync(video, cand_path, verified_src):
                     winner_tag = tag
                     break
-                except OSError as exc:
-                    print(f"[pipeline] {video.name!r}: {tag} → verified copy failed: {exc}", flush=True)
-                    continue
+                # alass failed — try next candidate. Un-synced candidate
+                # isn't worth using; timing drift over a 50-min episode is
+                # worse than whisper output.
+                print(f"[pipeline] {video.name!r}: {tag} alass failed; trying next", flush=True)
 
-            if _resync(video, cand_path, verified_src):
-                winner_tag = tag
-                break
-            # alass failed — try next candidate. Un-synced candidate
-            # isn't worth using; timing drift over a 50-min episode is
-            # worse than whisper output.
-            print(f"[pipeline] {video.name!r}: {tag} alass failed; trying next", flush=True)
-
-        if winner_tag is None:
-            if polluted:
-                # Polluted whisper + no usable candidate → refuse to
-                # promote junk to canonical. Stamp the sidecar so the
-                # scan loop stops retrying and the UI surfaces the
-                # state for the user to intervene (drop a bundled
-                # SRT, refetch OS once quota recovers, etc.).
+            if winner_tag is None:
+                if windows:
+                    # Whisper had hallucination loops (under the coverage
+                    # bail, so scrub was attempted) but no candidate salvaged
+                    # it — refuse to promote a partially-hallucinated whisper
+                    # to canonical. Stamp the sidecar so the scan loop stops
+                    # retrying and the UI surfaces the state for the user to
+                    # intervene (drop a bundled SRT, refetch OS once quota
+                    # recovers, etc.).
+                    total_polluted = sum(e - s for s, e in windows)
+                    polluted_reason = (
+                        f"{len(windows)} polluted window(s) totaling "
+                        f"{total_polluted:.0f}s, no candidate salvaged after "
+                        f"whisper-side scrub"
+                    )
+                    try:
+                        stamp_whisper_polluted(video, polluted_reason)
+                    except OSError:
+                        pass
+                    _fail(job_id, f"whisper polluted, no usable candidate ({polluted_reason})")
+                    return
+                # Whisper is clean and no candidate passed — fallback to
+                # whisper-as-verified (already audio-aligned, no alass).
                 try:
-                    stamp_whisper_polluted(video, polluted_reason)
-                except OSError:
-                    pass
-                _fail(job_id, f"whisper polluted, no usable candidate ({polluted_reason})")
-                return
-            # Whisper is clean and no candidate passed — fallback to
-            # whisper-as-verified (already audio-aligned, no alass).
-            try:
-                verified_src.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(whisper_src), str(verified_src))
-                print(f"[pipeline] {video.name!r}: no candidate verified → whisper promoted to verified.srt", flush=True)
-            except OSError as exc:
-                _fail(job_id, f"copy whisper → verified failed: {exc}")
-                return
+                    verified_src.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(whisper_src), str(verified_src))
+                    print(f"[pipeline] {video.name!r}: no candidate verified → whisper promoted to verified.srt", flush=True)
+                except OSError as exc:
+                    _fail(job_id, f"copy whisper → verified failed: {exc}")
+                    return
     else:
         print(f"[pipeline] reusing cached verified SRT for {video.name!r}", flush=True)
 

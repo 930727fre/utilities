@@ -20,10 +20,9 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (bt, 1440 min / ratio 1.0 seed limits) |
 | Transcriber | Client-side `ffmpeg -vn -ac 1 -ar 16000` to a small AAC file, then HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`). Pre-transcoding keeps uploads uniformly ~30-50 MB regardless of source size — avoids sporadic connection drops observed on multi-GB Blu-ray mkv uploads |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
-| Main-feature classifier | Claude (haiku) at bt_filter time — one call per torrent: assigns each video its canonical title / year / S+E and flags bonus-content directories. Subtitle selection is NOT Haiku's job — the WER gate downstream handles "is this `.srt` the right one for this video" via content match |
+| Main-feature classifier | Claude (sonnet) at bt_filter time — one call per torrent: assigns each video its canonical title / year / S+E and flags bonus-content directories. Subtitle selection is NOT bt_filter's job — the WER gate downstream handles "is this `.srt` the right one for this video" via content match |
 | Subs finder | `ffmpeg` + `ffprobe` (container-agnostic stream probe + extraction — mkv SubRip, mp4 mov_text, WebM WebVTT all land as SubRip via `-c:s srt`) + `pgsrip` + `tesseract-ocr` (OCR for PGS bitmap subtitle tracks — covers Blu-ray releases like Chernobyl that only mux PGS) + OpenSubtitles REST API (hash + text searches). Container-extracted sources are preferred — same source as the video, byte-perfect timing |
-| Metadata verifier | Claude (haiku) — confirms an OS search-result's release / title / year matches the local filename. Runs BEFORE download to avoid burning OS quota on the wrong file |
-| Content verifier | `jiwer` — word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold (≤ 0.5) from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing |
+| Content verifier | `jiwer` — word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold (≤ 0.5) from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing. Pollution-window scrubbing salvages partially-hallucinated whisper (see the polluted-scrub explainer in the pipeline section below) |
 | Subs sync | `alass` — Rust binary that does piecewise drift detection on the video's audio + candidate's cues, aligning each segment independently. Picked over ffsubsync because it can handle releases that differ in cold-open / recap structure (not just uniform offset drift). Only runs for candidates whose timing isn't already correct (bundled / OS); the embedded extraction path skips alass entirely |
 | Storage | `data/jobs.json` (file-locked) + on-disk video + sidecar SRT |
 
@@ -72,12 +71,11 @@ data/artifact/_sources/                         per-stage pipeline output —
                                                   → pgsrip/tesseract OCR;
                                                   ~95% char accuracy)
     Title (Year).bundled.srt                    raw (from /bt)
-    Title (Year).opensubtitles-hash.srt         raw (OS hash hit — this is
-                                                  the WER winner when OS_TOP_N=1;
-                                                  or the picked winner among
+    Title (Year).opensubtitles-hash.srt         raw (OS hash hit — copy of the
+                                                  k-try winner among the indexed
                                                   Title (Year).opensubtitles-hash-<i>.srt
-                                                  when OS_TOP_N>1)
-    Title (Year).opensubtitles-text.srt         raw (OS text hit; same top-N
+                                                  files, i=1..OS_MAX_TRIES)
+    Title (Year).opensubtitles-text.srt         raw (OS text hit; same k-try
                                                   scheme as -hash above)
     Title (Year).verified.srt                   processed (winner picked +
                                                   alass-aligned, or
@@ -108,12 +106,12 @@ YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for
 Prereqs:
 - External Docker network `my_network`.
 - The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
-- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet), srt-matcher agent (Haiku), OS subs verifier (Haiku).
+- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet), bt_filter's main-feature classifier (Sonnet), and the polluted-whisper plot-check fallback (Opus + web search — rare invocation, but Opus is what recalls specific episode plots reliably; Haiku and Gemini were tested and failed on episode-level discrimination).
 - `GEMINI_API_KEY` exported — required for the bt "translate to 中" button (10-cue Gemini Flash Lite batches). Get one at https://aistudio.google.com/apikey.
 - `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
 
 Optional:
-- `OS_TOP_N` (default 1) — with a paid OpenSubtitles subscription that lifts daily quota well above 20, set this to 3–5 to fetch top-N candidates per OS tier, WER them all, and promote the lowest-WER passing one. Extra downloads land as indexed sidecars at `_sources/<stem>.opensubtitles-<mode>-<i>.srt`. Free-tier users leave this at 1 — top-N would exhaust quota within a handful of episodes.
+- `OS_MAX_TRIES` (default 1) — with a paid OpenSubtitles subscription that lifts daily quota well above 20, set this to 3–5 to k-try the top-N raw OS results per tier (download one, WER-check, first passer wins; stops early). Free-tier users leave this at 1 — even one bad hit per episode chews through 20 downloads fast. Indexed downloads land at `_sources/<stem>.opensubtitles-<mode>-<i>.srt`; the winner is copied to `_sources/<stem>.opensubtitles-<mode>.srt` for the outer pipeline.
 
 All five required vars use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
 
@@ -164,7 +162,7 @@ Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` / `ANNOTATING` jobs flip to `
 Whisper is the ground-truth listening reference; scraped subtitles are "literary upgrades" we accept only after they prove they're subtitling the same audio. Each stage's output is cached under `/artifact/_sources/`, so any partial progress survives crashes / restarts — the pipeline picks up at the first stage whose output is missing.
 
 ```
-1. bt_filter (Haiku, one call per wrapper, at torrent-finish time)
+1. bt_filter (Sonnet, one call per wrapper, at torrent-finish time)
      → hardlinks main-feature videos into Movies/ or TV/
      → tags bonus directories (so their videos get skipped)
      (subtitles NOT touched here — discovered at step 3)
@@ -197,13 +195,17 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
 6. OS candidate fetch (lazy, per video)
      → _sources/<stem>.opensubtitles-hash.srt   (if hash search hits)
      → _sources/<stem>.opensubtitles-text.srt   (if text search hits)
-   Each search is metadata-prefiltered by Haiku (`subs_verifier.verify_candidate`)
-   to avoid burning OS quota on the wrong file.
+   No LLM metadata prefilter — WER downstream is the trust gate, and
+   uploaders have been observed spoofing OS metadata (`release` /
+   S+E fields) to game a metadata check anyway. OS tiers run k-try:
+   download #1, WER, pass = done; else download #2, etc. Bound by
+   `OS_MAX_TRIES`.
 
 7. Content gate (jiwer / WER, deterministic, ~$0)
-     For each candidate in order (archive → embedded → pgs-ocr → bundled → OS hash → OS text).
-     OS tiers download top-1 by default; setting `OS_TOP_N` in the env to N>1
-     grabs N candidates, WERs each, and promotes the lowest-scoring passer:
+     For each candidate in order (archive → embedded → pgs-ocr → bundled → OS hash → OS text):
+       - reject up-front if the candidate has fewer than 100 real cues
+         (forced-subs / partial tracks — would fail WER anyway; saves
+         the WER computation)
        - concat all cue text → strip SRT formatting + punctuation,
          lowercase → compute WER vs whisper (reference) → pass if
          WER ≤ 0.5
@@ -217,13 +219,51 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
      → _sources/<stem>.verified.srt.
      All candidates fail → cp whisper.srt → verified.srt.
 
-     If whisper is detected as polluted (≥10 consecutive identical
-     cues = hallucination loop signature), the WER gate is bypassed
-     for this run — first available candidate wins (forced / lang
-     filters remain in effect). If no candidate is available under
-     a polluted whisper, the pipeline refuses to promote junk and
-     stamps a `<stem>.whisper-polluted` sidecar for the user to
-     investigate. See "State model" below.
+     Pollution-window scrubbing: if whisper's decoder was stuck in a
+     hallucination loop (≥10 consecutive identical cues, the classic
+     "No.×N" / "Thank you.×N" signature) for some stretch of the
+     episode, `find_pollution_windows` returns those time ranges, and
+     verify drops cues in those ranges from WHISPER (single-side scrub)
+     before computing WER. Candidate stays intact because its timeline
+     may not agree with whisper's yet (alass hasn't run — OS / bundled
+     tracks can drift a few seconds off the video's master timing).
+     Whisper-side scrub inflates WER slightly (candidate's real
+     dialogue in the polluted stretch becomes "extra" against a
+     shortened reference) but ~5 min pollution in a 50 min episode
+     only pushes WER up by ~0.1, well inside the 0.5 pass margin.
+
+     Coverage bail: if pollution windows cover > 50% of the video
+     runtime (ffprobe reads `format=duration` once per polluted video
+     to decide), no scrub is meaningful — whisper is mostly
+     hallucinated and even a perfect candidate scores against a
+     shredded reference. WER is disabled and the pipeline falls back
+     to a trust + LLM-plot-check loop:
+       - archive / embedded / pgs-ocr candidates are TRUSTED (prior
+         verified run, or container same-source content guarantee) and
+         used directly if they materialize
+       - bundled is SKIPPED (multiple SRT candidates in the wrapper,
+         no way to pick the right one without WER)
+       - opensubtitles-hash / -text run their normal k-try, but the
+         accept callback becomes `verify_by_plot` — Opus 4.7 with
+         web_search reads the candidate's full dialogue (timestamps
+         stripped, ~10-15K tokens for a TV episode) and decides
+         whether it matches the target episode's plot. Full dialogue
+         beats sampling: sampling could miss the identifying scenes
+         on a "quieter" episode, and at Opus's rates (~$5/M input) a
+         full episode is a handful of cents per check. Haiku and
+         Gemini flash-lite were both empirically inadequate for
+         episode-level discrimination (Haiku hallucinated matches on
+         wrong episodes of the same show; Gemini said "yes" to any
+         recognizable show). Opus recalls specific plot beats
+         reliably; web_search fills gaps for episodes outside its
+         training coverage. This fallback triggers only on the rare
+         > 50% pollution case.
+
+     Below 50% coverage OR no pollution at all → normal WER loop runs;
+     any tier can salvage. Whisper with pollution AND no candidate
+     passed WER (below the 50% bail) OR the >50% fallback loop didn't
+     salvage either → `<stem>.whisper-polluted` sidecar; user drops a
+     manual SRT and clicks ↻. See "State model" below.
 
 8. Annotation (Sonnet) — reads _sources/<stem>.verified.srt, returns
    annotated SRT text. NO marker cue inserted.
@@ -253,12 +293,15 @@ canonical /artifact/.../<stem>.srt exists       → done; skip
 <stem>.whisper-failed sidecar exists            → pipeline halted at whisper
                                                    (skip until ↻)
 <stem>.whisper-polluted sidecar exists          → whisper hallucinated a loop
-                                                   ("No.×N", "Thank you.×N") and
-                                                   no candidate was available
-                                                   to substitute. Junk whisper
-                                                   was NOT promoted to canonical;
-                                                   user must drop a candidate
-                                                   or refetch OS, then ↻
+                                                   ("No.×N", "Thank you.×N")
+                                                   AND either > 50% runtime
+                                                   with no plot-check winner,
+                                                   or < 50% runtime with no
+                                                   scrub-verified candidate.
+                                                   Junk whisper was NOT promoted
+                                                   to canonical; user must drop
+                                                   a candidate or refetch OS,
+                                                   then ↻
 <stem>.annotate-failed sidecar exists           → pipeline halted at annotation
                                                    (skip until ↻; _sources/.verified.srt
                                                    is kept so ↻ only re-does annotation)

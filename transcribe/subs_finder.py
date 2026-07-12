@@ -9,13 +9,15 @@ canonical SRT path.
 
 This module's sole responsibility:
   1. Search OpenSubtitles (hash, then text)
-  2. Metadata-prefilter via Haiku (`subs_verifier.verify_candidate`)
-  3. Download the chosen candidate's raw SRT bytes into a caller-provided
-     destination path
+  2. Return raw result list — no LLM metadata filtering (WER downstream
+     is the trust gate; uploaders have been observed spoofing metadata,
+     so a metadata prefilter can't be trusted anyway)
+  3. Download picked candidates' raw SRT bytes into caller-provided
+     indexed paths, so the caller can WER-verify them one by one
 
 Caller does alass alignment, caller decides whether to promote the candidate
 to canonical. This module never touches `_sources/` layout or
-`/artifact/.../*.srt` directly — purity matters because the candidate
+`/artifact/.../*.srt` directly — purity matters because a candidate
 might lose verification and we don't want partial writes leaking into
 user-facing paths.
 
@@ -33,11 +35,9 @@ import struct
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
-
-from subs_verifier import verify_candidate
 
 API_BASE = "https://api.opensubtitles.com/api/v1"
 # Compose enforces these are set at parse time (${VAR:?error}), so we can fail
@@ -60,10 +60,10 @@ _token_lock = threading.Lock()
 # poison the cheaper search path on the other mode.
 #
 # Permanent entries (`expiry = float("inf")`) are for outcomes that the
-# next API call would deterministically reproduce — no results, all
-# candidates rejected by Haiku, candidate had no file_id. Time-limited
-# entries (24 h TTL) cover quota exhaustion (HTTP 406) so the next-day
-# scan tick gets a clean retry without our 30 s loop spamming OS.
+# next API call would deterministically reproduce — no search results,
+# candidate had no file_id. Time-limited entries (24 h TTL) cover quota
+# exhaustion (HTTP 406) so the next-day scan tick gets a clean retry
+# without our 30 s loop spamming OS.
 _failed: dict[tuple[str, str, str], float] = {}
 _failed_lock = threading.Lock()
 
@@ -167,8 +167,8 @@ _YEAR_PATTERN = re.compile(r"\b(19|20)\d{2}\b")
 def _parse_filename(video: Path) -> dict:
     """Best-effort title / year / season / episode extraction.
 
-    Used to build OS text-search queries. Heuristic only; the Haiku verifier
-    filters bad matches downstream, so over-matching here is fine.
+    Used to build OS text-search queries. Heuristic only; WER downstream
+    filters bad matches, so over-matching here is fine.
     """
     cleaned = re.sub(r"[._]", " ", video.stem)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
@@ -228,16 +228,17 @@ def _cache_transient(key: tuple[str, str, str]):
         _failed[key] = time.time() + _TRANSIENT_RETRY_SECONDS
 
 
-# ── Two search strategies ─────────────────────────────────────────────────
+# ── Two search strategies (raw list, no LLM filter) ───────────────────────
 
-def _search_by_hash(video: Path, languages: str) -> Optional[dict]:
-    """Hash-based search. Returns the verified candidate or None."""
+def _search_raw_hash(video: Path, languages: str) -> list[dict]:
+    """Hash-based OS search. Returns the full hash-exact result list, or
+    empty on any miss / error. `moviehash_match` is uploader-claimed (not
+    server-verified), but WER downstream catches mis-tags."""
     try:
         h = _osdb_hash(video)
     except (OSError, ValueError) as e:
         print(f"[subs-finder] hash failed for {video.name!r}: {e}", flush=True)
-        return None
-
+        return []
     try:
         r = requests.get(
             f"{API_BASE}/subtitles",
@@ -249,36 +250,24 @@ def _search_by_hash(video: Path, languages: str) -> Optional[dict]:
         data = r.json().get("data") or []
     except requests.RequestException as e:
         print(f"[subs-finder] hash search failed for {video.name!r}: {e}", flush=True)
-        return None
-
+        return []
+    exact = [d for d in data if (d.get("attributes") or {}).get("moviehash_match")]
     if not data:
         print(f"[subs-finder] hash 0 results for {video.name!r} (lang={languages})", flush=True)
-        return None
-
-    # `moviehash_match` is uploader-claimed (not server-verified); Haiku
-    # downstream catches the mis-tags that this filter alone misses.
-    hash_exact = [d for d in data if (d.get("attributes") or {}).get("moviehash_match")]
-    if not hash_exact:
+    elif not exact:
         print(f"[subs-finder] hash {len(data)} results, 0 hash-exact for "
               f"{video.name!r}", flush=True)
-        return None
-
-    return verify_candidate(video, hash_exact)
+    return exact
 
 
-def _search_by_text(video: Path, languages: str) -> Optional[dict]:
-    """Text-based search using title + (year | season/episode). Returns the
-    verified candidate or None.
-
-    Useful when hash hits empty (sparse coverage for niche releases / TV).
-    The candidate's release won't match the local file, so alass is
-    needed downstream to fix timing drift.
-    """
+def _search_raw_text(video: Path, languages: str) -> list[dict]:
+    """Text-based OS search (title + S/E or year). Returns up to 10
+    results. Empty on any miss / error. Useful when hash search is
+    barren (sparse coverage for niche releases / TV)."""
     info = _parse_filename(video)
     if not info["title"]:
         print(f"[subs-finder] text: could not extract title from {video.name!r}", flush=True)
-        return None
-
+        return []
     params: dict = {"query": info["title"], "languages": languages}
     if info["season"] is not None and info["episode"] is not None:
         params["season_number"] = info["season"]
@@ -299,18 +288,16 @@ def _search_by_text(video: Path, languages: str) -> Optional[dict]:
         data = r.json().get("data") or []
     except requests.RequestException as e:
         print(f"[subs-finder] text search failed for {video.name!r}: {e}", flush=True)
-        return None
-
+        return []
     if not data:
         print(f"[subs-finder] text 0 results for {video.name!r} "
               f"(query={info['title']!r} S={info['season']} E={info['episode']} y={info['year']})", flush=True)
-        return None
+    else:
+        print(f"[subs-finder] text {len(data)} results for {video.name!r}", flush=True)
+    return data[:10]
 
-    print(f"[subs-finder] text {len(data)} results for {video.name!r}", flush=True)
-    return verify_candidate(video, data[:10])
 
-
-# ── Download a verified pick to a destination path ────────────────────────
+# ── Download one pick to a destination path ───────────────────────────────
 
 def _download_candidate(pick: dict, dest: Path) -> bool:
     """Resolve the chosen OS pick into actual SRT bytes at `dest`.
@@ -347,163 +334,66 @@ def _download_candidate(pick: dict, dest: Path) -> bool:
     return True
 
 
-# ── Public entry points: per-mode candidate fetch ─────────────────────────
+# ── Public entry point: k-try candidate iteration ─────────────────────────
 
-def find_candidate_hash(video: Path, languages: str, dest: Path) -> Optional[Path]:
-    """Fetch one hash-matched candidate SRT to `dest`. Returns `dest` on
-    success, None on any miss.
-
-    Caller is responsible for whisper-verifying the result and deciding
-    whether to promote to canonical."""
-    key = (str(video), languages, "hash")
-    if _check_cache(key):
-        return None
-
-    pick = _search_by_hash(video, languages)
-    if pick is None:
-        _cache_permanent(key)
-        return None
-
-    if not _download_candidate(pick, dest):
-        # /download endpoint is the quota-gated one; treat as transient.
-        _cache_transient(key)
-        return None
-
-    attrs = pick.get("attributes") or {}
-    print(f"[subs-finder] hash candidate written: release="
-          f"{attrs.get('release', '?')!r} → {dest.name}", flush=True)
-    return dest
-
-
-def find_candidate_text(video: Path, languages: str, dest: Path) -> Optional[Path]:
-    """Fetch one text-matched candidate SRT to `dest`. Returns `dest` on
-    success, None on any miss.
-
-    Caller is responsible for whisper-verifying the result and running
-    alass against the local audio."""
-    key = (str(video), languages, "text")
-    if _check_cache(key):
-        return None
-
-    pick = _search_by_text(video, languages)
-    if pick is None:
-        _cache_permanent(key)
-        return None
-
-    if not _download_candidate(pick, dest):
-        _cache_transient(key)
-        return None
-
-    attrs = pick.get("attributes") or {}
-    print(f"[subs-finder] text candidate written: release="
-          f"{attrs.get('release', '?')!r} → {dest.name}", flush=True)
-    return dest
-
-
-# ── Top-N variants ────────────────────────────────────────────────────────
-# Used when a paid OpenSubtitles subscription lifts the daily quota above
-# 20 (free tier). Downloads up to `top_n` metadata-passing candidates so
-# the caller can rank them by WER and pick the lowest — more resilient
-# against uploader mis-tags, forced-subs bundles, wrong-cut hits than the
-# top-1 flow. Uses `dest_pattern` with `{i}` placeholder for indexed
-# cache filenames, e.g. `_sources/<stem>.opensubtitles-hash-{i}.srt`.
-
-def _search_raw_hash(video: Path, languages: str) -> list[dict]:
-    """Same as `_search_by_hash` but returns the full hash-exact list
-    (no Haiku top-1 pick). Empty list on any miss."""
-    try:
-        h = _osdb_hash(video)
-    except (OSError, ValueError):
-        return []
-    try:
-        r = requests.get(
-            f"{API_BASE}/subtitles",
-            params={"moviehash": h, "languages": languages},
-            headers=_headers(),
-            timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json().get("data") or []
-    except requests.RequestException:
-        return []
-    return [d for d in data if (d.get("attributes") or {}).get("moviehash_match")]
-
-
-def _search_raw_text(video: Path, languages: str) -> list[dict]:
-    """Same as `_search_by_text` but returns the full result list capped
-    at 10 (no Haiku top-1 pick). Empty list on any miss."""
-    info = _parse_filename(video)
-    if not info["title"]:
-        return []
-    params: dict = {"query": info["title"], "languages": languages}
-    if info["season"] is not None and info["episode"] is not None:
-        params["season_number"] = info["season"]
-        params["episode_number"] = info["episode"]
-    elif info["year"]:
-        params["year"] = info["year"]
-    try:
-        r = requests.get(
-            f"{API_BASE}/subtitles",
-            params=params,
-            headers=_headers(),
-            timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json().get("data") or []
-    except requests.RequestException:
-        return []
-    return data[:10]
-
-
-def find_candidates_topn(
+def iter_candidates(
     video: Path,
     languages: str,
     dest_pattern: str,
     mode: str,
     top_n: int,
-) -> list[Path]:
+    accept: Callable[[Path], bool],
+) -> Optional[Path]:
     """Fetch up to `top_n` OpenSubtitles candidates for `mode` ('hash' or
-    'text') and write them to `dest_pattern.format(i=1..N)`. Returns list
-    of successfully written paths.
+    'text'), running `accept(cand_srt)` after each download. Returns the
+    first path where `accept` returns True. Returns None if no candidate
+    passes (or the search is barren / quota-exhausted).
 
-    No Haiku metadata pre-filter — WER downstream is the trust gate;
-    quota economics for top-N assume a paid subscription. Existing
-    indexed files are reused as-is (cache-friendly, same as top-1 flow's
-    single-file dest check).
+    K-try semantics: downloads one at a time and stops as soon as
+    something passes — quota-friendly vs top-K download-all. Existing
+    indexed files on disk are reused as-is and re-evaluated (cache-
+    friendly for restarts).
 
-    24h transient cache is set if EVERY download attempt failed
-    (typical: HTTP 406 quota exhausted). Permanent cache is NOT set even
-    when top_n candidates all miss — a partial success doesn't mean the
-    (video, mode) tuple is permanently barren.
+    `dest_pattern` uses `{i}` placeholder for the indexed path,
+    e.g. `_sources/<stem>.opensubtitles-hash-{i}.srt`.
+
+    Cache behavior:
+    - Barren search / API meltdown → permanent cache (empty result list)
+    - Every download attempt failed but search had results → transient
+      24h cache (quota exhaustion is the typical cause)
+    - Someone passed → no cache set (the caller wins this round)
     """
+    key = (str(video), languages, mode)
+    if _check_cache(key):
+        return None
+
     if mode == "hash":
         raw = _search_raw_hash(video, languages)
     elif mode == "text":
         raw = _search_raw_text(video, languages)
     else:
-        return []
-    if not raw:
-        return []
+        return None
 
-    key = (str(video), languages, mode)
+    if not raw:
+        _cache_permanent(key)
+        return None
+
     picks = raw[:top_n]
-    written: list[Path] = []
-    all_failed = True
+    any_materialized = False
     for i, pick in enumerate(picks, 1):
         dest = Path(dest_pattern.format(i=i))
-        if dest.exists():
-            written.append(dest)
-            all_failed = False
-            continue
-        if _download_candidate(pick, dest):
-            written.append(dest)
-            all_failed = False
+        if not dest.exists():
+            if not _download_candidate(pick, dest):
+                continue
             attrs = pick.get("attributes") or {}
-            print(f"[subs-finder] {mode} top-{i} candidate written: release="
+            print(f"[subs-finder] {mode} #{i} downloaded: release="
                   f"{attrs.get('release', '?')!r} → {dest.name}", flush=True)
+        any_materialized = True
+        if accept(dest):
+            return dest
 
-    if all_failed and not written:
-        # Complete quota / API meltdown → transient cache so we don't
-        # burn more quota next tick.
+    if not any_materialized:
+        # Search had results but every download attempt failed — quota
+        # meltdown is the typical cause.
         _cache_transient(key)
-    return written
+    return None

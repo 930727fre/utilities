@@ -9,7 +9,7 @@ tasks._pick_bundled).
 When a torrent finishes (no `.aria2` control files left under the
 wrapper), call `filter_wrapper(wrapper)`. The pass does two things:
 
-  1. ONE Haiku call decides per video:
+  1. ONE Sonnet call decides per video:
        - canonical Jellyfin-friendly title / year / (season, episode for TV)
        - which directories are bonus content (featurettes, behind-the-
          scenes, deleted scenes, etc.) so their videos get skipped
@@ -75,7 +75,7 @@ VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 # with multilingual Subs/ subfolders comfortably.
 MAX_TREE_ENTRIES = 200
 
-_MODEL = os.environ.get("ANTHROPIC_FILTER_MODEL", "claude-haiku-4-5-20251001")
+_MODEL = os.environ.get("ANTHROPIC_FILTER_MODEL", "claude-sonnet-4-6")
 
 _SCHEMA = {
     "type": "object",
@@ -172,8 +172,8 @@ def _build_tree(wrapper: Path) -> list[str]:
 
     Lists folders and files (with sizes) so the LLM has the structural
     context it needs to spot bonus directories. SRT cue counts /
-    previews are deliberately omitted — Haiku doesn't pick subtitles
-    any more; the downstream WER gate decides which `.srt` matches
+    previews are deliberately omitted — bt_filter doesn't pick
+    subtitles; the downstream WER gate decides which `.srt` matches
     which video by content."""
     lines: list[str] = []
     count = 0
