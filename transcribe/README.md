@@ -20,7 +20,7 @@ For the yt + bt branches, Claude annotation runs automatically once a transcript
 | Downloader | `yt-dlp` (yt) + one-shot `aria2c` subprocess per magnet (bt, 1440 min / ratio 1.0 seed limits) |
 | Transcriber | Client-side `ffmpeg -vn -ac 1 -ar 16000` to a small AAC file, then HTTP POST to the shared [whisper](../whisper) service (`faster-whisper-large-v3-turbo`). Pre-transcoding keeps uploads uniformly ~30-50 MB regardless of source size — avoids sporadic connection drops observed on multi-GB Blu-ray mkv uploads |
 | Annotator | Claude (sonnet) via tool-use, chunked by cue count |
-| Main-feature classifier | Claude (sonnet) at bt_filter time — one call per torrent: assigns each video its canonical title / year / S+E and flags bonus-content directories. Subtitle selection is NOT bt_filter's job — the WER gate downstream handles "is this `.srt` the right one for this video" via content match |
+| Main-feature classifier | Claude (opus) at bt_filter time — one call per torrent regardless of episode count. For single-show TV packs the LLM returns series title / year + a Python regex; code applies the regex to every filename in the wrapper (Friends full 10 seasons = 240 episodes handled in one LLM call). For movies / mixed collections the LLM enumerates per-video. Subtitle selection is NOT bt_filter's job — the WER gate downstream handles "is this `.srt` the right one for this video" via content match |
 | Subs finder | `ffmpeg` + `ffprobe` (container-agnostic stream probe + extraction — mkv SubRip, mp4 mov_text, WebM WebVTT all land as SubRip via `-c:s srt`) + `pgsrip` + `tesseract-ocr` (OCR for PGS bitmap subtitle tracks — covers Blu-ray releases like Chernobyl that only mux PGS) + OpenSubtitles REST API (hash + text searches). Container-extracted sources are preferred — same source as the video, byte-perfect timing |
 | Content verifier | `jiwer` — word error rate (WER) between each candidate's full transcript and the whisper ground-truth transcript. Same library the whisper / Common Voice / ASR-eval ecosystem uses; calibrated threshold (≤ 0.5) from the literature. The whisper SRT IS the trust gate; candidates only become the canonical SRT after passing. Pollution-window scrubbing salvages partially-hallucinated whisper (see the polluted-scrub explainer in the pipeline section below) |
 | Subs sync | `alass` — Rust binary that does piecewise drift detection on the video's audio + candidate's cues, aligning each segment independently. Picked over ffsubsync because it can handle releases that differ in cold-open / recap structure (not just uniform offset drift). Only runs for candidates whose timing isn't already correct (bundled / OS); the embedded extraction path skips alass entirely |
@@ -106,7 +106,7 @@ YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for
 Prereqs:
 - External Docker network `my_network`.
 - The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
-- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet), bt_filter's main-feature classifier (Sonnet), and the polluted-whisper plot-check fallback (Opus + web search — rare invocation, but Opus is what recalls specific episode plots reliably; Haiku and Gemini were tested and failed on episode-level discrimination).
+- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet), bt_filter's main-feature classifier (Opus + web search — one call per torrent, generates a regex for TV packs so token/episode-count is decoupled), and the polluted-whisper plot-check fallback (Opus + web search — rare invocation, but Opus is what recalls specific episode plots reliably; Haiku and Gemini were tested and failed on episode-level discrimination).
 - `GEMINI_API_KEY` exported — required for the bt "translate to 中" button (10-cue Gemini Flash Lite batches). Get one at https://aistudio.google.com/apikey.
 - `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
 
@@ -162,9 +162,21 @@ Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` / `ANNOTATING` jobs flip to `
 Whisper is the ground-truth listening reference; scraped subtitles are "literary upgrades" we accept only after they prove they're subtitling the same audio. Each stage's output is cached under `/artifact/_sources/`, so any partial progress survives crashes / restarts — the pipeline picks up at the first stage whose output is missing.
 
 ```
-1. bt_filter (Sonnet, one call per wrapper, at torrent-finish time)
+1. bt_filter (Opus + web_search, one call per wrapper, at torrent-finish time)
+     LLM sees a compact structural summary of the wrapper (top-level
+     folders + video counts + 2 sample filenames per folder) and picks
+     a mode:
+       - "tv_regex" (single-show TV pack): returns series_title +
+         series_year + a Python regex with (?P<season>...) and
+         (?P<episode>...) named groups. Code applies the regex to
+         every video filename in the wrapper; each match yields a
+         canonical TV path. Handles arbitrarily large packs (Friends
+         full 10 seasons = 240 episodes in one LLM call).
+       - "per_video" (movie / mixed collection): returns a
+         main_features[] list with per-video title/year/kind/S+E.
+     Both modes also return bonus_dirs (Extras, Featurettes, etc.)
+     whose videos are excluded from hardlinking.
      → hardlinks main-feature videos into Movies/ or TV/
-     → tags bonus directories (so their videos get skipped)
      (subtitles NOT touched here — discovered at step 3)
 
 2. whisper (HTTP to shared service, GPU-gated)
