@@ -508,25 +508,27 @@ async def submit_magnet(req: BtMagnetRequest):
 
 @app.get("/api/bt/torrents")
 async def list_torrents():
-    """Proxy the aria2 sidecar's GET /torrents. Response body is
-    passed through verbatim (list of `{name, phase, progress?}`).
-
-    Sidecar-unreachable fallback: list wrapper folder names off the
-    shared /bt bind-mount ourselves and mark every entry as
-    `orphaned`. Wrapper names are truthfully known here; only the
-    live phase / progress lives in aria2's in-memory subprocess
-    registry, and `orphaned` is exactly the phase for "wrapper exists
-    but no subprocess". Frontend renders this the same way it would
-    a truly-orphaned wrapper. Prevents the bt tab's torrents grid
-    from vanishing during aria2 restarts / VPN reconnects."""
+    """Bt-tab poll endpoint. Returns `{aria2_up, torrents}`:
+      - aria2_up: bool — is the sidecar reachable right now? Frontend
+        uses this to disable the magnet input + submit button when
+        false, since new torrent submission has no local fallback
+        (aria2c is only installed in the sidecar).
+      - torrents: [{name, phase, progress?}, ...] — live from aria2 if
+        it's up, else a filesystem-only fallback listing off the
+        shared /bt bind-mount with every entry marked
+        `phase=orphaned`. Wrapper names are truthfully known locally;
+        only live phase / progress lives in the sidecar's in-memory
+        subprocess registry, and `orphaned` is the existing phase for
+        "wrapper exists but no subprocess", so the frontend renders
+        this uniformly with a genuinely orphaned wrapper."""
     try:
         r = _aria2_client.get("/torrents")
         r.raise_for_status()
-        return r.json()
+        return {"aria2_up": True, "torrents": r.json()}
     except httpx.HTTPError as exc:
         print(f"[list_torrents] aria2 sidecar unreachable ({exc}); "
               f"falling back to local /bt listing", flush=True)
-        return _fallback_list_torrents()
+        return {"aria2_up": False, "torrents": _fallback_list_torrents()}
 
 
 def _fallback_list_torrents() -> list[dict]:

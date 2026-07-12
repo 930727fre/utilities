@@ -65,6 +65,9 @@ const PHASE_TITLE = {
 export default function Bt() {
   const [items, setItems] = useState([])
   const [torrents, setTorrents] = useState([])
+  // Optimistic default — until the first poll tells us otherwise we
+  // assume aria2 is up, so the initial paint doesn't flash "disabled".
+  const [aria2Up, setAria2Up] = useState(true)
   const [magnet, setMagnet] = useState('')
   const [expanded, setExpanded] = useState(() => new Set())
   const [expandedRows, setExpandedRows] = useState(() => new Set())
@@ -72,14 +75,18 @@ export default function Bt() {
 
   async function refresh() {
     // Decoupled — listBt (transcribe local filesystem) and listTorrents
-    // (aria2 sidecar) succeed or fail independently. If aria2 is down
-    // the items list still updates so canonical videos stay visible +
-    // manageable, and only the torrent grid appears empty.
+    // (aria2 sidecar via transcribe proxy) succeed or fail
+    // independently. Items list still updates when aria2 is down.
     const [libRes, tRes] = await Promise.allSettled([listBt(), listTorrents()])
     if (libRes.status === 'fulfilled') setItems(libRes.value)
     else console.error('listBt failed:', libRes.reason)
-    if (tRes.status === 'fulfilled') setTorrents(tRes.value)
-    else console.error('listTorrents failed:', tRes.reason)
+    if (tRes.status === 'fulfilled') {
+      // Envelope: {aria2_up, torrents}
+      setTorrents(tRes.value.torrents)
+      setAria2Up(tRes.value.aria2_up)
+    } else {
+      console.error('listTorrents failed:', tRes.reason)
+    }
   }
 
   useEffect(() => {
@@ -281,13 +288,19 @@ export default function Bt() {
         <input
           className="magnet-input"
           type="text"
-          placeholder="Paste a magnet: link…"
+          placeholder={aria2Up ? "Paste a magnet: link…" : "aria2 sidecar unreachable — new torrents disabled"}
           value={magnet}
           onChange={e => setMagnet(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') handleSubmit() }}
-          style={styles.magnetInput}
+          onKeyDown={e => { if (e.key === 'Enter' && aria2Up) handleSubmit() }}
+          disabled={!aria2Up}
+          style={{ ...styles.magnetInput, ...(aria2Up ? {} : styles.disabledInput) }}
+          title={aria2Up ? '' : 'aria2 sidecar is down — start it (utilities/aria2/) to submit new magnets'}
         />
-        <button onClick={handleSubmit} title="Submit" aria-label="Submit" style={styles.submitBtn}>
+        <button onClick={handleSubmit}
+          disabled={!aria2Up}
+          title={aria2Up ? 'Submit' : 'aria2 sidecar is down'}
+          aria-label="Submit"
+          style={{ ...styles.submitBtn, ...(aria2Up ? {} : styles.disabledBtn) }}>
           →
         </button>
       </div>
@@ -480,6 +493,9 @@ const styles = {
   },
   disabledBtn: {
     opacity: 0.3, cursor: 'not-allowed',
+  },
+  disabledInput: {
+    opacity: 0.4, cursor: 'not-allowed',
   },
 
   empty: { color: '#636366', textAlign: 'center', marginTop: 60, fontSize: 14 },
