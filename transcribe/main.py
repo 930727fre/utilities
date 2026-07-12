@@ -509,13 +509,38 @@ async def submit_magnet(req: BtMagnetRequest):
 @app.get("/api/bt/torrents")
 async def list_torrents():
     """Proxy the aria2 sidecar's GET /torrents. Response body is
-    passed through verbatim (list of `{name, phase, progress?}`)."""
+    passed through verbatim (list of `{name, phase, progress?}`).
+
+    Sidecar-unreachable fallback: list wrapper folder names off the
+    shared /bt bind-mount ourselves and mark every entry as
+    `orphaned`. Wrapper names are truthfully known here; only the
+    live phase / progress lives in aria2's in-memory subprocess
+    registry, and `orphaned` is exactly the phase for "wrapper exists
+    but no subprocess". Frontend renders this the same way it would
+    a truly-orphaned wrapper. Prevents the bt tab's torrents grid
+    from vanishing during aria2 restarts / VPN reconnects."""
     try:
         r = _aria2_client.get("/torrents")
         r.raise_for_status()
+        return r.json()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"aria2 sidecar unreachable: {exc}")
-    return r.json()
+        print(f"[list_torrents] aria2 sidecar unreachable ({exc}); "
+              f"falling back to local /bt listing", flush=True)
+        return _fallback_list_torrents()
+
+
+def _fallback_list_torrents() -> list[dict]:
+    """Local /bt walk used when the aria2 sidecar is unreachable.
+    Wrappers get phase=orphaned uniformly — we can't tell downloading
+    from seeding without aria2's Popen dict, and both are meaningless
+    without a live subprocess anyway."""
+    if not BT_ROOT.exists():
+        return []
+    return [
+        {"name": w.name, "phase": "orphaned"}
+        for w in sorted(BT_ROOT.iterdir())
+        if w.is_dir()
+    ]
 
 
 def _extract_detail(r: httpx.Response) -> str | None:
