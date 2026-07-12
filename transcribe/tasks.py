@@ -22,7 +22,6 @@ from archive import (
 from bt_filter import (
     ARTIFACT_ROOT,
     BT_ROOT,
-    PROCESSED_DIR,
     _sources_path,
 )
 from gpu_lock import gpu_lock
@@ -500,43 +499,25 @@ def _video_duration_seconds(video: Path) -> float | None:
 
 def _find_bt_wrapper(canonical_video: Path) -> Path | None:
     """Reverse-lookup the /bt/<wrapper>/ directory a canonical video was
-    hardlinked from. Two strategies:
+    hardlinked from, by inode identity.
 
-      1. Read the `_processed/<wrapper>.filtered` sentinels (their content
-         is the canonical-path manifest bt_filter wrote). The sentinel's
-         filename is the sanitized wrapper name.
+    Canonical /artifact/... and /bt/<wrapper>/.../<video> share an inode
+    (bt_filter uses os.link, not copy), so a matching inode is a
+    byte-level guarantee they're the same file. We walk /bt until we
+    find that inode and return the top-level wrapper.
 
-      2. Fallback: walk /bt and find any file with matching inode (since
-         canonical is a hardlink of the bt-side file). Slower but robust
-         when sanitization changed the wrapper name on the sentinel side.
-    """
-    try:
-        rel_str = str(canonical_video.relative_to(ARTIFACT_ROOT))
-    except ValueError:
-        return None
+    Cost: O(files-in-/bt) per call, but only invoked once per bundled-
+    tier lookup (result flows through `_pick_bundled`, cached
+    downstream via `_sources/<stem>.bundled.srt`). For a library on
+    the order of thousands of bt files the walk is sub-second on SSD,
+    which is negligible next to whisper's per-episode runtime.
 
-    if PROCESSED_DIR.exists():
-        for sentinel in PROCESSED_DIR.glob("*.filtered"):
-            try:
-                text = sentinel.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            if rel_str in text.splitlines():
-                wrapper = BT_ROOT / sentinel.stem
-                if wrapper.is_dir():
-                    return wrapper
-                # Sanitization changed the on-disk name — fall through
-                # to inode lookup.
-                break
-
-    return _find_bt_wrapper_by_inode(canonical_video)
-
-
-def _find_bt_wrapper_by_inode(canonical_video: Path) -> Path | None:
-    """Walk /bt looking for a file with the same inode as `canonical_video`
-    (they share an inode because /artifact is a hardlink of /bt). The
-    found file's top-level wrapper dir is the answer. Falls back to None
-    if no match (orphaned canonical, /bt cleaned up, etc.)."""
+    Rejected alternative: name-based sentinel lookup (parse
+    `_processed/<wrapper>.filtered` content, use `sentinel.stem` as
+    wrapper name). Was O(1)-per-sentinel but fragile — wrapper renames,
+    sanitization mismatches, and LLM canonical drift all broke it and
+    required inode fallback anyway. Simpler to skip the name path
+    entirely."""
     try:
         target_inode = canonical_video.stat().st_ino
     except OSError:
