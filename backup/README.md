@@ -35,7 +35,8 @@ Use a **User API token** with **Admin Read & Write** permission. "Object Read & 
 ## Notes
 
 - Data directories are mounted read-write because SQLite WAL mode requires creating a `.db-shm` file alongside the database even for read operations. `sqlite3 .backup` does not modify the source database.
-- marker-pipeline outputs are downloaded zips, not persistent state — not backed up here. transcribe / keyboard outputs are similarly reproducible from source (YouTube URL re-pull, vocab list re-edit) and intentionally excluded.
+- marker-pipeline outputs are downloaded zips, not persistent state — not backed up here. keyboard outputs are similarly reproducible from source (vocab list re-edit) and intentionally excluded.
+- transcribe is a partial backup: only `data/archive/` (canonical SRT store) goes up as `transcribe-archive`. `data/bt/` videos are large and re-fetchable from the original torrents; `data/artifact/` shares inodes with `data/bt/` via bt_filter's hardlinks (not a separate state); `_sources/` is intermediate pipeline cache. Archive is the only irrecoverable slice — each SRT there cost a Sonnet annotation pass (~$0.05), so re-annotating a full library would be tens of dollars.
 
 ## Deploy
 
