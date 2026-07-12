@@ -71,13 +71,15 @@ export default function Bt() {
   const submittingRef = useRef(false)
 
   async function refresh() {
-    try {
-      const [lib, t] = await Promise.all([listBt(), listTorrents()])
-      setItems(lib)
-      setTorrents(t)
-    } catch (e) {
-      console.error(e)
-    }
+    // Decoupled — listBt (transcribe local filesystem) and listTorrents
+    // (aria2 sidecar) succeed or fail independently. If aria2 is down
+    // the items list still updates so canonical videos stay visible +
+    // manageable, and only the torrent grid appears empty.
+    const [libRes, tRes] = await Promise.allSettled([listBt(), listTorrents()])
+    if (libRes.status === 'fulfilled') setItems(libRes.value)
+    else console.error('listBt failed:', libRes.reason)
+    if (tRes.status === 'fulfilled') setTorrents(tRes.value)
+    else console.error('listTorrents failed:', tRes.reason)
   }
 
   useEffect(() => {
