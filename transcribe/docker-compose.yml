@@ -27,6 +27,12 @@ services:
       # #2, etc.). `:-1` keeps it optional; default 1 is single-slot
       # k-try.
       - OS_MAX_TRIES=${OS_MAX_TRIES:-1}
+      # BT_PIPELINE_ENABLED: default 1 = normal (bt_filter LLM + hardlink,
+      # whisper, annotation, everything). Set to 0 to make the container
+      # a pure aria2 downloader — auto-loops go idle, downloads and
+      # seeding still work, manual buttons (retry, translate-zh,
+      # upgrade-english) still work. For a "download-only" period.
+      - BT_PIPELINE_ENABLED=${BT_PIPELINE_ENABLED:-1}
     restart: unless-stopped
     networks:
       - default

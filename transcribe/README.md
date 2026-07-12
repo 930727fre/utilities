@@ -112,6 +112,7 @@ Prereqs:
 
 Optional:
 - `OS_MAX_TRIES` (default 1) — with a paid OpenSubtitles subscription that lifts daily quota well above 20, set this to 3–5 to k-try the top-N raw OS results per tier (download one, WER-check, first passer wins; stops early). Free-tier users leave this at 1 — even one bad hit per episode chews through 20 downloads fast. Indexed downloads land at `_sources/<stem>.opensubtitles-<mode>-<i>.srt`; the winner is copied to `_sources/<stem>.opensubtitles-<mode>.srt` for the outer pipeline.
+- `BT_PIPELINE_ENABLED` (default 1) — set to 0 to make transcribe a **pure aria2 downloader**: torrents keep downloading and seeding, `.filtered` sentinels are NOT written, nothing is hardlinked into `/artifact`, and whisper / annotation / OS lookup / plot-check are all skipped. For a "just fill up bt/ for a while" period. Manual UI buttons (retry, translate-zh, upgrade-english) deliberately bypass the switch — they express explicit user intent. Set back to 1 and `docker compose up -d` to resume; the scan loop picks up every finished-but-un-filtered wrapper on the next tick.
 
 All five required vars use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
 

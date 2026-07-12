@@ -48,6 +48,17 @@ VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 MTIME_GRACE_SECONDS = 60
 BT_SCAN_INTERVAL = 30
 
+# Master switch for the automatic scan loop that runs bt_filter (LLM
+# classification + hardlink to /artifact) and queues the downstream
+# whisper / annotation pipeline. When 0, both auto-loops early-return
+# and the container becomes a pure aria2 harness: torrents download and
+# seed as usual, but nothing else happens. Manual endpoints
+# (`/api/bt/transcribe`, `/api/bt/retry`, `/api/bt/translate-zh`,
+# `/api/bt/upgrade-english`) still work — user-triggered actions
+# deliberately bypass the switch since they express explicit intent.
+# Default 1 (normal behavior). Set 0 for a "download-only" period.
+BT_PIPELINE_ENABLED = os.environ.get("BT_PIPELINE_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off", "")
+
 # State model: file existence alone — no marker reads, no jobs.json
 # overlay. canonical SRT exists = the pipeline finished verifying +
 # annotating; <stem>.whisper-failed sidecar = pipeline halted at
@@ -892,7 +903,13 @@ def _queue_pending_bt_work():
     Manual SRT drops at the canonical path are accepted as final — pipeline
     won't touch them. Drop into `_sources/<stem>.bundled.srt` instead if
     you want the content gate to evaluate your candidate before promotion.
+
+    Global BT_PIPELINE_ENABLED gate: when set to 0, both this loop and
+    the filter loop short-circuit — the container becomes a pure aria2
+    downloader. See BT_PIPELINE_ENABLED docstring for the rationale.
     """
+    if not BT_PIPELINE_ENABLED:
+        return
     _run_pending_filter()
     items = _scan_bt()
     jobs = read_jobs()
@@ -917,6 +934,9 @@ def _queue_pending_bt_work():
 
 async def _bt_work_loop():
     """Periodically scan /bt for files needing whisper or annotation, and queue them."""
+    if not BT_PIPELINE_ENABLED:
+        print("[bt-work-loop] BT_PIPELINE_ENABLED=0 — filter + pipeline halted; "
+              "downloads still active. Set to 1 and restart to resume.", flush=True)
     while True:
         try:
             await asyncio.to_thread(_queue_pending_bt_work)
