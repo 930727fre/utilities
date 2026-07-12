@@ -14,7 +14,6 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-import bt_torrents
 from bt_filter import (
     ARTIFACT_ROOT,
     BT_ROOT,
@@ -35,6 +34,11 @@ from translator import translate_video_zh, translator_executor
 from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
+# aria2 subprocess management lives in a separate container so BT traffic
+# routes through PIA gluetun VPN while all other transcribe API calls
+# stay on my_network direct. See utilities/aria2/ for the service.
+ARIA2_URL = os.environ.get("ARIA2_URL", "http://aria2-gluetun:8080")
+_aria2_client = httpx.Client(base_url=ARIA2_URL, timeout=30.0)
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
 # bt mode scans only /app/data/artifact. yt-tab files in DOWNLOADS_DIR
@@ -149,9 +153,10 @@ async def lifespan(app: FastAPI):
     if changed:
         write_jobs(jobs)
 
-    # Re-spawn aria2c for any wrapper that has a half-finished download
-    # (a `.aria2` control file present from before the container restart).
-    bt_torrents.resume_all()
+    # aria2 subprocess lifecycle (resume-in-flight, kill-on-shutdown)
+    # lives in the utilities/aria2 sidecar container now — its own
+    # FastAPI lifespan handles resume_all() at startup and shutdown()
+    # at teardown. Nothing for us to do here.
 
     annotation_loop_task = asyncio.create_task(_bt_work_loop())
 
@@ -161,7 +166,7 @@ async def lifespan(app: FastAPI):
         annotation_loop_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         translator_executor.shutdown(wait=False, cancel_futures=True)
-        bt_torrents.shutdown()
+        _aria2_client.close()
         # Free any GPU leases still held — the broker has no TTL, so without
         # this a SIGTERM mid-whisper leaves the next acquire blocked forever.
         release_all_held()
@@ -485,23 +490,45 @@ class BtMagnetRequest(BaseModel):
 
 @app.post("/api/bt/magnet", status_code=201)
 async def submit_magnet(req: BtMagnetRequest):
-    """Spawn a one-shot aria2c subprocess for this magnet. The torrent
-    lives entirely in the subprocess's lifetime + the per-torrent wrapper
-    folder under /bt; nothing is persisted in jobs.json."""
+    """Proxy to the aria2 sidecar's POST /torrents so BT traffic exits
+    through gluetun's VPN tunnel. Response body is passed through
+    verbatim (currently `{"wrapper": "..."}`)."""
     if not req.magnet.startswith("magnet:"):
         raise HTTPException(status_code=400, detail="must be a magnet: URI")
     try:
-        wrapper = bt_torrents.submit(req.magnet)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"aria2c launch failed: {exc}")
-    return {"wrapper": wrapper}
+        r = _aria2_client.post("/torrents", json={"magnet": req.magnet})
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"aria2 sidecar unreachable: {exc}")
+    if r.status_code >= 400:
+        detail = _extract_detail(r) or f"aria2 sidecar returned {r.status_code}"
+        raise HTTPException(status_code=r.status_code, detail=detail)
+    return r.json()
 
 
 @app.get("/api/bt/torrents")
 async def list_torrents():
-    """One entry per wrapper folder under /bt, phase derived live from
-    aria2c's `.aria2` control file + the subprocess registry."""
-    return bt_torrents.list_torrents()
+    """Proxy the aria2 sidecar's GET /torrents. Response body is
+    passed through verbatim (list of `{name, phase, progress?}`)."""
+    try:
+        r = _aria2_client.get("/torrents")
+        r.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"aria2 sidecar unreachable: {exc}")
+    return r.json()
+
+
+def _extract_detail(r: httpx.Response) -> str | None:
+    """Try to lift `detail` out of an httpx JSON error response body,
+    falling back to raw text (truncated)."""
+    try:
+        body = r.json()
+    except ValueError:
+        return (r.text or "")[:300] or None
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, str):
+            return detail
+    return None
 
 
 # Top-level dirs under /artifact that the cleanup walk must NOT delete
@@ -635,8 +662,17 @@ async def delete_torrent(wrapper: str):
                    f"wait for finish or delete the job first",
         )
 
-    # Kill aria2 + rmtree /bt/<wrapper>/.
-    bt_torrents.delete(wrapper)
+    # Kill aria2 subprocess (via the sidecar) + rmtree /bt/<wrapper>/.
+    # Sidecar failure isn't fatal: canonical/_sources/sentinel cleanup
+    # below still runs, and the wrapper stays for the user to inspect.
+    try:
+        r = _aria2_client.delete(f"/torrents/{wrapper}")
+        if r.status_code >= 400 and r.status_code != 404:
+            print(f"[delete_torrent] aria2 sidecar returned {r.status_code} "
+                  f"for {wrapper!r}: {r.text[:200]}", flush=True)
+    except httpx.HTTPError as exc:
+        print(f"[delete_torrent] aria2 sidecar unreachable while deleting "
+              f"{wrapper!r}: {exc}", flush=True)
 
     # Unlink everything the plan listed (canonical + _sources/ + sentinel).
     for p in plan["canonical_files"] + plan["sources_files"]:

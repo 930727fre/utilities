@@ -4,16 +4,22 @@ Design contract:
   * No daemon, no RPC, no shared session state. Every magnet submission
     is a fresh `aria2c` subprocess that lives just long enough to download
     + seed under our limits, then exits.
-  * State is read from two places only — the filesystem under `/bt` (the
-    per-torrent wrapper folders + aria2c's `.aria2` control file) and an
-    in-memory dict of running subprocesses. Container restart clears the
-    in-memory dict and kills the subprocesses; users notice via UI rather
-    than state corruption.
-  * Each torrent lands in its own per-torrent wrapper folder under `/bt`
-    regardless of single- vs multi-file, derived from the magnet's `dn=`
-    parameter. DELETE always rmtree's the wrapper.
+  * State is read from two places only — the filesystem under `/data/bt`
+    (the per-torrent wrapper folders + aria2c's `.aria2` control file)
+    and an in-memory dict of running subprocesses. Container restart
+    clears the in-memory dict and kills the subprocesses; users notice
+    via UI rather than state corruption.
+  * Each torrent lands in its own per-torrent wrapper folder under
+    `/data/bt` regardless of single- vs multi-file, derived from the
+    magnet's `dn=` parameter. DELETE always rmtree's the wrapper.
+  * Aria2c is spawned with `--listen-port=<PIA-forwarded-port>` so BT
+    peers can actually reach us for seeding through the VPN. The port
+    is read from `/gluetun-shared/forwarded_port` — gluetun writes it
+    after the tunnel establishes. Zero-configuration on our side; if
+    the file isn't there (VPN just came up, gluetun restarted), we
+    fall back to aria2c's default and log the fact.
 
-Why no `.sh` on-bt-download-complete hook this time: aria2c writes a
+Why no `.sh` on-bt-download-complete hook: aria2c writes a
 `<file>.aria2` control file while a download is in flight and deletes it
 the moment all pieces are verified. That's a clean filesystem-level
 "download done" signal we can read directly — no callback plumbing.
@@ -26,7 +32,11 @@ import threading
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-BT_LIBRARY = Path("/app/data/bt")
+BT_LIBRARY = Path("/data/bt")
+
+# gluetun writes the PIA-forwarded port here after the tunnel comes up.
+# The compose file bind-mounts gluetun's /tmp/gluetun into this path.
+FORWARDED_PORT_FILE = Path("/gluetun-shared/forwarded_port")
 
 # Seed limits applied to every torrent. aria2c exits when either limit is hit.
 SEED_TIME_MIN = 1440
@@ -62,10 +72,10 @@ def _safe_folder(name: str) -> str:
 
 
 def _pick_wrapper_dir(magnet: str) -> Path:
-    """Pick a free per-torrent wrapper folder under /bt for this magnet.
+    """Pick a free per-torrent wrapper folder under /data/bt for this magnet.
 
     Always puts the download inside its own folder so single-file torrents
-    don't dump their .mkv + sidecar SRT loose at /bt root. Disambiguates
+    don't dump their .mkv + sidecar SRT loose at /data/bt root. Disambiguates
     against an existing folder with the same dn= by appending ` (2)`,
     ` (3)`, ... in case the user re-submits the same magnet or two
     different torrents share a dn=.
@@ -78,6 +88,27 @@ def _pick_wrapper_dir(magnet: str) -> Path:
         i += 1
     candidate.mkdir(parents=True, exist_ok=True)
     return candidate
+
+
+# ── PIA forwarded port ────────────────────────────────────────────────────
+
+def _read_forwarded_port() -> int | None:
+    """Read gluetun's PIA-forwarded port for use with aria2c
+    `--listen-port`. Returns None if the file isn't there (VPN just
+    starting up, gluetun still handshaking) — caller falls back to
+    aria2c's default and accepts that seeding may be limited until
+    the port file appears on the next spawn."""
+    try:
+        text = FORWARDED_PORT_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        port = int(text)
+    except ValueError:
+        return None
+    if not (1024 <= port <= 65535):
+        return None
+    return port
 
 
 # ── Submit / list / delete ─────────────────────────────────────────────────
@@ -95,15 +126,23 @@ def _spawn(wrapper: Path, source: str) -> None:
         "--enable-color=false",
         "--console-log-level=warn",
         "--summary-interval=0",
-        source,
     ]
+    port = _read_forwarded_port()
+    if port is not None:
+        cmd.append(f"--listen-port={port}")
+    else:
+        print(f"[aria2c {wrapper.name[:30]}] no PIA forwarded port available; "
+              f"seeding will be reachability-limited until gluetun writes "
+              f"the port file", flush=True)
+    cmd.append(source)
+
     proc = subprocess.Popen(
         cmd,
         # stdout: aria2c's progress spam isn't worth surfacing in our logs.
         stdout=subprocess.DEVNULL,
         # stderr: aria2c writes real errors (dead trackers, hash mismatches,
         # "no peers" complaints) here. Pipe through a drain thread into
-        # transcribe-app's own log so a stuck / failed torrent is at least
+        # aria2-app's own log so a stuck / failed torrent is at least
         # visible to `docker logs`.
         stderr=subprocess.PIPE,
         # Detach from our stdin so a SIGHUP / pipe-close to the parent
@@ -138,7 +177,7 @@ def resume_all() -> None:
     """Restart aria2c for every wrapper that has an in-flight `.aria2`
     control file but no live subprocess.
 
-    Called during transcribe-app's startup lifespan. Container restart
+    Called during aria2-app's startup lifespan. Container restart
     killed the previous subprocesses (PID 1 of the container died, kernel
     cleaned up the namespace), but aria2c left two things behind: the
     partial output files + `<file>.aria2` control file (its own resume
@@ -237,7 +276,7 @@ def _phase(wrapper: Path, proc: subprocess.Popen | None) -> str:
 
 
 def list_torrents() -> list[dict]:
-    """One entry per wrapper folder under /qb."""
+    """One entry per wrapper folder under /data/bt."""
     out = []
     if not BT_LIBRARY.exists():
         return out
@@ -281,7 +320,7 @@ def delete(wrapper_name: str) -> None:
             proc.kill()
 
     wrapper = (BT_LIBRARY / wrapper_name).resolve()
-    # Safety: never touch anything outside /qb.
+    # Safety: never touch anything outside /data/bt.
     try:
         wrapper.relative_to(BT_LIBRARY.resolve())
     except ValueError:

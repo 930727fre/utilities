@@ -33,6 +33,10 @@ services:
       # seeding still work, manual buttons (retry, translate-zh,
       # upgrade-english) still work. For a "download-only" period.
       - BT_PIPELINE_ENABLED=${BT_PIPELINE_ENABLED:-1}
+      # aria2 subprocess sidecar (utilities/aria2/) — BT peer/tracker
+      # traffic exits through PIA VPN over there; we only talk REST via
+      # my_network. Override if the sidecar container name differs.
+      - ARIA2_URL=${ARIA2_URL:-http://aria2-gluetun:8080}
     restart: unless-stopped
     networks:
       - default
