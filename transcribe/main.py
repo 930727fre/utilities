@@ -321,13 +321,48 @@ class BtTranscribeRequest(BaseModel):
     path: str
 
 
+def _bt_inode_map() -> dict[int, str]:
+    """Build {inode → bt wrapper name} by walking /bt once.
+
+    Canonical videos in /artifact share inodes with their bt-side
+    originals (bt_filter uses `os.link`), so an inode match is a
+    byte-level identity between the two paths. Called once per
+    `_scan_bt` invocation and consulted per-video for O(1) wrapper
+    attribution — beats calling `_find_bt_wrapper` per video, which
+    would rewalk /bt each time.
+
+    Empty map if /bt doesn't exist or is empty; per-video code treats
+    missing wrapper as "unknown" without failing."""
+    out: dict[int, str] = {}
+    if not BT_ROOT.exists():
+        return out
+    for wrapper in BT_ROOT.iterdir():
+        if not wrapper.is_dir():
+            continue
+        for entry in wrapper.rglob("*"):
+            try:
+                if entry.is_file():
+                    out[entry.stat().st_ino] = wrapper.name
+            except OSError:
+                continue
+    return out
+
+
 def _scan_bt() -> list[dict]:
     """Walk BT_ROOTS, return one entry per video file. Filesystem only,
-    plus the in-flight set of translate-zh futures for `zh_in_flight`."""
+    plus the in-flight set of translate-zh futures for `zh_in_flight`.
+
+    Each item carries a `wrapper` field naming the bt-side torrent
+    wrapper it was hardlinked from (by inode match); the frontend uses
+    it to group /artifact items under their originating torrent card
+    for per-torrent action buttons (`→ 中`, `→ E`). Empty string when
+    the bt-side original has been removed (orphaned canonical) or was
+    manually dropped without going through bt_filter."""
     out = []
     now = time.time()
     with _translating_lock:
         in_flight = {p for p, f in _translating.items() if not f.done()}
+    inode_to_wrapper = _bt_inode_map()
     for root in BT_ROOTS:
         if not root.exists():
             continue
@@ -395,10 +430,15 @@ def _scan_bt() -> list[dict]:
                 parent_rel = ""
             if parent_rel == ".":
                 parent_rel = ""
+            try:
+                wrapper_name = inode_to_wrapper.get(video.stat().st_ino, "")
+            except OSError:
+                wrapper_name = ""
             out.append({
                 "path": str(video),
                 "name": video.name,
                 "parent": parent_rel,
+                "wrapper": wrapper_name,
                 "root": str(root),
                 "has_srt": has_srt,
                 "whisper_error": whisper_error,

@@ -195,16 +195,17 @@ export default function Bt() {
     }
   }
 
-  // Group videos under their torrent's outer-wrapper name so we can decide
-  // whether a torrent is ready to translate (all videos annotated, not
-  // downloading, none currently being translated) and surface per-video
-  // Chinese-sub state on the row.
+  // Group videos under their originating bt wrapper so per-torrent
+  // action buttons (→ 中, → E) know which /artifact items belong to
+  // each torrent card. Backend `_scan_bt` attributes each canonical
+  // video to its bt wrapper via inode match (hardlink identity).
+  // Items whose bt-side has been removed (orphaned canonical) carry
+  // an empty `wrapper` and are excluded from grouping.
   const itemsByTorrent = new Map()
   for (const item of items) {
-    const torrentName = (item.parent || '').split('/')[0]
-    if (!torrentName) continue
-    if (!itemsByTorrent.has(torrentName)) itemsByTorrent.set(torrentName, [])
-    itemsByTorrent.get(torrentName).push(item)
+    if (!item.wrapper) continue
+    if (!itemsByTorrent.has(item.wrapper)) itemsByTorrent.set(item.wrapper, [])
+    itemsByTorrent.get(item.wrapper).push(item)
   }
 
   function upgradeEnglishStatus(torrent) {
