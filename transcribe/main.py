@@ -489,11 +489,34 @@ class BtMagnetRequest(BaseModel):
     magnet: str
 
 
+# Append-only log of every magnet the user has submitted through the
+# bt tab. Useful for re-submitting after a delete_torrent, or for
+# reconstructing what was in the library after a data wipe. Lives on
+# the bind mount so it survives container restarts.
+MAGNET_HISTORY_FILE = Path("/app/data/magnet-history.tsv")
+
+
+def _record_magnet(magnet: str, wrapper: str) -> None:
+    """Tab-separated append: ISO timestamp \\t wrapper name \\t magnet URI.
+    O_APPEND write is atomic for line-sized payloads on POSIX (< PIPE_BUF
+    = 4 KB), so concurrent submissions can't interleave. Failure to write
+    logs but doesn't fail the request — the magnet is already submitted to
+    aria2, and the history file is auxiliary."""
+    line = f"{_now()}\t{wrapper}\t{magnet}\n"
+    try:
+        MAGNET_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with MAGNET_HISTORY_FILE.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as exc:
+        print(f"[magnet-history] append failed: {exc}", flush=True)
+
+
 @app.post("/api/bt/magnet", status_code=201)
 async def submit_magnet(req: BtMagnetRequest):
     """Proxy to the aria2 sidecar's POST /torrents so BT traffic exits
     through gluetun's VPN tunnel. Response body is passed through
-    verbatim (currently `{"wrapper": "..."}`)."""
+    verbatim (currently `{"wrapper": "..."}`). Also appends a record
+    of the submission to MAGNET_HISTORY_FILE."""
     if not req.magnet.startswith("magnet:"):
         raise HTTPException(status_code=400, detail="must be a magnet: URI")
     try:
@@ -503,7 +526,9 @@ async def submit_magnet(req: BtMagnetRequest):
     if r.status_code >= 400:
         detail = _extract_detail(r) or f"aria2 sidecar returned {r.status_code}"
         raise HTTPException(status_code=r.status_code, detail=detail)
-    return r.json()
+    body = r.json()
+    _record_magnet(req.magnet, body.get("wrapper", ""))
+    return body
 
 
 @app.get("/api/bt/torrents")
