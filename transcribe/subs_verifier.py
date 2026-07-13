@@ -176,9 +176,9 @@ def find_pollution_windows(whisper_srt: Path) -> list[tuple[float, float]]:
     whisper (single-sided scrub) before scoring — a polluted stretch
     would otherwise blow up WER against an honest candidate that has
     the real dialogue for that time range. Caller should first check
-    that pollution coverage is a small fraction of runtime; when it's
-    not, no salvage is meaningful and the pipeline should stamp
-    `.whisper-polluted` directly.
+    that pollution is a small fraction of the transcript (see
+    `pollution_cue_ratio`); when it's not, no salvage is meaningful
+    and the pipeline should stamp `.whisper-polluted` directly.
 
     Runs that span an empty-body cue are broken (safer — don't merge two
     unrelated runs across an accidental gap)."""
@@ -218,6 +218,32 @@ def find_pollution_windows(whisper_srt: Path) -> list[tuple[float, float]]:
     _emit_run(len(cues) - 1)
 
     return windows
+
+
+def pollution_cue_ratio(
+    whisper_srt: Path,
+    windows: list[tuple[float, float]],
+) -> float:
+    """Fraction of whisper's real cues that fall inside `windows` — i.e.
+    the share that single-side scrub would drop from the WER reference.
+
+    Cue-based rather than time-based: a movie can have 25 min of
+    hallucinated "Hey." pollution in what was silent scenes and still
+    look mild if measured against the 2 h runtime (~20% coverage), but
+    if the whisper transcript is 80% "Hey." cues then the surviving
+    reference after scrub is tiny and WER against a full-length
+    candidate becomes noise-dominated. Cue ratio catches that
+    directly.
+
+    Returns 0.0 on empty windows or unparseable SRT (safe default —
+    caller treats "no pollution" as "run WER normally")."""
+    if not windows:
+        return 0.0
+    cues = _real_cues(whisper_srt)
+    if not cues:
+        return 0.0
+    polluted = sum(1 for c in cues if _cue_in_windows(c, windows))
+    return polluted / len(cues)
 
 
 # ── WER scoring ───────────────────────────────────────────────────────────

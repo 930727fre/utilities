@@ -245,12 +245,15 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
      shortened reference) but ~5 min pollution in a 50 min episode
      only pushes WER up by ~0.1, well inside the 0.5 pass margin.
 
-     Coverage bail: if pollution windows cover > 50% of the video
-     runtime (ffprobe reads `format=duration` once per polluted video
-     to decide), no scrub is meaningful — whisper is mostly
-     hallucinated and even a perfect candidate scores against a
-     shredded reference. WER is disabled and the pipeline falls back
-     to a trust + LLM-plot-check loop:
+     Cue-ratio bail: if more than 50% of whisper's real cues fall
+     inside hallucination windows (`pollution_cue_ratio`), single-side
+     scrub leaves too little reference — a WER computation against a
+     full-length candidate becomes noise-dominated. Cue-based rather
+     than time-based because a movie can have 20% of its runtime
+     eaten by "Hey." loops in silent scenes and still test "under
+     threshold" on time coverage while the transcript is 80%
+     pollution. WER is disabled and the pipeline falls back to a
+     trust + LLM-plot-check loop:
        - archive / embedded / pgs-ocr candidates are TRUSTED (prior
          verified run, or container same-source content guarantee) and
          used directly if they materialize

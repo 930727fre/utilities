@@ -34,7 +34,12 @@ from srt_source import (
     whisper_polluted_path,
 )
 from subs_finder import _parse_filename, iter_candidates
-from subs_verifier import find_pollution_windows, verify_against_whisper, verify_by_plot
+from subs_verifier import (
+    find_pollution_windows,
+    pollution_cue_ratio,
+    verify_against_whisper,
+    verify_by_plot,
+)
 from storage import get_job, upsert_job
 
 DOWNLOADS_DIR = Path("/app/data/downloads")
@@ -44,15 +49,20 @@ DOWNLOAD_TIMEOUT = 60 * 60         # 1 hour
 TRANSCRIBE_TIMEOUT = 4 * 60 * 60   # 4 hours
 RESYNC_TIMEOUT = 5 * 60            # alass on a long movie tops out well under this
 FFPROBE_PROBE_TIMEOUT = 30         # JSON stream probe — milliseconds in practice
-FFPROBE_DURATION_TIMEOUT = 15      # single format=duration lookup — sub-second in practice
 
-# If whisper's hallucination-loop windows cover more than this fraction of
-# the video runtime, no scrub can salvage the transcript — even a perfect
-# candidate would have WER dominated by whisper's missing content. Bail
-# straight to the `.whisper-polluted` sidecar and let the user drop a
-# manual candidate. 50% is aggressive on purpose: below that, whisper
-# retains enough real dialogue for single-side scrub to keep WER honest.
-_POLLUTION_COVERAGE_BAIL = 0.5
+# If more than this fraction of whisper's cues fall inside hallucination
+# windows, single-side scrub leaves a shredded reference — WER against
+# any full-length candidate becomes noise-dominated. Bail straight to
+# the plot-check fallback loop (LLM decides content match directly);
+# if that fails too, stamp `.whisper-polluted` for user intervention.
+#
+# Cue-based rather than time-based: a movie can have 20% of its runtime
+# eaten by "Hey." loops in silent scenes and still test "under
+# threshold" on a time-coverage metric, while the whisper transcript is
+# 80% pollution and effectively useless as a WER reference. The
+# Victoria (2015) case-in-point: 27% time coverage, 78% polluted-cue
+# ratio — the cue ratio catches it, time coverage lets it slip.
+_POLLUTION_CUE_RATIO_BAIL = 0.5
 FFMPEG_SUB_EXTRACT_TIMEOUT = 60    # demux one subtitle stream (no transcode) — seconds on a movie-sized container
 PGS_OCR_TIMEOUT = 10 * 60          # tesseract OCR of a 50-min episode's PGS — ~1-3 min typical
 FFMPEG_AUDIO_TIMEOUT = 5 * 60      # transcoding a movie to 16kHz mono AAC — ~30-60s typical
@@ -470,31 +480,6 @@ _CANDIDATE_TAGS = ("archive", "embedded", "pgs-ocr", "bundled", "opensubtitles-h
 # gate that was removed). Quota-friendly — we only download the next
 # candidate when the previous one failed WER.
 OS_MAX_TRIES = max(1, int(os.environ.get("OS_MAX_TRIES", "1")))
-
-
-def _video_duration_seconds(video: Path) -> float | None:
-    """ffprobe the container's `format=duration`. Returns seconds as a
-    float, or None on any ffprobe failure. Sub-second latency on any
-    modern container so we don't cache — one call per pollution-bail
-    check per video."""
-    try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "error",
-             "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1",
-             str(video)],
-            capture_output=True,
-            timeout=FFPROBE_DURATION_TIMEOUT,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        print(f"[ffprobe] duration lookup failed for {video.name!r}: {e}", flush=True)
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        return float((r.stdout or b"").strip())
-    except ValueError:
-        return None
 
 
 def _find_bt_wrapper(canonical_video: Path) -> Path | None:
@@ -1121,31 +1106,27 @@ def process_bt_file(job_id: str):
         # stretch doesn't tank an otherwise-matching candidate. Empty
         # list = clean whisper, verify behaves normally.
         #
-        # If pollution covers > _POLLUTION_COVERAGE_BAIL of the runtime,
-        # WER can't discriminate — even a perfect candidate is scored
-        # against a shredded reference. Fall back to the trust +
+        # If more than _POLLUTION_CUE_RATIO_BAIL of whisper's cues fall
+        # in hallucination windows, single-side scrub leaves too little
+        # reference for WER to discriminate. Fall back to the trust +
         # plot-check loop; if that fails too, stamp `.whisper-polluted`.
         windows = find_pollution_windows(whisper_src)
         if windows:
-            total_polluted = sum(e - s for s, e in windows)
-            duration = _video_duration_seconds(video)
-            coverage = (total_polluted / duration) if duration else 0.0
-            duration_str = f"{duration:.0f}s" if duration else "unknown"
+            cue_ratio = pollution_cue_ratio(whisper_src, windows)
             print(f"[pipeline] {video.name!r}: whisper has {len(windows)} polluted "
-                  f"window(s) totaling {total_polluted:.0f}s / {duration_str} "
-                  f"({coverage:.0%} coverage)", flush=True)
+                  f"window(s), {cue_ratio:.0%} of cues are pollution", flush=True)
 
-            if duration and coverage > _POLLUTION_COVERAGE_BAIL:
-                print(f"[pipeline] {video.name!r}: pollution > "
-                      f"{_POLLUTION_COVERAGE_BAIL:.0%} of runtime — WER "
-                      f"disabled; falling back to trust + plot-check", flush=True)
+            if cue_ratio > _POLLUTION_CUE_RATIO_BAIL:
+                print(f"[pipeline] {video.name!r}: polluted cues > "
+                      f"{_POLLUTION_CUE_RATIO_BAIL:.0%} — WER disabled; "
+                      f"falling back to trust + plot-check", flush=True)
                 winner_tag = _polluted_fallback_pick_candidate(
                     video, whisper_src, verified_src,
                 )
                 if winner_tag is None:
                     polluted_reason = (
-                        f"pollution {coverage:.0%} of runtime, no candidate "
-                        f"passed trust / plot-check fallback"
+                        f"{cue_ratio:.0%} of whisper cues are hallucinations, "
+                        f"no candidate passed trust / plot-check fallback"
                     )
                     try:
                         stamp_whisper_polluted(video, polluted_reason)
@@ -1198,17 +1179,17 @@ def process_bt_file(job_id: str):
 
             if winner_tag is None:
                 if windows:
-                    # Whisper had hallucination loops (under the coverage
+                    # Whisper had hallucination loops (below the cue-ratio
                     # bail, so scrub was attempted) but no candidate salvaged
                     # it — refuse to promote a partially-hallucinated whisper
                     # to canonical. Stamp the sidecar so the scan loop stops
                     # retrying and the UI surfaces the state for the user to
                     # intervene (drop a bundled SRT, refetch OS once quota
                     # recovers, etc.).
-                    total_polluted = sum(e - s for s, e in windows)
+                    ratio = pollution_cue_ratio(whisper_src, windows)
                     polluted_reason = (
-                        f"{len(windows)} polluted window(s) totaling "
-                        f"{total_polluted:.0f}s, no candidate salvaged after "
+                        f"{len(windows)} polluted window(s), {ratio:.0%} of "
+                        f"whisper cues affected, no candidate salvaged after "
                         f"whisper-side scrub"
                     )
                     try:
