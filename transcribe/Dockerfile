@@ -24,33 +24,27 @@ RUN curl -fsSL -o /usr/local/bin/alass \
         https://github.com/kaegi/alass/releases/download/v2.0.0/alass-linux64 \
     && chmod +x /usr/local/bin/alass
 
-# vobsub2srt — DVD-era bitmap subtitle OCR (used by the container_subs
+# subtile-ocr — DVD-era bitmap subtitle OCR (used by the container_subs
 # vobsub-ocr tier for older Blu-ray rips like Friends x265 Silence that
 # preserved the original DVD VobSub track instead of stripping / re-OCRing
-# it). Debian dropped the package after Bullseye (upstream unmaintained,
-# tesseract API drift), so we build from source.
+# it). Rust CLI by gwen-lg (fork of elizagamedev/vobsubocr), actively
+# maintained; wraps leptonica + tesseract via `leptess` crate.
 #
-# ruediger's fork last saw a real commit ~2013 and doesn't build clean
-# against GCC 12 + tesseract 5. Two known errors are fixed inline with
-# sed:
-#   1) UINT_MAX needs an explicit <climits> include (was transitively
-#      pulled in by older libstdc++ headers, no longer since GCC 12).
-#   2) TessBaseAPI moved into the `tesseract::` namespace after tesseract 3.
-# If more errors surface after a future tesseract / gcc update, either
-# pin base-image versions or switch to a maintained fork of VobSub2SRT
-# (or write a pure-Python VobSub decoder — see container_subs.py
-# extract_vobsub_ocr comment).
+# Picked over ruediger/VobSub2SRT (C++, upstream dormant since 2013,
+# doesn't build clean against GCC 12 + tesseract 5) and over Debian's
+# own package (only in experimental, not in bookworm). No prebuilt
+# binaries are published — install via `cargo install` and rip out the
+# Rust toolchain after the build to keep the runtime image lean.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake pkg-config libtiff-dev libtesseract-dev git \
-        autoconf automake \
-    && git clone --depth 1 https://github.com/ruediger/VobSub2SRT.git /tmp/vs2s \
-    && cd /tmp/vs2s \
-    && sed -i '/^#include "cmd_options.h++"/a #include <climits>' src/vobsub2srt.c++ \
-    && sed -i '/^#include.*tesseract/a using namespace tesseract;' src/vobsub2srt.c++ \
-    && (test -x ./configure || autoreconf -i) \
-    && ./configure && make && make install \
-    && cd / && rm -rf /tmp/vs2s \
-    && apt-get purge -y build-essential cmake pkg-config libtiff-dev libtesseract-dev autoconf automake \
+        curl ca-certificates build-essential pkg-config clang \
+        libtesseract-dev libleptonica-dev \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path \
+    && . "$HOME/.cargo/env" \
+    && cargo install --locked subtile-ocr \
+    && mv "$HOME/.cargo/bin/subtile-ocr" /usr/local/bin/ \
+    && rm -rf "$HOME/.cargo" "$HOME/.rustup" \
+    && apt-get purge -y curl build-essential pkg-config clang libtesseract-dev libleptonica-dev \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 

@@ -17,7 +17,7 @@ from pathlib import Path
 FFPROBE_PROBE_TIMEOUT = 30         # JSON stream probe — milliseconds in practice
 FFMPEG_SUB_EXTRACT_TIMEOUT = 60    # demux one subtitle stream (no transcode) — seconds on a movie-sized container
 PGS_OCR_TIMEOUT = 10 * 60          # tesseract OCR of a 50-min episode's PGS — ~1-3 min typical
-VOBSUB_OCR_TIMEOUT = 10 * 60       # vobsub2srt OCR — similar order to PGS (DVD-res bitmaps, fewer per second)
+VOBSUB_OCR_TIMEOUT = 10 * 60       # subtile-ocr OCR — similar order to PGS (DVD-res bitmaps, fewer per second)
 
 # Text-based subtitle codecs ffmpeg can convert to SubRip via `-c:s srt`.
 # ASS/SSA included: ffmpeg strips `{\an8}` / `\N` override tags on the way
@@ -245,7 +245,7 @@ def extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
 
 def extract_vobsub_ocr(video: Path, dest: Path) -> Path | None:
     """Extract a VobSub (DVD-era bitmap) subtitle track and OCR it to SRT
-    via ffmpeg (demux to .idx+.sub) → vobsub2srt → tesseract. Same-source
+    via ffmpeg (demux to .idx+.sub) → subtile-ocr → tesseract. Same-source
     extraction like the PGS path: timing is byte-perfect with the video
     master, so alass is skipped downstream. Cue-count gate catches
     complete OCR failures.
@@ -265,8 +265,8 @@ def extract_vobsub_ocr(video: Path, dest: Path) -> Path | None:
 
     ffmpeg outputs VobSub as a `.idx` + `.sub` file pair — one is
     the packet index / palette / timing table, the other is the raw
-    bitstream. vobsub2srt reads both (given the shared basename)
-    and drives tesseract on the extracted bitmaps.
+    bitstream. subtile-ocr reads the .idx (auto-finds the .sub
+    sibling by name) and drives tesseract on the extracted bitmaps.
     """
     found = _find_subtitle_track(video, lambda c: c == "dvd_subtitle")
     if found is None:
@@ -304,25 +304,27 @@ def extract_vobsub_ocr(video: Path, dest: Path) -> Path | None:
                 print(f"[vobsub-ocr] ffmpeg rc={r.returncode} for {video.name!r}: {stderr[-200:]}", flush=True)
             return None
 
-        # 2. vobsub2srt takes the shared basename (finds both .idx +
-        # .sub automatically) and writes .srt alongside.
+        # 2. subtile-ocr reads .idx (auto-picks up .sub sibling by name)
+        # and writes SRT to the path given via `-o`. Flags:
+        #   -l eng     tesseract language
+        #   -o <path>  output SRT path
+        srt_output = sub_prefix.with_suffix(".srt")
         try:
             r = subprocess.run(
-                ["vobsub2srt", "--tesseract-lang", "eng", str(sub_prefix)],
+                ["subtile-ocr", "-l", "eng", "-o", str(srt_output), str(idx_path)],
                 capture_output=True,
                 timeout=VOBSUB_OCR_TIMEOUT,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-            print(f"[vobsub-ocr] vobsub2srt failed for {video.name!r}: {e}", flush=True)
+            print(f"[vobsub-ocr] subtile-ocr failed for {video.name!r}: {e}", flush=True)
             return None
         if r.returncode != 0:
             tail = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:]
-            print(f"[vobsub-ocr] vobsub2srt rc={r.returncode} for {video.name!r}: {tail}", flush=True)
+            print(f"[vobsub-ocr] subtile-ocr rc={r.returncode} for {video.name!r}: {tail}", flush=True)
             return None
 
-        srt_output = sub_prefix.with_suffix(".srt")
         if not srt_output.exists() or srt_output.stat().st_size == 0:
-            print(f"[vobsub-ocr] no .srt produced by vobsub2srt for {video.name!r}", flush=True)
+            print(f"[vobsub-ocr] no .srt produced by subtile-ocr for {video.name!r}", flush=True)
             return None
 
         # 3. Promote to dest — the tempdir cleanup at scope exit will
