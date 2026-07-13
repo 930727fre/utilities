@@ -1016,6 +1016,7 @@ def _run_pending_filter():
     """
     if not BT_ROOT.exists():
         return
+    now = time.time()
     for wrapper in BT_ROOT.iterdir():
         if not wrapper.is_dir():
             continue
@@ -1023,6 +1024,25 @@ def _run_pending_filter():
         if any(wrapper.rglob("*.aria2")):
             continue
         if bt_filter_sentinel_for(wrapper.name).exists():
+            continue
+        # Race: aria2 creates the wrapper dir + saves .torrent as soon as
+        # it receives the magnet, but takes seconds-to-tens-of-seconds
+        # to fetch metadata + allocate the actual video files. During
+        # that window the wrapper has no video files and no `.aria2`
+        # yet — filter_wrapper would `_collect_videos()==[]` and write
+        # an empty sentinel that permanently freezes the wrapper out.
+        # Guard with the newest child-file mtime: aria2 bumps at least
+        # one file's mtime whenever it allocates a new file or writes
+        # a piece, so this stays "recent" for the full download and
+        # only clears well after aria2 is done.
+        try:
+            newest = max(
+                (p.stat().st_mtime for p in wrapper.rglob("*") if p.is_file()),
+                default=None,
+            )
+        except OSError:
+            continue
+        if newest is None or now - newest < MTIME_GRACE_SECONDS:
             continue
         try:
             filter_wrapper(wrapper)
