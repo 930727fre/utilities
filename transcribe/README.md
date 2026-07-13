@@ -199,20 +199,26 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
        italics + music glyphs.
 
 5. Bundled candidate discovery (lazy, per video)
-     → scans the bt-side wrapper for `.srt`, `.ass`, `.ssa` files;
-       picks by FILENAME match (highest priority first):
-         1. exact stem match — srt basename == video basename
-         2. SxxExx match — TV episode codes in both filenames match
-         3. single-video-single-srt wrapper → pair them
-       ASS/SSA get ffmpeg-converted to SRT (override tags stripped)
-       before staging; final srt lands at _sources/<stem>.bundled.srt.
-       Trust-based — no WER, no LLM. Rationale: bundled subs come from
-       the same release group that authored the video, so filename
-       match = same-episode. Running WER against whisper false-rejects
-       legitimate matches because professional English subs and
-       whisper's ASR use different phrasing for the same spoken line.
-       A cue-count sanity check (≥ 100 real cues) fires as belt-and-
-       suspenders against stray forced-subs SRTs in season packs.
+     → scans the bt-side wrapper for every `.srt`, `.ass`, `.ssa`.
+       No filename heuristics — content-based selection (the accept
+       callback wired by the caller) decides which one belongs to
+       this video. ASS/SSA get ffmpeg-converted to SRT (override tags
+       stripped) in a scratch tempdir before accept runs; a cue-count
+       prefilter (≥ 100 real cues) drops forced-subs / partial tracks
+       cheaply before the accept callback ever sees them. The winner
+       gets promoted to _sources/<stem>.bundled.srt.
+
+       Two accept modes are wired by callers:
+       - Normal (whisper clean or lightly polluted): iterate every
+         wrapper sub, first WER-passer wins. Cheap enough to run on
+         20+ candidates. Wrong-language / wrong-episode / forced-subs
+         all fail WER naturally against the whisper reference.
+       - Polluted (whisper >50% cue pollution — see step 7): Haiku
+         smart-pick narrows to one candidate by filename convention,
+         then plot-check (verify_by_plot) verifies content. Bounds
+         cost to ~$0.10 per bundled attempt even in a 30-subtitle
+         season pack — full plot-check on every candidate would run
+         into dollars.
 
 6. OS candidate fetch (lazy, per video)
      → _sources/<stem>.opensubtitles-hash.srt   (if hash search hits)
@@ -266,10 +272,10 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
        - archive / embedded / pgs-ocr candidates are TRUSTED (prior
          verified run, or container same-source content guarantee) and
          used directly if they materialize
-       - bundled is filename-trust (same logic as normal mode) — no
-         plot-check needed because bundled is authored by the same
-         release group as the video, so a filename match is
-         authoritative.
+       - bundled runs a Haiku smart-pick (LLM narrows all wrapper subs
+         to one by filename convention) → Opus plot-check on the pick.
+         Two LLM calls but bounded per attempt; the smart-pick keeps
+         plot-check from running on every subtitle in a season pack.
        - opensubtitles-hash / -text run their normal k-try, but the
          accept callback becomes `verify_by_plot` — Opus 4.7 with
          web_search reads the candidate's full dialogue (timestamps
@@ -339,7 +345,7 @@ canonical /artifact/.../<stem>.srt exists       → done; skip
 
 Failure sidecars are extension-less plain-text files holding the error reason — Jellyfin / Infuse never load them as subtitles, but `cat <stem>.whisper-failed` (or `.whisper-polluted`, `.annotate-failed`) shows you what broke. The UI ↻ button clears canonical + every sidecar; cached `_sources/` files are preserved so replay only re-does the missing stages.
 
-Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch them. Drop your srt next to the video in `/bt/<wrapper>/` with a matching filename if you want the bundled tier to pick it up on the next scan (and to get the automatic annotation pass).
+Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch them. Drop your srt anywhere inside `/bt/<wrapper>/` if you want the bundled tier to pick it up on the next scan (and to get the automatic annotation pass) — filename doesn't need to match the video; WER content-match will find it.
 
 ## Rollback granularity
 

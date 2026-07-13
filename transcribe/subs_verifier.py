@@ -41,6 +41,7 @@ WER anyway, and Haiku was empirically bypassed by uploaders spoofing
 metadata. Cheaper cue-count prefilter catches the forced-subs case that
 WER also catches but downloads-then-rejects. See `_MIN_REAL_CUES`.
 """
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -382,6 +383,114 @@ Respond via the `respond` tool with:
 that decided it (or the specific mismatch that rejected it). If you \
 used web_search, note what source you cross-referenced against.
 """
+
+
+# ── LLM smart-pick for bundled candidates (polluted-mode narrower) ──────
+
+# Haiku suffices for this — the decision is filename convention, not
+# content analysis. Iterating plot-check on a full season pack's worth
+# of subtitles would cost dollars per episode; a single Haiku pick +
+# one plot-check bounds it to ~$0.10 per bundled attempt.
+_PICK_MODEL = os.environ.get("ANTHROPIC_BUNDLED_PICK_MODEL",
+                             "claude-haiku-4-5-20251001")
+
+_PICK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "pick": {
+            "type": "string",
+            "description": "Exact relative path from the candidate list, "
+                           "or empty string if no candidate plausibly matches.",
+        },
+        "reason": {"type": "string"},
+    },
+    "required": ["pick", "reason"],
+}
+
+_PICK_PROMPT_TEMPLATE = """\
+You are picking the subtitle file that corresponds to a specific video, \
+from a list of subtitles bundled in a torrent wrapper.
+
+Wrapper name: {wrapper_name}
+
+Target video (relative path within the wrapper):
+  {video_rel}
+
+Candidate subtitle files (relative paths within the wrapper):
+{candidate_list}
+
+Task: return the single subtitle whose filename / path most plausibly \
+corresponds to the target video. Base your judgment on filename \
+convention:
+- Exact stem match (video.stem == subtitle.stem)
+- SxxExx match (same season / episode code)
+- Language label (English variants usually appear as `.eng`, `.en`, \
+`.english`, or no language tag at all; foreign languages tend to be \
+explicit — `.fre`, `.spa`, `.chi`, etc.)
+- Folder layout (e.g., `Subs/S01E05/2_English.srt` — the S01E05 folder \
+alone gives you enough)
+
+If nothing plausibly matches (e.g., all subtitles are for a different \
+episode of the pack), return an empty pick.
+
+Respond via the `respond` tool with:
+- `pick`: the exact relative path from the candidate list, or empty string
+- `reason`: one line explaining the choice
+"""
+
+
+def smart_pick_bundled(
+    wrapper_name: str,
+    video_rel: Path,
+    candidates_rel: list[Path],
+) -> Optional[Path]:
+    """LLM-driven pick from bundled subtitle candidates. Used in the
+    polluted-whisper fallback where iterating plot-check on every
+    wrapper subtitle would be expensive. Returns the picked relative
+    path (from `candidates_rel`) or None if nothing matched / API
+    failed.
+
+    Callers pass paths relative to the wrapper root — the LLM sees the
+    same relative form and returns it verbatim. Validated on the way
+    out (LLM response must exactly match one of the provided paths).
+    """
+    if not candidates_rel:
+        return None
+    if len(candidates_rel) == 1:
+        return candidates_rel[0]
+
+    listing = "\n".join(f"  {p}" for p in candidates_rel)
+    prompt = _PICK_PROMPT_TEMPLATE.format(
+        wrapper_name=wrapper_name,
+        video_rel=str(video_rel),
+        candidate_list=listing,
+    )
+    try:
+        result = generate_json(
+            prompt,
+            _PICK_SCHEMA,
+            model=_PICK_MODEL,
+            temperature=0.0,
+            timeout=(10, 60),
+        )
+    except Exception as e:
+        print(f"[bundled smart-pick] API error: {e}", flush=True)
+        return None
+
+    pick_str = (result.get("pick") or "").strip()
+    if not pick_str:
+        reason = (result.get("reason") or "").strip() or "(no reason)"
+        print(f"[bundled smart-pick] LLM declined: {reason}", flush=True)
+        return None
+
+    for cand in candidates_rel:
+        if str(cand) == pick_str:
+            reason = (result.get("reason") or "").strip() or "(no reason)"
+            print(f"[bundled smart-pick] picked {pick_str} — {reason}", flush=True)
+            return cand
+    print(f"[bundled smart-pick] LLM returned {pick_str!r} not in candidate "
+          f"list — treating as no match", flush=True)
+    return None
 
 
 def verify_by_plot(

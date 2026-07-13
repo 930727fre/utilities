@@ -37,6 +37,7 @@ from subs_finder import _parse_filename, iter_candidates
 from subs_verifier import (
     find_pollution_windows,
     pollution_cue_ratio,
+    smart_pick_bundled,
     verify_against_whisper,
     verify_by_plot,
 )
@@ -745,142 +746,6 @@ def _extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
 
 
 _BUNDLED_SUB_EXTS = (".srt", ".ass", ".ssa")
-# SxxExx patterns for TV episode filename matching.
-_SXX_EXX_RE = re.compile(r"[sS](\d{1,2})[eE](\d{1,3})")
-
-
-def _bundled_candidate_by_filename(video: Path, wrapper: Path) -> Path | None:
-    """Find the subtitle sidecar in `wrapper` that belongs to `video`,
-    picked by filename convention alone. No content verification here.
-
-    Bundled subs come from the same release group that authored the
-    video, so filename match = same-episode. WER against whisper is
-    the wrong signal — professional English subs and whisper's
-    verbatim ASR use different phrasing for the same spoken line, so
-    WER regularly false-rejects legitimate bundled matches (Victoria
-    2015 was the case that broke this: bundled "Quick question, is it
-    good in there?" vs whisper "My question is, is it good inside?"
-    — same audio, 60%+ WER).
-
-    Priority ladder (highest first):
-      1. Exact stem match — `video.stem == sub.stem`. Covers both
-         single-file torrents (video + srt named the same) and
-         well-labelled season packs.
-      2. SxxExx match — video and srt share the same season/episode
-         code. Covers season packs where release group renamed the srt
-         slightly (e.g. srt is `Show.S01E05.English.srt`, video is
-         `Show.S01E05.1080p.mkv`).
-      3. Single-video-single-srt fallback — if the wrapper contains
-         exactly one video and one subtitle file, they belong together.
-
-    Returns None when nothing matches confidently — safer to fall
-    through to OS than promote a mis-picked bundled srt.
-    """
-    all_subs: list[Path] = []
-    for ext in _BUNDLED_SUB_EXTS:
-        all_subs.extend(wrapper.rglob(f"*{ext}"))
-    if not all_subs:
-        return None
-    all_subs.sort()
-
-    video_stem = video.stem
-    # Priority 1: exact stem match.
-    for sub in all_subs:
-        if sub.stem == video_stem:
-            return sub
-
-    # Priority 2: SxxExx match (TV).
-    m_video = _SXX_EXX_RE.search(video_stem)
-    if m_video:
-        video_se = f"S{int(m_video.group(1)):02d}E{int(m_video.group(2)):02d}".lower()
-        for sub in all_subs:
-            m_sub = _SXX_EXX_RE.search(sub.stem)
-            if m_sub:
-                sub_se = f"S{int(m_sub.group(1)):02d}E{int(m_sub.group(2)):02d}".lower()
-                if sub_se == video_se:
-                    return sub
-
-    # Priority 3: single-video-single-srt wrapper.
-    videos = [p for p in wrapper.rglob("*") if p.is_file() and p.suffix.lower() in VIDEO_EXTS]
-    if len(videos) == 1 and len(all_subs) == 1:
-        return all_subs[0]
-
-    return None
-
-
-def _pick_bundled(video: Path, dest: Path) -> Path | None:
-    """Pick the wrapper-side subtitle sidecar for `video` by filename
-    match and stage it at `dest`. Trust-based — no WER, no plot-check.
-
-    ASS/SSA candidates get ffmpeg-converted to SubRip before staging
-    (`{\\an8}` / `\\N` override tags stripped on the way). The converted
-    SRT (not the original `.ass`) is what lands at `dest`.
-
-    Cue-count sanity check: refuse a pick with fewer than
-    `_MIN_BUNDLED_CUES` real cues, since a valid full-dialogue sub
-    should be well above that even for a 20-min episode — a match
-    that thin is more likely a forced-subs / trailer track than the
-    main feature's subs, and trusting it would poison canonical.
-
-    Returns None if no filename-matched candidate exists in the
-    wrapper or the pick fails the cue-count sanity check.
-    """
-    wrapper = _find_bt_wrapper(video)
-    if wrapper is None:
-        return None
-
-    sub = _bundled_candidate_by_filename(video, wrapper)
-    if sub is None:
-        return None
-
-    try:
-        rel = sub.relative_to(wrapper)
-    except ValueError:
-        rel = sub
-
-    # ASS/SSA → SRT via ffmpeg. Convert into `dest` directly.
-    if sub.suffix.lower() in (".ass", ".ssa"):
-        with tempfile.TemporaryDirectory(prefix="bundled-ass-") as tmpdir:
-            converted = Path(tmpdir) / "converted.srt"
-            try:
-                r = subprocess.run(
-                    ["ffmpeg", "-y", "-loglevel", "error",
-                     "-i", str(sub),
-                     "-c:s", "srt",
-                     str(converted)],
-                    capture_output=True,
-                    timeout=FFMPEG_SUB_EXTRACT_TIMEOUT,
-                )
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-                print(f"[bundled] {video.name!r}: ASS convert failed for {rel}: {e}", flush=True)
-                return None
-            if r.returncode != 0 or not converted.exists() or converted.stat().st_size == 0:
-                stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
-                print(f"[bundled] {video.name!r}: ASS convert empty for {rel} "
-                      f"(rc={r.returncode}) {stderr[-100:]}", flush=True)
-                return None
-            if not _bundled_cue_count_ok(converted, rel, video):
-                return None
-            try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(converted), str(dest))
-            except OSError as exc:
-                print(f"[bundled] {video.name!r}: copy failed: {exc}", flush=True)
-                return None
-            print(f"[bundled] {video.name!r}: PICK {rel} (ASS→SRT)", flush=True)
-            return dest
-
-    if not _bundled_cue_count_ok(sub, rel, video):
-        return None
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(sub), str(dest))
-    except OSError as exc:
-        print(f"[bundled] {video.name!r}: copy failed: {exc}", flush=True)
-        return None
-    print(f"[bundled] {video.name!r}: PICK {rel}", flush=True)
-    return dest
-
 
 # Minimum cue count for a bundled sub to be considered a real
 # full-dialogue track. Same threshold as subs_verifier's forced-subs
@@ -889,21 +754,174 @@ def _pick_bundled(video: Path, dest: Path) -> Path | None:
 _MIN_BUNDLED_CUES = 100
 
 
+def _bundled_wrapper_subs(wrapper: Path) -> list[Path]:
+    """Every .srt/.ass/.ssa under `wrapper`, sorted alphabetically. No
+    filename filtering — content-based selection (WER in normal mode,
+    LLM smart-pick + plot-check in polluted mode) picks the right one
+    without trusting release-group naming conventions."""
+    subs: list[Path] = []
+    for ext in _BUNDLED_SUB_EXTS:
+        subs.extend(wrapper.rglob(f"*{ext}"))
+    return sorted(subs)
+
+
+def _materialize_bundled_sub(sub: Path, staged: Path, rel: Path, video: Path) -> Path | None:
+    """Bring `sub` into `staged` as SubRip. SRT: copy. ASS/SSA: ffmpeg
+    convert (`{\\an8}` / `\\N` override tags stripped on the way).
+    Enforces the cue-count sanity check that drops forced-subs / partial
+    tracks. Returns `staged` on success, None on any failure.
+
+    Staging goes to a caller-owned tempdir — this function doesn't own
+    the destination lifecycle; the caller decides whether to promote
+    the winner elsewhere (e.g. copy to `_sources/<stem>.bundled.srt`)
+    or discard."""
+    if sub.suffix.lower() in (".ass", ".ssa"):
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error",
+                 "-i", str(sub),
+                 "-c:s", "srt",
+                 str(staged)],
+                capture_output=True,
+                timeout=FFMPEG_SUB_EXTRACT_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            print(f"[bundled] {video.name!r}: ASS convert failed for {rel}: {e}", flush=True)
+            return None
+        if r.returncode != 0 or not staged.exists() or staged.stat().st_size == 0:
+            stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+            print(f"[bundled] {video.name!r}: ASS convert empty for {rel} "
+                  f"(rc={r.returncode}) {stderr[-100:]}", flush=True)
+            return None
+    else:
+        try:
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(sub), str(staged))
+        except OSError as exc:
+            print(f"[bundled] {video.name!r}: stage failed for {rel}: {exc}", flush=True)
+            return None
+
+    if not _bundled_cue_count_ok(staged, rel, video):
+        return None
+    return staged
+
+
 def _bundled_cue_count_ok(sub: Path, rel: Path, video: Path) -> bool:
-    """Reject bundled picks with too few cues to plausibly be full
-    dialogue — belt-and-suspenders against a season pack containing a
-    stray forced-subs SRT that happens to filename-match by S/E."""
+    """Reject bundled candidates with too few cues to plausibly be full
+    dialogue — cheap prefilter that drops forced-subs / trailer /
+    partial tracks before the (expensive) accept function ever sees
+    them. Normal-mode WER catches these anyway, but polluted-mode
+    plot-check costs a real Opus call per candidate, so bounded is
+    important."""
     try:
         text = sub.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
     cues = text.count("-->")
     if cues < _MIN_BUNDLED_CUES:
-        print(f"[bundled] {video.name!r}: REJECT {rel} — only {cues} cues, "
+        print(f"[bundled] {video.name!r}: SKIP {rel} — only {cues} cues, "
               f"below {_MIN_BUNDLED_CUES} min (likely forced-subs / partial)",
               flush=True)
         return False
     return True
+
+
+def _pick_bundled(
+    video: Path,
+    dest: Path,
+    accept,
+    *,
+    smart_narrow: bool = False,
+) -> Path | None:
+    """Find a subtitle in the bt wrapper for `video`, verify with the
+    supplied `accept` callback, and stage the winner at `dest`.
+
+    Two selection strategies:
+      - smart_narrow=False (normal WER mode): iterate every .srt/.ass/.ssa
+        under the wrapper, `accept` first passer. Content-based match
+        (WER against whisper) is cheap enough to run on 20+ candidates
+        without cost concern; wrong-language / wrong-episode / forced-subs
+        candidates all fail naturally.
+      - smart_narrow=True (polluted mode, plot-check accept): LLM
+        (Haiku) picks the single most likely candidate by filename
+        convention; only that one goes to `accept`. Bounds cost to
+        one plot-check per bundled attempt (~$0.10) even in a
+        30-subtitle season pack.
+
+    ASS/SSA candidates are ffmpeg-converted to SubRip in a scratch
+    tempdir before being handed to `accept`. Cue-count prefilter drops
+    tracks below `_MIN_BUNDLED_CUES` cheaply (before either WER or
+    plot-check runs).
+
+    Returns `dest` on success (winner materialized there), None if no
+    candidate passes or no wrapper found for `video`.
+    """
+    wrapper = _find_bt_wrapper(video)
+    if wrapper is None:
+        return None
+
+    subs = _bundled_wrapper_subs(wrapper)
+    if not subs:
+        return None
+
+    if smart_narrow and len(subs) > 1:
+        # Prefer the wrapper-side video filename over the canonical
+        # /artifact one — the release-group naming there is what the
+        # bundled srts were paired against, so exact-stem / SxxExx
+        # matches are more reliable. Falls back to canonical filename
+        # if the wrapper-side hardlink can't be located.
+        wrapper_video = _wrapper_side_video(video, wrapper) or video
+        video_rel = _safe_rel(wrapper_video, wrapper)
+        rel_subs = [_safe_rel(s, wrapper) for s in subs]
+        picked_rel = smart_pick_bundled(wrapper.name, video_rel, rel_subs)
+        if picked_rel is None:
+            return None
+        subs = [wrapper / picked_rel]
+
+    with tempfile.TemporaryDirectory(prefix="bundled-stage-") as tmpdir:
+        tmp = Path(tmpdir)
+        for i, sub in enumerate(subs, 1):
+            rel = _safe_rel(sub, wrapper)
+            staged = _materialize_bundled_sub(sub, tmp / f"cand-{i}.srt", rel, video)
+            if staged is None:
+                continue
+            if not accept(staged):
+                continue
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(staged), str(dest))
+            except OSError as exc:
+                print(f"[bundled] {video.name!r}: promote to dest failed: {exc}", flush=True)
+                return None
+            print(f"[bundled] {video.name!r}: WIN {rel}", flush=True)
+            return dest
+    return None
+
+
+def _safe_rel(p: Path, base: Path) -> Path:
+    try:
+        return p.relative_to(base)
+    except ValueError:
+        return p
+
+
+def _wrapper_side_video(canonical_video: Path, wrapper: Path) -> Path | None:
+    """Find the video path inside `wrapper` that shares an inode with
+    `canonical_video`. Used to reconstruct the release-group naming the
+    bundled srts were paired against — smart-pick's filename heuristic
+    gets more signal from `Show.S01E05.1080p.WEB-DL-GROUP.mkv` than
+    from the canonical `Show (2020) - S01E05.mkv`."""
+    try:
+        target_inode = canonical_video.stat().st_ino
+    except OSError:
+        return None
+    for entry in wrapper.rglob("*"):
+        try:
+            if entry.is_file() and entry.stat().st_ino == target_inode:
+                return entry
+        except OSError:
+            continue
+    return None
 
 
 def _fetch_candidate(
@@ -943,7 +961,16 @@ def _fetch_candidate(
         return _extract_pgs_ocr(video, dest)
 
     if tag == "bundled":
-        return _pick_bundled(video, dest)
+        # Normal mode: WER accept, iterate every wrapper sub, first
+        # passer wins. Wrong-language / wrong-episode / forced-subs
+        # candidates all fail WER against whisper naturally — no
+        # filename heuristics needed.
+        def _wer_accept(cand: Path) -> bool:
+            ok, reason = verify_against_whisper(whisper_src, cand, windows)
+            print(f"[bundled] {video.name!r}: WER {cand.name} — "
+                  f"{'ACCEPT' if ok else 'REJECT'}: {reason}", flush=True)
+            return ok
+        return _pick_bundled(video, dest, _wer_accept)
 
     if tag == "opensubtitles-hash":
         return _fetch_os_ktry(video, dest, whisper_src, windows, mode="hash")
@@ -971,9 +998,16 @@ def _fetch_os_ktry(
     mode: str,
 ) -> Path | None:
     """K-try OpenSubtitles fetch — download raw results one at a time, run
-    WER after each, first passer wins. Winner is copied to `dest`; losing
-    downloads stay at their indexed `<dest_no_ext>-<i>.srt` paths for
-    replay reuse.
+    WER after each, first passer wins. Returns the winning indexed
+    `<dest_no_ext>-<i>.srt` path directly; loser slots (indices below the
+    winner) also stay on disk for replay reuse.
+
+    No un-indexed `dest` symlink is created — k-try semantics guarantee
+    that the highest-index slot present on disk is the winner (loop exits
+    on first pass), so "which one won" is derivable from `ls` alone. On
+    the rare mid-run replay (pipeline died between winner-pick and
+    verified.srt write), `iter_candidates` re-runs accept on cache-hit
+    slots; for OS_MAX_TRIES=1 that's one WER call, negligible.
 
     Compared to a "download all N, pick lowest WER" strategy: strictly
     fewer downloads (stops as soon as one passes), same worst case, no
@@ -992,29 +1026,7 @@ def _fetch_os_ktry(
               f"{'ACCEPT' if ok else 'REJECT'}: {reason}", flush=True)
         return ok
 
-    winner = iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _accept)
-    if winner is None:
-        return None
-
-    # Point the un-indexed dest at the winning indexed candidate via
-    # relative symlink. Two purposes:
-    #   1) outer loop reads from a stable path (`<stem>.<tag>.srt`)
-    #      regardless of which -N.srt actually won
-    #   2) dest.exists() cache in _fetch_candidate short-circuits
-    #      replays — otherwise a re-run would re-invoke accept() on
-    #      every cached -N.srt, which is expensive when accept is
-    #      plot-check (Opus + web search per candidate)
-    # Relative link (not absolute) survives host-side path changes as
-    # long as -N.srt stays alongside .srt, which is how the layout is
-    # designed anyway.
-    try:
-        if dest.is_symlink() or dest.exists():
-            dest.unlink()
-        dest.symlink_to(winner.name)
-    except OSError as exc:
-        print(f"[pipeline] {video.name!r}: {mode} k-try symlink to dest failed — {exc}", flush=True)
-        return None
-    return dest
+    return iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _accept)
 
 
 def _polluted_fallback_pick_candidate(
@@ -1062,16 +1074,19 @@ def _polluted_fallback_pick_candidate(
     for tag in _CANDIDATE_TAGS:
         cand_dest = _sources_path(video, tag)
 
-        # bundled: filename-based trust — same as normal mode. If the
-        # wrapper has an srt whose stem matches the video or shares the
-        # same SxxExx, it's the release group's own English sub for
-        # this exact file, no content check needed.
+        # bundled: LLM smart-pick narrows to one candidate (by filename
+        # convention), then plot-check verifies content. Bounds cost to
+        # one Haiku pick + one Opus plot-check per bundled attempt.
         if tag == "bundled":
-            cand_path = _pick_bundled(video, cand_dest)
+            def _plot_accept_bundled(cand: Path) -> bool:
+                ok, reason = _plot_accept_local(cand)
+                print(f"[pipeline] {video.name!r}: polluted-mode bundled "
+                      f"plot-check {cand.name} — {reason}", flush=True)
+                return ok
+            cand_path = _pick_bundled(video, cand_dest, _plot_accept_bundled,
+                                      smart_narrow=True)
             if cand_path is None:
                 continue
-            print(f"[pipeline] {video.name!r}: polluted-mode TRUST bundled "
-                  f"(filename match)", flush=True)
             if _resync(video, cand_path, verified_src):
                 return tag
             print(f"[pipeline] {video.name!r}: polluted-mode bundled alass failed", flush=True)
@@ -1110,21 +1125,9 @@ def _polluted_fallback_pick_candidate(
             if winner is None:
                 continue
 
-            # Same rationale as _fetch_os_ktry: relative symlink dest →
-            # winning -N.srt so the cache short-circuits replay without
-            # duplicating file content on disk.
-            try:
-                if cand_dest.is_symlink() or cand_dest.exists():
-                    cand_dest.unlink()
-                cand_dest.symlink_to(winner.name)
-            except OSError as exc:
-                print(f"[pipeline] {video.name!r}: polluted-mode {mode} k-try "
-                      f"symlink to dest failed: {exc}", flush=True)
-                continue
-
             # OS candidates need alass alignment (their timeline was authored
             # against a different release).
-            if _resync(video, cand_dest, verified_src):
+            if _resync(video, winner, verified_src):
                 return tag
             print(f"[pipeline] {video.name!r}: polluted-mode {tag} alass failed", flush=True)
             continue
@@ -1252,16 +1255,13 @@ def process_bt_file(job_id: str):
                 if cand_path is None:
                     continue
 
-                # Bundled is trust-based: filename convention says this
-                # srt was authored by the same release group for this
-                # video. WER against whisper is unreliable here — a
-                # professional English sub and whisper's ASR use
-                # different phrasing for identical speech, false-
-                # rejecting legitimate matches (Victoria (2015) was
-                # the case that broke this). Content is trusted; only
-                # timing gets alass'd downstream.
+                # Bundled runs WER internally inside `_pick_bundled` (via
+                # the accept callback wired in _fetch_candidate), so a
+                # non-None return already means WER passed — skip the
+                # outer re-verify.
                 if tag == "bundled":
-                    print(f"[pipeline] {video.name!r}: {tag} TRUST (filename match)", flush=True)
+                    print(f"[pipeline] {video.name!r}: {tag} ACCEPT "
+                          f"(WER passed inside pick)", flush=True)
                 else:
                     ok, reason = verify_against_whisper(whisper_src, cand_path, windows)
                     if not ok:
