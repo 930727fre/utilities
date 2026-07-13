@@ -21,12 +21,16 @@ services:
       - OPENSUBTITLES_API_KEY=${OPENSUBTITLES_API_KEY:?OPENSUBTITLES_API_KEY must be exported before docker compose up}
       - OPENSUBTITLES_USERNAME=${OPENSUBTITLES_USERNAME:?OPENSUBTITLES_USERNAME must be exported before docker compose up}
       - OPENSUBTITLES_PASSWORD=${OPENSUBTITLES_PASSWORD:?OPENSUBTITLES_PASSWORD must be exported before docker compose up}
-      # OS_MAX_TRIES: with a paid OpenSubtitles subscription that lifts
-      # daily quota above the free-tier 20, set 3–5 to k-try the top-N
-      # raw OS results per tier (download #1, WER, pass = done; else
-      # #2, etc.). `:-1` keeps it optional; default 1 is single-slot
-      # k-try.
-      - OS_MAX_TRIES=${OS_MAX_TRIES:-1}
+      # OS_MAX_TRIES: k-try the top-N raw OS results per tier (download
+      # #1, WER, pass = done; else #2, etc.). 1 = single-slot k-try
+      # (free-tier friendly, 20 downloads/day cap). 3–5 = paid-tier
+      # setting; higher recall on rips with metadata pollution but
+      # burns quota. Required (no default) — forgetting to set it
+      # silently locked the pipeline to 1 across a whole Friends
+      # rebuild, wasting quota and stamping .whisper-polluted on
+      # episodes that would have salvaged with 3 tries. Fail loudly
+      # at compose parse time instead.
+      - OS_MAX_TRIES=${OS_MAX_TRIES:?OS_MAX_TRIES must be exported before docker compose up (1 = free-tier single-shot, 3-5 = paid tier)}
       # BT_PIPELINE_ENABLED: default 1 = normal (bt_filter LLM + hardlink,
       # whisper, annotation, everything). Set to 0 to make the container
       # a pure aria2 downloader — auto-loops go idle, downloads and

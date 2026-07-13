@@ -10,13 +10,22 @@ from pathlib import Path
 from subs_finder import iter_candidates
 from subs_verifier import verify_against_whisper
 
-# With a paid OpenSubtitles subscription that lifts daily quota above the
-# free-tier 20, set 3–5 to k-try the top-N raw OS results per tier
-# (download, scrubbed-WER, first passer wins). Default 1 = single-slot
-# k-try (behaves the same as the old top-1 path, minus the Haiku metadata
-# gate that was removed). Quota-friendly — we only download the next
-# candidate when the previous one failed WER.
-OS_MAX_TRIES = max(1, int(os.environ.get("OS_MAX_TRIES", "1")))
+# K-try the top-N raw OS results per tier (download, scrubbed-WER,
+# first passer wins). Required (no default): 1 = single-slot k-try
+# (free-tier friendly, 20 downloads/day cap); 3–5 = paid tier, higher
+# recall on rips with metadata pollution but burns quota.
+#
+# Env var is enforced at compose parse time via `${OS_MAX_TRIES:?...}`,
+# so an unset var never reaches Python. This raise-on-missing here is
+# defense in depth for direct-Python invocations (tests, CLI probes)
+# that don't go through compose.
+_raw = os.environ.get("OS_MAX_TRIES")
+if _raw is None:
+    raise RuntimeError(
+        "OS_MAX_TRIES not set — pipeline needs an explicit value "
+        "(1 = free-tier single-shot, 3-5 = paid tier)"
+    )
+OS_MAX_TRIES = max(1, int(_raw))
 
 
 def _indexed_pattern(dest: Path) -> str:
