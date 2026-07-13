@@ -103,15 +103,29 @@ def generate_json(prompt: str, response_schema: dict, *,
     for attempt in range(MAX_RETRIES):
         try:
             r = requests.post(API_URL, json=body, headers=headers, timeout=timeout)
-            if r.status_code == 429 or 500 <= r.status_code < 600:
-                last_exc = RuntimeError(f"Anthropic {r.status_code}: {r.text[:200]}")
-                time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])
-                continue
-            r.raise_for_status()
-            tool_input = _extract_tool_input(r.json())
-            return tool_input["result"] if unwrap else tool_input
         except requests.RequestException as e:
             last_exc = e
             time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])
+            continue
+
+        if r.status_code == 429 or 500 <= r.status_code < 600:
+            # Retriable: rate limit or transient server error.
+            last_exc = RuntimeError(f"Anthropic {r.status_code}: {r.text[:1000]}")
+            time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])
+            continue
+
+        if r.status_code >= 400:
+            # Non-retriable client error (400 bad request, 401 auth, 403,
+            # 404, etc.). Response body carries the actual reason (bad
+            # schema, deprecated model, disabled beta feature, prompt
+            # too long, etc.) — bail out immediately with it in the
+            # message rather than silently retrying to the same failure.
+            raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:1000]}")
+
+        try:
+            tool_input = _extract_tool_input(r.json())
+        except (RuntimeError, ValueError) as e:
+            raise RuntimeError(f"Anthropic response parse failed: {e}; body={r.text[:1000]}")
+        return tool_input["result"] if unwrap else tool_input
 
     raise RuntimeError(f"Anthropic call failed after {MAX_RETRIES} attempts: {last_exc}")
