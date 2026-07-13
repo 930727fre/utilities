@@ -213,6 +213,17 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
        rendering; OCR errors on italics + music glyphs but readable
        enough that Sonnet annotation is unaffected.
 
+   2d. vobsub-ocr → _sources/<stem>.vobsub-ocr.srt
+       Last-resort same-source lane for older Blu-ray rips that
+       preserved the original DVD-era VobSub track instead of
+       stripping it or re-OCRing to PGS. ffmpeg demuxes the
+       VobSub bitstream to a `.idx` + `.sub` pair; vobsub2srt
+       drives tesseract on the 720×480/576 4-color bitmaps.
+       ~85% character accuracy (lower than PGS because DVD
+       bitmaps have more aliasing than HD PGS renderings), still
+       far better than whisper ASR for content match. Common on
+       Friends x265 Silence and other older sitcom/drama rips.
+
 3. whisper (only reached when Stage A misses)
      HTTP to shared service, GPU-gated (10-30 min per video).
      → _sources/<stem>.whisper.srt
@@ -417,5 +428,6 @@ Two workers at the episode level (`translator_executor` with `max_workers=2`); i
 
 - `jobs.json` is file-locked, not a real DB. Single-user is fine; for concurrent users move to SQLite.
 - Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
-- bt mode handles text-based embedded subtitles across containers (mkv subrip, mp4 mov_text, WebM webvtt, mkv/mp4 ASS/SSA; ffmpeg's `-c:s srt` strips override tags and converts everything to SubRip on extraction) and PGS bitmap tracks via OCR (`pgsrip → tesseract`, second candidate). Heavy ASS typesetting (anime karaoke, sign translations) can leave styling residue — the WER gate catches gross cases and the pipeline falls through to the next candidate. VobSub (DVD-era image format) is skipped — almost no modern rip uses it.
+- bt mode handles text-based embedded subtitles across containers (mkv subrip, mp4 mov_text, WebM webvtt, mkv/mp4 ASS/SSA; ffmpeg's `-c:s srt` strips override tags and converts everything to SubRip on extraction), PGS bitmap tracks via OCR (`pgsrip → tesseract`), and VobSub bitmap tracks via OCR (`vobsub2srt → tesseract`). Heavy ASS typesetting (anime karaoke, sign translations) can leave styling residue — the WER gate catches gross cases and the pipeline falls through to the next candidate.
+- OpenSubtitles text-search precision is spotty on generic show titles. `/subtitles?query=Friends&season_number=1&episode_number=7` empirically returns cross-season E7 subs (S5E7, S7E7, S9E7 seen in practice) — the API's title-only match seems to fall through the season filter for common words, or uploader metadata is systemically mislabeled at high rates. The WER gate downstream catches wrong-episode subs but only after burning download quota. **If it starts costing real quota:** the fix is to look up the series' IMDB/TMDB id first via `/features?query=<title>&type=tvshow` and then `/subtitles?parent_imdb_id=<id>&season_number=...&episode_number=...` — hard-binds the filter to the specific series. Not urgent while most rips have usable embedded / PGS / VobSub tracks (which skip OS entirely).
 - The Chinese translation cascade has no whisper fallback (whisper produces English, which would defeat the point). If a batch's API call fails or the validator can't recover from a missing-cue response, the missing cues silently keep their English lines (the rest of the SRT is still useful). If the whole translation raises (e.g. all calls hit a long Gemini outage), the video lands at `中 !` and stays there until the user clicks the torrent's button again to retry.

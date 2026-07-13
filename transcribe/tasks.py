@@ -18,7 +18,7 @@ from archive import (
 )
 from bt_filter import _sources_path
 from bundled import pick_bundled_min_wer, pick_bundled_smart_plot
-from container_subs import extract_embedded, extract_pgs_ocr
+from container_subs import extract_embedded, extract_pgs_ocr, extract_vobsub_ocr
 from os_tier import fetch_os_ktry, os_ktry
 from srt_source import (
     annotate_failed_path,
@@ -358,7 +358,7 @@ def _run_transcription(job_id: str, staging_mp4: str):
 # construction. Only the "external release" tiers (bundled / OS) need
 # whisper as content-match reference (normal WER) or pollution
 # indicator (polluted-mode plot-check dispatch).
-_WHISPER_INDEPENDENT_TAGS = ("archive", "embedded", "pgs-ocr")
+_WHISPER_INDEPENDENT_TAGS = ("archive", "embedded", "pgs-ocr", "vobsub-ocr")
 _WHISPER_DEPENDENT_TAGS = ("bundled", "opensubtitles-hash", "opensubtitles-text")
 
 def _fetch_candidate(
@@ -396,6 +396,9 @@ def _fetch_candidate(
 
     if tag == "pgs-ocr":
         return extract_pgs_ocr(video, dest)
+
+    if tag == "vobsub-ocr":
+        return extract_vobsub_ocr(video, dest)
 
     if tag == "bundled":
         # Normal mode: score every wrapper sub against whisper, pick

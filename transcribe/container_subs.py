@@ -17,6 +17,7 @@ from pathlib import Path
 FFPROBE_PROBE_TIMEOUT = 30         # JSON stream probe — milliseconds in practice
 FFMPEG_SUB_EXTRACT_TIMEOUT = 60    # demux one subtitle stream (no transcode) — seconds on a movie-sized container
 PGS_OCR_TIMEOUT = 10 * 60          # tesseract OCR of a 50-min episode's PGS — ~1-3 min typical
+VOBSUB_OCR_TIMEOUT = 10 * 60       # vobsub2srt OCR — similar order to PGS (DVD-res bitmaps, fewer per second)
 
 # Text-based subtitle codecs ffmpeg can convert to SubRip via `-c:s srt`.
 # ASS/SSA included: ffmpeg strips `{\an8}` / `\N` override tags on the way
@@ -239,4 +240,99 @@ def extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
             return None
 
     print(f"[pgs-ocr] OCR'd PGS stream {stream_idx} ({lang_label}) → {dest.name}", flush=True)
+    return dest
+
+
+def extract_vobsub_ocr(video: Path, dest: Path) -> Path | None:
+    """Extract a VobSub (DVD-era bitmap) subtitle track and OCR it to SRT
+    via ffmpeg (demux to .idx+.sub) → vobsub2srt → tesseract. Same-source
+    extraction like the PGS path: timing is byte-perfect with the video
+    master, so alass is skipped downstream. Cue-count gate catches
+    complete OCR failures.
+
+    VobSub is the DVD-era bitmap subtitle format: 720x480 (NTSC) or
+    720x576 (PAL) 4-color palette bitmaps. ffprobe reports the codec
+    as `dvd_subtitle`. Common on older sitcom / drama Blu-ray x265
+    rips that preserved the original DVD subtitle track instead of
+    stripping or re-OCRing it (Silence, some x265 HEVC groups). If the
+    embedded tier missed and pgs-ocr missed too, this is the last
+    same-source lane before falling through to whisper.
+
+    OCR character accuracy is ~85% — lower than PGS's ~95% because
+    DVD 480/576-line bitmaps have more aliasing than HD PGS renderings.
+    Still substantially better than whisper ASR for content match,
+    and Sonnet annotation is robust to minor OCR typos.
+
+    ffmpeg outputs VobSub as a `.idx` + `.sub` file pair — one is
+    the packet index / palette / timing table, the other is the raw
+    bitstream. vobsub2srt reads both (given the shared basename)
+    and drives tesseract on the extracted bitmaps.
+    """
+    found = _find_subtitle_track(video, lambda c: c == "dvd_subtitle")
+    if found is None:
+        return None
+    stream_idx, lang_label = found
+
+    with tempfile.TemporaryDirectory(prefix="vobsub-") as tmpdir:
+        tmp = Path(tmpdir)
+        sub_prefix = tmp / "track"      # ffmpeg writes track.idx + track.sub
+        idx_path = sub_prefix.with_suffix(".idx")
+        sub_path = sub_prefix.with_suffix(".sub")
+
+        # 1. ffmpeg demux VobSub bitstream to .idx + .sub. `-c:s copy`
+        # keeps raw packets intact; ffmpeg writes both siblings when
+        # the output filename ends in .idx (the sub payload lands at
+        # the matching .sub automatically).
+        try:
+            r = subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error",
+                 "-i", str(video),
+                 "-map", f"0:{stream_idx}",
+                 "-c:s", "copy",
+                 str(idx_path)],
+                capture_output=True,
+                timeout=FFMPEG_SUB_EXTRACT_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            print(f"[vobsub-ocr] ffmpeg VobSub demux failed for {video.name!r}: {e}", flush=True)
+            return None
+        if (r.returncode != 0
+                or not idx_path.exists() or not sub_path.exists()
+                or sub_path.stat().st_size == 0):
+            stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+            if stderr:
+                print(f"[vobsub-ocr] ffmpeg rc={r.returncode} for {video.name!r}: {stderr[-200:]}", flush=True)
+            return None
+
+        # 2. vobsub2srt takes the shared basename (finds both .idx +
+        # .sub automatically) and writes .srt alongside.
+        try:
+            r = subprocess.run(
+                ["vobsub2srt", "--tesseract-lang", "eng", str(sub_prefix)],
+                capture_output=True,
+                timeout=VOBSUB_OCR_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            print(f"[vobsub-ocr] vobsub2srt failed for {video.name!r}: {e}", flush=True)
+            return None
+        if r.returncode != 0:
+            tail = (r.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()[-1:]
+            print(f"[vobsub-ocr] vobsub2srt rc={r.returncode} for {video.name!r}: {tail}", flush=True)
+            return None
+
+        srt_output = sub_prefix.with_suffix(".srt")
+        if not srt_output.exists() or srt_output.stat().st_size == 0:
+            print(f"[vobsub-ocr] no .srt produced by vobsub2srt for {video.name!r}", flush=True)
+            return None
+
+        # 3. Promote to dest — the tempdir cleanup at scope exit will
+        # reap the OCR scratch (.idx, .sub, .srt).
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(str(srt_output), str(dest))
+        except OSError as exc:
+            print(f"[vobsub-ocr] copy to {dest} failed: {exc}", flush=True)
+            return None
+
+    print(f"[vobsub-ocr] OCR'd VobSub stream {stream_idx} ({lang_label}) → {dest.name}", flush=True)
     return dest
