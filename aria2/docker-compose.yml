@@ -2,9 +2,10 @@ services:
   aria2-gluetun:
     # Sidecar that provides the network namespace + VPN tunnel for the
     # aria2 service. All aria2 outbound (BT trackers, DHT, peer traffic)
-    # exits through PIA; kill-switch is implicit — if this container
-    # dies or the tunnel drops, aria2 (which shares this netns) also
-    # loses connectivity, so no clear-text leak on VPN failure.
+    # exits through Surfshark; kill-switch is implicit — if this
+    # container dies or the tunnel drops, aria2 (which shares this
+    # netns) also loses connectivity, so no clear-text leak on VPN
+    # failure.
     image: qmcgaw/gluetun
     container_name: aria2-gluetun
     cap_add:
@@ -12,44 +13,35 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      - VPN_SERVICE_PROVIDER=private internet access
-      - OPENVPN_USER=${PIA_USER:?PIA_USER must be exported before docker compose up}
-      - OPENVPN_PASSWORD=${PIA_PASSWORD:?PIA_PASSWORD must be exported before docker compose up}
-      # Netherlands is one of the PIA regions that supports port
-      # forwarding (US regions dropped PF years ago). Switch to any
-      # other PF-supporting region if you prefer (Romania / Sweden /
-      # Switzerland / Czech Republic / Israel / Spain).
+      - VPN_SERVICE_PROVIDER=surfshark
+      # NOT your Surfshark web login — the "Manual setup" credentials
+      # from Account → VPN → Manual setup → Credentials. Different
+      # from the account password; needs regenerating if compromised.
+      - OPENVPN_USER=${SURFSHARK_USER:?SURFSHARK_USER must be exported before docker compose up}
+      - OPENVPN_PASSWORD=${SURFSHARK_PASSWORD:?SURFSHARK_PASSWORD must be exported before docker compose up}
+      # Netherlands picked for low RTT + P2P-friendly jurisdiction.
+      # Surfshark doesn't do per-region PF differences (they don't
+      # support port forwarding on any gateway) so just pick something
+      # fast.
       - SERVER_REGIONS=Netherlands
-      # PIA gives us a forwarded port after the tunnel comes up.
-      # gluetun writes it to /tmp/gluetun/forwarded_port; the aria2
-      # service reads it at spawn time and passes --listen-port to
-      # aria2c so BT seeding is actually reachable. Without this,
-      # seeding is severely limited — only peers you first-connected-to
-      # during download can pull from you, ratio stalls around 0.1-0.3.
-      - VPN_PORT_FORWARDING=on
-      # gluetun's HTTP control server (default port 8000) exposes
-      # `/v1/openvpn/portforwarded`. Aria2 could poll this to find the
-      # current forwarded port, but reading /tmp/gluetun/forwarded_port
-      # via the shared volume is simpler + no HTTP retry logic needed.
-      # We leave the control server on 8000 (default) but don't
-      # advertise it externally; aria2 REST API takes 8080 to avoid
-      # sharing 8000 within the same netns.
+      # No port forwarding on Surfshark. aria2c spawns without
+      # --listen-port and binds an ephemeral port in its default range
+      # (6881-6999). BT peers can't connect INBOUND to us — seeding
+      # is limited to peers we handshaked with during download, so the
+      # SEED_RATIO=1.0 target in bt_torrents rarely gets hit and
+      # SEED_TIME_MIN=1440 (24h) is what actually terminates each
+      # subprocess.
       #
       # Let RPC calls from the transcribe container reach our aria2 REST
       # API (port 8080, on this netns) via my_network. Anything OUTBOUND
-      # from the aria2 namespace still goes through PIA — my_network
-      # subnets are only whitelisted for INBOUND acceptance.
+      # from the aria2 namespace still goes through Surfshark —
+      # my_network subnets are only whitelisted for INBOUND acceptance.
       - FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
     ports:
       # aria2 REST API is bound inside this netns on 8080; expose it
       # so other containers on my_network see `aria2-gluetun:8080` and
       # the host can reach it directly for debugging.
       - "8080:8080"
-    volumes:
-      # Shared with the aria2 service so it can read
-      # /gluetun-shared/forwarded_port. gluetun writes /tmp/gluetun/*
-      # internally; we bind-mount that path out via this named volume.
-      - gluetun-shared:/tmp/gluetun
     networks:
       - my_network
     restart: unless-stopped
@@ -72,17 +64,8 @@ services:
       # Relative path assumes utilities/aria2 and utilities/transcribe
       # are siblings, which matches the standard layout.
       - ../transcribe/data/bt:/data/bt
-      # Read gluetun's forwarded_port file — bt_torrents reads this at
-      # aria2c-spawn time and passes --listen-port so PIA's forwarded
-      # port matches the port aria2c is actually listening on.
-      - gluetun-shared:/gluetun-shared:ro
     command: uvicorn main:app --host 0.0.0.0 --port 8080
     restart: unless-stopped
-
-volumes:
-  # Bridges gluetun's /tmp/gluetun/forwarded_port to the aria2 service
-  # so it can read the PIA-negotiated port for --listen-port.
-  gluetun-shared:
 
 networks:
   my_network:

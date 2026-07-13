@@ -1,6 +1,6 @@
 # aria2
 
-Standalone BT downloader that routes all peer / tracker / DHT traffic through PIA via [gluetun](https://github.com/qdm12/gluetun). Extracted from `transcribe/` so transcribe's LLM/OS API calls can stay on direct network without VPN throttling.
+Standalone BT downloader that routes all peer / tracker / DHT traffic through Surfshark via [gluetun](https://github.com/qdm12/gluetun). Extracted from `transcribe/` so transcribe's LLM / OS API calls can stay on direct network without VPN throttling.
 
 Exposes a small REST API (`POST /torrents`, `GET /torrents`, `DELETE /torrents/{wrapper}`) on `http://aria2-gluetun:8080` reachable from other containers on the shared `my_network` Docker overlay.
 
@@ -8,26 +8,26 @@ Exposes a small REST API (`POST /torrents`, `GET /torrents`, `DELETE /torrents/{
 
 - **One-shot aria2c per magnet** — no daemon, no shared session state. Each magnet spawns its own `aria2c` subprocess into a per-torrent wrapper folder under `/data/bt`. Subprocess exits when both seed-time (1440 min) and seed-ratio (1.0) limits are hit. State comes from disk (`.aria2` control file) + an in-memory dict of live `Popen` handles.
 - **Kill-switch via netns sharing** — the `aria2` container has `network_mode: "service:aria2-gluetun"` and no networks of its own. If gluetun dies or the VPN tunnel drops, aria2 loses connectivity → no clear-text leak.
-- **PIA port forwarding** — gluetun writes the negotiated peer port to `/tmp/gluetun/forwarded_port`; that path is shared with the aria2 container via a named docker volume (`gluetun-shared`). Each aria2c spawn reads the file and passes `--listen-port=<PIA-port>` so incoming BT peer connections actually reach us. Without this, seeding is severely capacity-limited (typical ratio stalls around 0.1-0.3).
+- **No port forwarding** — Surfshark's stated policy is that they don't offer port forwarding on any gateway. Aria2c binds an ephemeral port in its default range (6881-6999) and BT peers cannot reach us inbound. Seeding is limited to peers we handshaked with during download, so the `SEED_RATIO=1.0` target rarely gets hit and `SEED_TIME_MIN=1440` (24 h) is what actually terminates each subprocess. If you switch to a PF-supporting VPN (PIA / Proton / AirVPN), see the comment block in `bt_torrents.py` for the changes needed to reintroduce `--listen-port`.
 
 ## Config
 
-Only PIA credentials are required. Both use compose's `${VAR:?...}` syntax so a missing export fails `docker compose up` at parse time.
+Surfshark credentials — **use the "Manual setup" credentials from your Surfshark account panel** (Account → VPN → Manual setup → Credentials), NOT your web login. Both use compose's `${VAR:?...}` syntax so a missing export fails `docker compose up` at parse time.
 
 ```sh
-export PIA_USER=...
-export PIA_PASSWORD=...
+export SURFSHARK_USER=...
+export SURFSHARK_PASSWORD=...
 docker compose up -d --build
 ```
 
-The default region is `Netherlands` (a PIA gateway that supports port forwarding — US regions dropped PF years ago). Edit `docker-compose.yml` to switch to Romania / Sweden / Switzerland / Czech Republic / Israel / Spain if you prefer.
+The default region is `Netherlands` (low RTT + P2P-friendly). Edit `docker-compose.yml` to switch — Surfshark has no per-region behavior differences for us (port forwarding isn't a factor), just pick something fast.
 
 ## Verify
 
 ```sh
-# tunnel + forwarded port ready?
+# aria2 process reachable through gluetun's netns?
 curl -s http://aria2-gluetun:8080/health
-# → {"ok":true,"forwarded_port":54321}
+# → {"ok":true}
 
 # submit a magnet
 curl -s -X POST http://aria2-gluetun:8080/torrents \
@@ -38,7 +38,7 @@ curl -s -X POST http://aria2-gluetun:8080/torrents \
 # list
 curl -s http://aria2-gluetun:8080/torrents
 
-# delete
+# delete (kill subprocess only; caller cleans up wrapper dir on the shared bind-mount)
 curl -s -X DELETE http://aria2-gluetun:8080/torrents/<wrapper-name>
 ```
 
@@ -50,4 +50,4 @@ If your transcribe repo lives elsewhere, adjust the `volumes:` entry in `docker-
 
 ## Startup dependency
 
-`aria2` waits for `aria2-gluetun` to start (`depends_on: service_started`), but not for the VPN tunnel to be fully up. If aria2c spawns before gluetun negotiates the forwarded port, `--listen-port` gets omitted (falls back to aria2's default) with a log line. The next spawn after gluetun is ready picks up the correct port. In practice, if you `docker compose up` cold, the first submission is likely to hit this — resubmit after ~10 s.
+`aria2` waits for `aria2-gluetun` to start (`depends_on: service_started`), but not for the VPN tunnel to be fully up. If aria2c spawns before gluetun's OpenVPN handshake completes, it just fails to reach trackers and retries on aria2's own schedule; the tunnel usually comes up within ~5 s so this is a self-healing hiccup rather than a real failure mode.

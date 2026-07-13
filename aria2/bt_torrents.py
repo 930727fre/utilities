@@ -12,12 +12,14 @@ Design contract:
   * Each torrent lands in its own per-torrent wrapper folder under
     `/data/bt` regardless of single- vs multi-file, derived from the
     magnet's `dn=` parameter. DELETE always rmtree's the wrapper.
-  * Aria2c is spawned with `--listen-port=<PIA-forwarded-port>` so BT
-    peers can actually reach us for seeding through the VPN. The port
-    is read from `/gluetun-shared/forwarded_port` — gluetun writes it
-    after the tunnel establishes. Zero-configuration on our side; if
-    the file isn't there (VPN just came up, gluetun restarted), we
-    fall back to aria2c's default and log the fact.
+  * Aria2c binds an ephemeral port in its default range (6881-6999).
+    Since Surfshark doesn't offer port forwarding, incoming peer
+    connections can't reach us; seeding relies on peers we handshaked
+    with during download. Ratio rarely hits SEED_RATIO=1.0, so
+    subprocesses typically terminate at SEED_TIME_MIN=1440 (24h)
+    instead. Switching to a PF-supporting VPN (PIA / Proton / AirVPN)
+    would need a `--listen-port=<forwarded_port>` here and a way to
+    surface gluetun's forwarded_port file to this container.
 
 Why no `.sh` on-bt-download-complete hook: aria2c writes a
 `<file>.aria2` control file while a download is in flight and deletes it
@@ -32,10 +34,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 BT_LIBRARY = Path("/data/bt")
-
-# gluetun writes the PIA-forwarded port here after the tunnel comes up.
-# The compose file bind-mounts gluetun's /tmp/gluetun into this path.
-FORWARDED_PORT_FILE = Path("/gluetun-shared/forwarded_port")
 
 # Seed limits applied to every torrent. aria2c exits when either limit is hit.
 SEED_TIME_MIN = 1440
@@ -89,27 +87,6 @@ def _pick_wrapper_dir(magnet: str) -> Path:
     return candidate
 
 
-# ── PIA forwarded port ────────────────────────────────────────────────────
-
-def _read_forwarded_port() -> int | None:
-    """Read gluetun's PIA-forwarded port for use with aria2c
-    `--listen-port`. Returns None if the file isn't there (VPN just
-    starting up, gluetun still handshaking) — caller falls back to
-    aria2c's default and accepts that seeding may be limited until
-    the port file appears on the next spawn."""
-    try:
-        text = FORWARDED_PORT_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    try:
-        port = int(text)
-    except ValueError:
-        return None
-    if not (1024 <= port <= 65535):
-        return None
-    return port
-
-
 # ── Submit / list / delete ─────────────────────────────────────────────────
 
 def _spawn(wrapper: Path, source: str) -> None:
@@ -125,15 +102,8 @@ def _spawn(wrapper: Path, source: str) -> None:
         "--enable-color=false",
         "--console-log-level=warn",
         "--summary-interval=0",
+        source,
     ]
-    port = _read_forwarded_port()
-    if port is not None:
-        cmd.append(f"--listen-port={port}")
-    else:
-        print(f"[aria2c {wrapper.name[:30]}] no PIA forwarded port available; "
-              f"seeding will be reachability-limited until gluetun writes "
-              f"the port file", flush=True)
-    cmd.append(source)
 
     proc = subprocess.Popen(
         cmd,

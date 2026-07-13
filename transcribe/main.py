@@ -36,8 +36,8 @@ from tasks import enumerate_playlist, executor, process_bt_file, process_video
 
 WHISPER_URL = os.environ.get("WHISPER_URL", "http://whisper:8000")
 # aria2 subprocess management lives in a separate container so BT traffic
-# routes through PIA gluetun VPN while all other transcribe API calls
-# stay on my_network direct. See utilities/aria2/ for the service.
+# routes through Surfshark gluetun VPN while all other transcribe API
+# calls stay on my_network direct. See utilities/aria2/ for the service.
 ARIA2_URL = os.environ.get("ARIA2_URL", "http://aria2-gluetun:8080")
 _aria2_client = httpx.Client(base_url=ARIA2_URL, timeout=30.0)
 

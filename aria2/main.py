@@ -4,7 +4,7 @@ Endpoints
     POST   /torrents          {"magnet": "magnet:?..."}         → {"wrapper": "..."}
     GET    /torrents                                             → [{name, phase, progress?}, ...]
     DELETE /torrents/{wrapper}                                   → 204
-    GET    /health                                               → {"ok": true, "forwarded_port": <int|null>}
+    GET    /health                                               → {"ok": true}
 
 Lifespan handles subprocess bookkeeping across container restarts:
     startup  → bt_torrents.resume_all()  (re-attach aria2c to any
@@ -42,13 +42,10 @@ class MagnetRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    """Cheap probe. Reports the PIA forwarded port so upstream can tell
-    whether seeding is currently reachable (null before tunnel handshake
-    or if the forwarded-port file isn't accessible)."""
-    return {
-        "ok": True,
-        "forwarded_port": bt_torrents._read_forwarded_port(),
-    }
+    """Cheap probe. Just confirms the FastAPI process is up + reachable
+    on this netns (which implies gluetun's tunnel is up too, since we
+    share its network namespace)."""
+    return {"ok": True}
 
 
 @app.post("/torrents", status_code=201)
