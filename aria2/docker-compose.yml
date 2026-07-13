@@ -27,11 +27,11 @@ services:
       # is not needed here.
       - WIREGUARD_PRIVATE_KEY=${SURFSHARK_WG_PRIVATE_KEY:?SURFSHARK_WG_PRIVATE_KEY must be exported before docker compose up}
       - WIREGUARD_ADDRESSES=${SURFSHARK_WG_ADDRESSES:?SURFSHARK_WG_ADDRESSES must be exported before docker compose up (e.g. 10.14.0.42/16)}
-      # Netherlands picked for low RTT + P2P-friendly jurisdiction.
-      # Surfshark doesn't do per-region PF differences (they don't
-      # support port forwarding on any gateway) so just pick something
-      # fast.
-      - SERVER_REGIONS=Netherlands
+      # Netherlands picked for P2P-friendly jurisdiction + dense EU
+      # peer coverage. Surfshark's gluetun provider uses country-level
+      # SERVER_COUNTRIES (not the PIA-style SERVER_REGIONS which for
+      # Surfshark means the coarse "Europe" / "Asia Pacific" bucket).
+      - SERVER_COUNTRIES=Netherlands
       # No port forwarding on Surfshark. aria2c spawns without
       # --listen-port and binds an ephemeral port in its default range
       # (6881-6999). BT peers can't connect INBOUND to us — seeding
