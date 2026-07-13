@@ -106,7 +106,7 @@ YouTube filename collisions get `(2)`, `(3)`, … suffixes; titles sanitized for
 Prereqs:
 - External Docker network `my_network`.
 - The shared [whisper](../whisper) service must be running first — startup health-checks it and crashes if unreachable.
-- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet), bt_filter's main-feature classifier (Opus + web search — one call per torrent, generates a regex for TV packs so token/episode-count is decoupled), and the polluted-whisper plot-check fallback (Opus + web search — rare invocation, but Opus is what recalls specific episode plots reliably; Haiku and Gemini were tested and failed on episode-level discrimination).
+- `ANTHROPIC_API_KEY` exported in the shell — required for annotation (Sonnet), bt_filter's main-feature classifier (Opus + web search — one call per torrent, generates a regex for TV packs so token/episode-count is decoupled), and the polluted-whisper plot-check fallback (Sonnet + web search — rare invocation; Haiku and Gemini were tested and failed on episode-level discrimination, Sonnet is the smallest tier known to hold up).
 - `GEMINI_API_KEY` exported — required for the bt "translate to 中" button (10-cue Gemini Flash Lite batches). Get one at https://aistudio.google.com/apikey.
 - `OPENSUBTITLES_API_KEY` / `OPENSUBTITLES_USERNAME` / `OPENSUBTITLES_PASSWORD` exported — required for the OpenSubtitles step. Get an API key by registering a Consumer at https://www.opensubtitles.com/.
 
@@ -282,19 +282,20 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
 6. Whisper-dependent tiers (polluted — plot-check path)
      Runs only when pollution > 50% (WER disabled at step 4).
      Same tiers as step 5 but different accept callback:
-     `verify_by_plot` (Opus 4.7 + web_search, ~$0.10/call). Reads
+     `verify_by_plot` (Sonnet 4.6 + web_search, ~$0.02/call). Reads
      the candidate's full dialogue (timestamps stripped, ~10-15K
      tokens for a TV episode) and decides whether it matches the
-     target episode's plot. Full dialogue beats sampling; at Opus's
-     rates a full episode is a handful of cents. Haiku and Gemini
-     flash-lite were empirically inadequate for episode-level
-     discrimination.
+     target episode's plot. Full dialogue beats sampling; a whole
+     episode is a fraction of a cent. Haiku and Gemini flash-lite were
+     empirically inadequate for episode-level discrimination; Sonnet
+     is the smallest tier known to hold up.
 
      For bundled, iterating plot-check on every wrapper sub would
-     be too expensive on a season pack (30+ subs = $3+), so a Haiku
+     be too expensive on a season pack (30+ subs), so a Haiku
      smart-pick narrows to one candidate by filename convention
      first, then plot-check verifies content on that pick alone.
-     ~$0.10 per bundled attempt regardless of wrapper size.
+     One Haiku pick + one Sonnet plot-check per bundled attempt,
+     regardless of wrapper size.
 
      For OS tiers, the k-try structure stays the same, just with
      plot-check as accept instead of WER.

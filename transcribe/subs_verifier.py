@@ -24,15 +24,15 @@ the 0.5 pass margin.
 `verify_by_plot(candidate_srt, show, season, episode)` — LLM fallback
 gate for the edge case where pollution covers > 50% of runtime and WER
 mathematically can't discriminate a good candidate from a bad one.
-Sends the candidate's full dialogue (timestamps stripped) to Opus
+Sends the candidate's full dialogue (timestamps stripped) to Sonnet
 (with web_search) and asks whether it matches the target episode's
 known plot. TV episodes run ~10–15K input tokens, movies ~25–30K —
-trivially within Opus's context and priced at pennies per check,
-below sampling's savings threshold. Only invoked in the coverage-bail
-branch of the bt pipeline; regular runs never see this. Opus is
-deliberate — Haiku and Gemini flash-lite were both tested and neither
-could discriminate specific episodes reliably. See caller in
-`tasks.process_bt_file`.
+trivially within context and priced at pennies per check, below
+sampling's savings threshold. Only invoked in the coverage-bail branch
+of the bt pipeline; regular runs never see this. Model tier: Haiku
+and Gemini flash-lite were both tested and neither could discriminate
+specific episodes reliably; Sonnet is the smallest tier known to hold
+up. See caller in `tasks.process_bt_file`.
 
 The metadata (Haiku) prefilter this module used to carry was removed:
 WER is authoritative — a candidate whose release-name / SxxExx metadata
@@ -406,16 +406,18 @@ def verify_against_whisper(
 
 # ── LLM plot-check fallback (>50% pollution edge case) ────────────────────
 
-# Opus 4.7 with web search. Haiku and Gemini flash-lite were both
+# Sonnet 4.6 with web search. Haiku and Gemini flash-lite were both
 # empirically inadequate for episode-level discrimination (Haiku
 # hallucinated matches on wrong episodes of the same show; Gemini
-# guessed "yes" whenever the show was recognizable). Opus recalls
-# specific plot beats reliably; web search fills gaps for episodes
-# outside its training coverage. Per-check cost is a handful of cents
-# (TV episode ~10-15K input tokens at $5/M + web_search $0.01/query,
-# max 3 queries), and the trigger (>50% whisper pollution) is rare
-# enough that this doesn't materially move total pipeline cost.
-_PLOT_MODEL = "claude-opus-4-7"
+# guessed "yes" whenever the show was recognizable). Sonnet is the
+# smallest tier that hasn't been shown to fail on this task — Opus was
+# used previously but the middle tier was never actually tested, and
+# Sonnet's long-context + factual recall are strong enough that Opus
+# was likely over-provisioning. Web search fills gaps for episodes
+# outside training coverage regardless of tier. If Sonnet turns out
+# to false-positive on wrong-episode discrimination, revert to
+# `claude-opus-4-7` and record the failure here.
+_PLOT_MODEL = "claude-sonnet-4-6"
 _PLOT_WEB_SEARCH_MAX_USES = 3
 
 _PLOT_SCHEMA = {
@@ -598,12 +600,12 @@ def verify_by_plot(
     Returns (accept, reason). Used only in the polluted-whisper >50%
     coverage fallback where WER can't discriminate.
 
-    Sends the candidate's full dialogue (timestamps stripped) so Opus
-    doesn't have to guess based on partial sampling — timestamps
+    Sends the candidate's full dialogue (timestamps stripped) so the
+    model doesn't have to guess based on partial sampling — timestamps
     convey no plot information for content-match and their bulk is
     real tokens we'd rather not pay for.
 
-    See module docstring for why Opus + web_search specifically."""
+    See module docstring for why Sonnet + web_search specifically."""
     cues = _real_cues(candidate_srt)
     if len(cues) < MIN_REAL_CUES:
         return False, (
