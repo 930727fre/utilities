@@ -996,12 +996,23 @@ def _fetch_os_ktry(
     if winner is None:
         return None
 
-    # Promote the winner copy to the canonical single-path dest the outer
-    # loop expects. Losing candidates stay at their indexed paths.
+    # Point the un-indexed dest at the winning indexed candidate via
+    # relative symlink. Two purposes:
+    #   1) outer loop reads from a stable path (`<stem>.<tag>.srt`)
+    #      regardless of which -N.srt actually won
+    #   2) dest.exists() cache in _fetch_candidate short-circuits
+    #      replays — otherwise a re-run would re-invoke accept() on
+    #      every cached -N.srt, which is expensive when accept is
+    #      plot-check (Opus + web search per candidate)
+    # Relative link (not absolute) survives host-side path changes as
+    # long as -N.srt stays alongside .srt, which is how the layout is
+    # designed anyway.
     try:
-        shutil.copy2(str(winner), str(dest))
+        if dest.is_symlink() or dest.exists():
+            dest.unlink()
+        dest.symlink_to(winner.name)
     except OSError as exc:
-        print(f"[pipeline] {video.name!r}: {mode} k-try copy to dest failed — {exc}", flush=True)
+        print(f"[pipeline] {video.name!r}: {mode} k-try symlink to dest failed — {exc}", flush=True)
         return None
     return dest
 
@@ -1099,11 +1110,16 @@ def _polluted_fallback_pick_candidate(
             if winner is None:
                 continue
 
+            # Same rationale as _fetch_os_ktry: relative symlink dest →
+            # winning -N.srt so the cache short-circuits replay without
+            # duplicating file content on disk.
             try:
-                shutil.copy2(str(winner), str(cand_dest))
+                if cand_dest.is_symlink() or cand_dest.exists():
+                    cand_dest.unlink()
+                cand_dest.symlink_to(winner.name)
             except OSError as exc:
-                print(f"[pipeline] {video.name!r}: polluted-mode {mode} k-try copy "
-                      f"to canonical dest failed: {exc}", flush=True)
+                print(f"[pipeline] {video.name!r}: polluted-mode {mode} k-try "
+                      f"symlink to dest failed: {exc}", flush=True)
                 continue
 
             # OS candidates need alass alignment (their timeline was authored
