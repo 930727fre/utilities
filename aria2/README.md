@@ -12,15 +12,17 @@ Exposes a small REST API (`POST /torrents`, `GET /torrents`, `DELETE /torrents/{
 
 ## Config
 
-Surfshark credentials — **use the "Manual setup" credentials from your Surfshark account panel** (Account → VPN → Manual setup → Credentials), NOT your web login. Both use compose's `${VAR:?...}` syntax so a missing export fails `docker compose up` at parse time.
+WireGuard over OpenVPN — faster + lower CPU + faster reconnect. Generate the key pair in Surfshark's panel: **Account → VPN → Manual setup → WireGuard → let them generate**. They show the private key ONCE — copy it into Bitwarden. The assigned address (e.g. `10.14.0.42/16`) shows up on the same page.
+
+Both env vars use compose's `${VAR:?...}` syntax so a missing export fails `docker compose up` at parse time.
 
 ```sh
-export SURFSHARK_USER=...
-export SURFSHARK_PASSWORD=...
+export SURFSHARK_WG_PRIVATE_KEY='...long base64 blob...'
+export SURFSHARK_WG_ADDRESSES='10.14.0.42/16'
 docker compose up -d --build
 ```
 
-The default region is `Netherlands` (low RTT + P2P-friendly). Edit `docker-compose.yml` to switch — Surfshark has no per-region behavior differences for us (port forwarding isn't a factor), just pick something fast.
+The default region is `Netherlands` (P2P-friendly jurisdiction, dense European BT peer coverage). Edit `docker-compose.yml`'s `SERVER_REGIONS` to switch — Surfshark has no PF differences per region, so pick based on RTT / peer proximity / legal comfort.
 
 ## Verify
 
@@ -50,4 +52,4 @@ If your transcribe repo lives elsewhere, adjust the `volumes:` entry in `docker-
 
 ## Startup dependency
 
-`aria2` waits for `aria2-gluetun` to start (`depends_on: service_started`), but not for the VPN tunnel to be fully up. If aria2c spawns before gluetun's OpenVPN handshake completes, it just fails to reach trackers and retries on aria2's own schedule; the tunnel usually comes up within ~5 s so this is a self-healing hiccup rather than a real failure mode.
+`aria2` waits for `aria2-gluetun` to start (`depends_on: service_started`), but not for the VPN tunnel to be fully up. If aria2c spawns before gluetun's WireGuard handshake completes, it just fails to reach trackers and retries on aria2's own schedule; WireGuard usually handshakes within 1-2 s so this is a self-healing hiccup rather than a real failure mode.

@@ -14,11 +14,19 @@ services:
       - /dev/net/tun:/dev/net/tun
     environment:
       - VPN_SERVICE_PROVIDER=surfshark
-      # NOT your Surfshark web login — the "Manual setup" credentials
-      # from Account → VPN → Manual setup → Credentials. Different
-      # from the account password; needs regenerating if compromised.
-      - OPENVPN_USER=${SURFSHARK_USER:?SURFSHARK_USER must be exported before docker compose up}
-      - OPENVPN_PASSWORD=${SURFSHARK_PASSWORD:?SURFSHARK_PASSWORD must be exported before docker compose up}
+      # WireGuard over OpenVPN — kernel-space crypto, higher throughput,
+      # lower CPU during long-running seeds, faster reconnect on
+      # tunnel drops. Surfshark's public key is baked into gluetun's
+      # server list, so we only need to feed OUR side of the pair
+      # (private key + assigned address).
+      - VPN_TYPE=wireguard
+      # Generate at Surfshark: Manual setup → WireGuard → let them
+      # generate the key pair. They show the private key ONCE — copy
+      # it into Bitwarden. Address is what they assigned to you (looks
+      # like "10.14.0.42/16"). Public key is stored on their side and
+      # is not needed here.
+      - WIREGUARD_PRIVATE_KEY=${SURFSHARK_WG_PRIVATE_KEY:?SURFSHARK_WG_PRIVATE_KEY must be exported before docker compose up}
+      - WIREGUARD_ADDRESSES=${SURFSHARK_WG_ADDRESSES:?SURFSHARK_WG_ADDRESSES must be exported before docker compose up (e.g. 10.14.0.42/16)}
       # Netherlands picked for low RTT + P2P-friendly jurisdiction.
       # Surfshark doesn't do per-region PF differences (they don't
       # support port forwarding on any gateway) so just pick something
