@@ -257,8 +257,11 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
        - archive / embedded / pgs-ocr candidates are TRUSTED (prior
          verified run, or container same-source content guarantee) and
          used directly if they materialize
-       - bundled is SKIPPED (multiple SRT candidates in the wrapper,
-         no way to pick the right one without WER)
+       - bundled uses the SAME plot-check accept as OS — walk the
+         wrapper for `.srt` / `.ass` / `.ssa` files, ask Opus whether
+         each is the target episode's dialogue, alass-align the first
+         passer. No OS quota burned since the candidates are already
+         local.
        - opensubtitles-hash / -text run their normal k-try, but the
          accept callback becomes `verify_by_plot` — Opus 4.7 with
          web_search reads the candidate's full dialogue (timestamps

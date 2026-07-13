@@ -750,24 +750,28 @@ _BUNDLED_SUB_EXTS = (".srt", ".ass", ".ssa")
 def _pick_bundled(
     video: Path,
     dest: Path,
-    whisper_src: Path,
-    windows: list[tuple[float, float]],
+    accept_fn: "Callable[[Path], tuple[bool, str]]",
 ) -> Path | None:
     """Scan the bt-side wrapper for subtitle sidecars (`.srt`, `.ass`,
-    `.ssa`) and find one whose content matches the whisper transcript
-    (via WER). First match (sorted by filename) wins, lands at `dest`.
+    `.ssa`) and find the first one `accept_fn` accepts. Winner lands
+    at `dest`.
 
-    ASS/SSA files are ffmpeg-converted to SubRip before the WER check;
-    `{\\an8}` / `\\N` override tags get stripped on the way through.
-    The converted SRT (not the original `.ass`) becomes the candidate.
+    `accept_fn(candidate_srt) -> (ok, reason)` — parameterized so the
+    scan mechanics (walk + ASS→SRT conversion + copy) are decoupled
+    from the content-match strategy. Normal path passes a lambda that
+    calls `verify_against_whisper`; polluted-mode (>50% cue ratio)
+    passes a lambda that calls `verify_by_plot` (LLM plot-check).
+
+    ASS/SSA files are ffmpeg-converted to SubRip before accept; the
+    converted SRT (not the original `.ass`) becomes the candidate.
 
     Filename ordering matters for season packs — `01_English.srt` <
     `01_SDH.srt` alphabetically means the plain English track gets tried
     before SDH variants. Wrong-episode subs (E02's SRT in an E01 lookup)
-    have very high WER and get rejected naturally.
+    should be rejected by whichever accept_fn is in use.
 
     No bonus-dir exclusion: bonus content's SRTs have completely different
-    dialogue from the main feature, so they fail WER without help.
+    dialogue from the main feature, so they fail either verify path.
     """
     wrapper = _find_bt_wrapper(video)
     if wrapper is None:
@@ -803,7 +807,7 @@ def _pick_bundled(
                     stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
                     print(f"[bundled-scan] {video.name!r}: REJECT {rel} — ASS convert empty (rc={r.returncode}) {stderr[-100:]}", flush=True)
                     continue
-                ok, reason = verify_against_whisper(whisper_src, converted, windows)
+                ok, reason = accept_fn(converted)
                 if not ok:
                     print(f"[bundled-scan] {video.name!r}: REJECT {rel} — {reason}", flush=True)
                     continue
@@ -816,7 +820,7 @@ def _pick_bundled(
                     return None
                 return dest
 
-        ok, reason = verify_against_whisper(whisper_src, sub, windows)
+        ok, reason = accept_fn(sub)
         if not ok:
             print(f"[bundled-scan] {video.name!r}: REJECT {rel} — {reason}", flush=True)
             continue
@@ -869,7 +873,9 @@ def _fetch_candidate(
         return _extract_pgs_ocr(video, dest)
 
     if tag == "bundled":
-        return _pick_bundled(video, dest, whisper_src, windows)
+        def _wer_accept(cand: Path) -> tuple[bool, str]:
+            return verify_against_whisper(whisper_src, cand, windows)
+        return _pick_bundled(video, dest, _wer_accept)
 
     if tag == "opensubtitles-hash":
         return _fetch_os_ktry(video, dest, whisper_src, windows, mode="hash")
@@ -946,15 +952,18 @@ def _polluted_fallback_pick_candidate(
       run — trust and use directly
     - `embedded` / `pgs-ocr`: mux'd inside the video container by the
       release group — same-source content guarantee, trust and use directly
-    - `bundled`: SRT sidecar in the torrent wrapper; without WER we have
-      no way to pick the right file among multiple — SKIP entirely
-      (safer to fall through to OS + plot-check than accept a bad guess)
+    - `bundled`: SRT sidecar(s) in the torrent wrapper. Walk them and
+      plot-check each with `verify_by_plot` — same LLM accept as OS
+      tiers, just applied to a local file so no OS quota is burned.
+      alass aligns the winner to the video's audio (bundled timing is
+      release-group-authored, close to correct but not byte-perfect
+      like same-source tiers).
     - `opensubtitles-hash` / `opensubtitles-text`: k-try, but the accept
       callback is `verify_by_plot` (Opus + web_search) instead of WER
 
     Returns the winning tag or None. On success, `verified_src` is
-    written by this function (or alass, for OS tiers). The outer
-    pipeline continues to annotation as normal."""
+    written by this function (or alass). The outer pipeline continues
+    to annotation as normal."""
     info = _parse_filename(video)
     show = info.get("title") or ""
     season = info.get("season")
@@ -968,13 +977,23 @@ def _polluted_fallback_pick_candidate(
     print(f"[pipeline] {video.name!r}: polluted-mode candidate loop — target="
           f"{show!r}{ep_ref}", flush=True)
 
-    for tag in _CANDIDATE_TAGS:
-        if tag == "bundled":
-            print(f"[pipeline] {video.name!r}: polluted-mode SKIP bundled "
-                  f"(no safe content check without WER)", flush=True)
-            continue
+    def _plot_accept_local(cand: Path) -> tuple[bool, str]:
+        return verify_by_plot(cand, show, season, episode)
 
+    for tag in _CANDIDATE_TAGS:
         cand_dest = _sources_path(video, tag)
+
+        # bundled: same plot-check accept as OS, applied to files
+        # already on disk. alass alignment follows (release-group
+        # timing needs it — unlike same-source embedded / pgs-ocr).
+        if tag == "bundled":
+            cand_path = _pick_bundled(video, cand_dest, _plot_accept_local)
+            if cand_path is None:
+                continue
+            if _resync(video, cand_path, verified_src):
+                return tag
+            print(f"[pipeline] {video.name!r}: polluted-mode bundled alass failed", flush=True)
+            continue
 
         # For archive / embedded / pgs-ocr: materialize + trust directly
         if tag in ("archive", "embedded", "pgs-ocr"):
@@ -999,13 +1018,13 @@ def _polluted_fallback_pick_candidate(
             mode = "hash" if tag == "opensubtitles-hash" else "text"
             pattern = _os_ktry_indexed_pattern(cand_dest)
 
-            def _plot_accept(cand: Path) -> bool:
-                ok, reason = verify_by_plot(cand, show, season, episode)
+            def _plot_accept_os(cand: Path) -> bool:
+                ok, reason = _plot_accept_local(cand)
                 print(f"[pipeline] {video.name!r}: polluted-mode {mode} plot-check "
                       f"{cand.name} — {reason}", flush=True)
                 return ok
 
-            winner = iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _plot_accept)
+            winner = iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _plot_accept_os)
             if winner is None:
                 continue
 
