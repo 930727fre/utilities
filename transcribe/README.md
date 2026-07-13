@@ -216,9 +216,10 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
    2d. vobsub-ocr → _sources/<stem>.vobsub-ocr.srt
        Last-resort same-source lane for older Blu-ray rips that
        preserved the original DVD-era VobSub track instead of
-       stripping it or re-OCRing to PGS. ffmpeg demuxes the
-       VobSub bitstream to a `.idx` + `.sub` pair; subtile-ocr
-       drives tesseract on the 720×480/576 4-color bitmaps.
+       stripping it or re-OCRing to PGS. mkvextract demuxes the
+       VobSub bitstream to a `.sub` + `.idx` pair (ffmpeg's vobsub
+       muxer is broken for our purpose); subtile-ocr drives
+       tesseract on the 720×480/576 4-color bitmaps.
        ~85% character accuracy (lower than PGS because DVD
        bitmaps have more aliasing than HD PGS renderings), still
        far better than whisper ASR for content match. Common on

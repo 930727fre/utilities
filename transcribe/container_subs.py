@@ -243,69 +243,122 @@ def extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
     return dest
 
 
+def _find_vobsub_track_id(video: Path) -> tuple[int, str] | None:
+    """Enumerate tracks via `mkvmerge -J` and pick the best English (or
+    und-fallback) VobSub subtitle track. Returns (track_id, lang_label)
+    or None. The track ID is mkvtoolnix-native (matches what
+    `mkvextract tracks` expects), NOT the ffprobe global stream index.
+
+    Codec-id matching is on `S_VOBSUB` (mkvmerge's canonical name) or
+    the human-friendly "VobSub" (which mkvmerge sometimes surfaces in
+    `.codec`)."""
+    try:
+        r = subprocess.run(
+            ["mkvmerge", "-J", str(video)],
+            capture_output=True, text=True,
+            timeout=FFPROBE_PROBE_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        print(f"[vobsub-ocr] mkvmerge probe failed for {video.name!r}: {e}", flush=True)
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        info = json.loads(r.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    english_id: int | None = None
+    fallback_id: int | None = None
+    for track in info.get("tracks") or []:
+        if track.get("type") != "subtitles":
+            continue
+        codec = str(track.get("codec") or "")
+        codec_id = str(track.get("properties", {}).get("codec_id") or "")
+        # mkvmerge shows `codec="VobSub"` and `codec_id="S_VOBSUB"` for
+        # DVD bitmap subs.
+        if codec_id != "S_VOBSUB" and codec != "VobSub":
+            continue
+        props = track.get("properties") or {}
+        # Skip forced tracks — same reason as _find_subtitle_track in the
+        # PGS/embedded paths: forced translates non-dialogue only.
+        if props.get("forced_track"):
+            continue
+        lang = str(props.get("language") or "").lower()
+        tid = track.get("id")
+        if tid is None:
+            continue
+        if lang in ("eng", "en") and english_id is None:
+            english_id = tid
+        elif lang in ("", "und", "zxx") and fallback_id is None:
+            fallback_id = tid
+
+    if english_id is not None:
+        return english_id, "eng"
+    if fallback_id is not None:
+        return fallback_id, "und"
+    return None
+
+
 def extract_vobsub_ocr(video: Path, dest: Path) -> Path | None:
     """Extract a VobSub (DVD-era bitmap) subtitle track and OCR it to SRT
-    via ffmpeg (demux to .idx+.sub) → subtile-ocr → tesseract. Same-source
-    extraction like the PGS path: timing is byte-perfect with the video
-    master, so alass is skipped downstream. Cue-count gate catches
-    complete OCR failures.
+    via mkvextract (demux to .sub+.idx) → subtile-ocr → tesseract.
+    Same-source extraction like the PGS path: timing is byte-perfect
+    with the video master, so alass is skipped downstream. Cue-count
+    gate catches complete OCR failures.
 
     VobSub is the DVD-era bitmap subtitle format: 720x480 (NTSC) or
-    720x576 (PAL) 4-color palette bitmaps. ffprobe reports the codec
-    as `dvd_subtitle`. Common on older sitcom / drama Blu-ray x265
-    rips that preserved the original DVD subtitle track instead of
-    stripping or re-OCRing it (Silence, some x265 HEVC groups). If the
-    embedded tier missed and pgs-ocr missed too, this is the last
-    same-source lane before falling through to whisper.
+    720x576 (PAL) 4-color palette bitmaps. Common on older sitcom /
+    drama Blu-ray x265 rips that preserved the original DVD subtitle
+    track instead of stripping or re-OCRing it (Silence, some x265
+    HEVC groups). If the embedded tier missed and pgs-ocr missed too,
+    this is the last same-source lane before falling through to
+    whisper.
 
     OCR character accuracy is ~85% — lower than PGS's ~95% because
     DVD 480/576-line bitmaps have more aliasing than HD PGS renderings.
     Still substantially better than whisper ASR for content match,
     and Sonnet annotation is robust to minor OCR typos.
 
-    ffmpeg outputs VobSub as a `.idx` + `.sub` file pair — one is
-    the packet index / palette / timing table, the other is the raw
-    bitstream. subtile-ocr reads the .idx (auto-finds the .sub
-    sibling by name) and drives tesseract on the extracted bitmaps.
+    Uses `mkvextract` (from mkvtoolnix) instead of ffmpeg. ffmpeg's
+    vobsub muxer is essentially broken for our purpose — every
+    variant of `-c:s copy -f vobsub output.sub` returns "Invalid
+    argument" on modern ffmpeg builds. mkvextract handles VobSub
+    demuxing as a first-class operation: given `<id>:<path>.sub` it
+    writes the SPU bitstream to `<path>.sub` AND the palette/timing
+    table to `<path>.idx` automatically. mkvextract only works on
+    Matroska containers, which is fine — VobSub in mp4/ts is
+    essentially unheard of.
     """
-    found = _find_subtitle_track(video, lambda c: c == "dvd_subtitle")
-    if found is None:
+    track = _find_vobsub_track_id(video)
+    if track is None:
         return None
-    stream_idx, lang_label = found
+    track_id, lang_label = track
 
     with tempfile.TemporaryDirectory(prefix="vobsub-") as tmpdir:
         tmp = Path(tmpdir)
-        sub_prefix = tmp / "track"      # ffmpeg writes track.idx + track.sub
+        sub_prefix = tmp / "track"      # mkvextract writes track.sub + track.idx
         idx_path = sub_prefix.with_suffix(".idx")
         sub_path = sub_prefix.with_suffix(".sub")
 
-        # 1. ffmpeg demux VobSub bitstream. `-c:s copy` keeps raw
-        # packets intact; `-f vobsub` explicitly picks the vobsub muxer
-        # (needed because ffmpeg keys muxer selection on the output
-        # extension by default, and `.idx` isn't a registered muxer
-        # name — passing `.idx` directly returns "Invalid argument").
-        # The vobsub muxer writes BOTH `.sub` (bitstream) and `.idx`
-        # (palette/timing sidecar) when given `.sub` as output.
+        # 1. mkvextract demux VobSub bitstream. `<track_id>:<path>.sub`
+        # writes both `.sub` (bitstream) and `.idx` (palette/timing)
+        # siblings automatically for VobSub tracks.
         try:
             r = subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error",
-                 "-i", str(video),
-                 "-map", f"0:{stream_idx}",
-                 "-c:s", "copy",
-                 "-f", "vobsub",
-                 str(sub_path)],
+                ["mkvextract", "tracks", str(video), f"{track_id}:{sub_path}"],
                 capture_output=True,
                 timeout=FFMPEG_SUB_EXTRACT_TIMEOUT,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-            print(f"[vobsub-ocr] ffmpeg VobSub demux failed for {video.name!r}: {e}", flush=True)
+            print(f"[vobsub-ocr] mkvextract demux failed for {video.name!r}: {e}", flush=True)
             return None
         if (r.returncode != 0
                 or not idx_path.exists() or not sub_path.exists()
                 or sub_path.stat().st_size == 0):
             stderr = (r.stderr or b"").decode("utf-8", errors="replace").strip()
             if stderr:
-                print(f"[vobsub-ocr] ffmpeg rc={r.returncode} for {video.name!r}: {stderr[-200:]}", flush=True)
+                print(f"[vobsub-ocr] mkvextract rc={r.returncode} for {video.name!r}: {stderr[-200:]}", flush=True)
             return None
 
         # 2. subtile-ocr reads .idx (auto-picks up .sub sibling by name)
@@ -340,5 +393,5 @@ def extract_vobsub_ocr(video: Path, dest: Path) -> Path | None:
             print(f"[vobsub-ocr] copy to {dest} failed: {exc}", flush=True)
             return None
 
-    print(f"[vobsub-ocr] OCR'd VobSub stream {stream_idx} ({lang_label}) → {dest.name}", flush=True)
+    print(f"[vobsub-ocr] OCR'd VobSub track {track_id} ({lang_label}) → {dest.name}", flush=True)
     return dest
