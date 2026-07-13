@@ -413,11 +413,22 @@ function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate }) {
       {isExpanded && (
         <div style={styles.actionRow}>
           <div style={{ flex: 1 }} />
-          {engState === 'done' && zhState === 'absent' && (
-            <button style={styles.translateBtn}
-              title="Translate this episode to 繁體中文"
-              onClick={e => { e.stopPropagation(); onTranslate(item.path) }}>中</button>
-          )}
+          {engState === 'done' && (() => {
+            // Keep the 中 button visible in every zh state so the row's
+            // shape doesn't jump around; disable it (with an explanatory
+            // tooltip) when clicking would be a no-op or duplicate work.
+            const zhEnabled = zhState === 'absent'
+            const zhTitle = zhState === 'absent' ? 'Translate this episode to 繁體中文'
+                          : zhState === 'translating' ? 'Currently translating — hold your horses'
+                          : zhState === 'done' ? 'Already translated'
+                          : `Translation failed: ${item.zh_error || 'unknown error'}`
+            return (
+              <button style={{ ...styles.translateBtn, ...(zhEnabled ? {} : styles.disabledBtn) }}
+                disabled={!zhEnabled}
+                title={zhTitle}
+                onClick={e => { e.stopPropagation(); if (zhEnabled) onTranslate(item.path) }}>中</button>
+            )
+          })()}
           {engState === 'failed' && (
             <button style={styles.translateBtn}
               title="Retry (deletes the SRT and re-runs the pipeline)"
