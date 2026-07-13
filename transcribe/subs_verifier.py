@@ -67,7 +67,7 @@ from claude_client import generate_json
 # different content lands at WER >0.7. The density gate we used to have
 # false-rejected legitimate candidates when whisper produced anomalously
 # few cues for an episode.
-_WER_PASS_MAX = 0.5
+WER_PASS_MAX = 0.5
 
 # Forced-subs prefilter — subtitle tracks that translate only foreign
 # signs / on-screen text typically ship 10–40 cues per episode (vs
@@ -78,14 +78,31 @@ _WER_PASS_MAX = 0.5
 # cues is not full dialogue.
 _MIN_REAL_CUES = 100
 
-# Pollution detection — long runs of consecutive identical cue text
-# signal a whisper decoder hallucination loop ("No.", "Thank you.").
-# Threshold of 10 is well above plausible real-dialogue repetition
-# (rapid affirmations peak at 3-5 consecutive cues; catchphrases rarely
-# run consecutively past that). Hallucination runs are by definition
-# consecutive and typically span dozens to hundreds of cues, so the
-# threshold sits deep inside the safe zone.
+# Pollution detection — two independent signals:
+#
+# 1. Consecutive-identical run: N+ neighbouring cues with byte-identical
+#    normalized text. Catches the classic "No.", "Thank you." decoder
+#    loops where whisper produces the exact same short cue over and
+#    over. Threshold 10 sits well above plausible real-dialogue
+#    repetition (rapid affirmations peak at 3-5 consecutive cues;
+#    catchphrases rarely run past that).
+#
+# 2. Per-cue degeneracy: a single cue whose word content is a single
+#    token repeated many times ("ha ha ha ha ha..."). Catches the case
+#    where whisper's decoder is stuck on one token but chops the run
+#    into cues of different lengths, so consecutive-equality never
+#    fires. South Park S01E02 broke signal 1 that way — 12 cues each
+#    holding 30-230 "ha" tokens, none of them bytewise equal because
+#    the counts differ.
 _POLLUTION_RUN_THRESHOLD = 10
+
+# Cue is "degenerate" (self-evident pollution) if it's long enough to
+# be past incidental repetition AND ≤10% of its tokens are unique.
+# A 20-token real dialogue cue has ~15-20 unique tokens (function
+# words repeat, content words don't). A 20-token "ha ha ha..." cue
+# has 1 unique token → ratio 0.05, well under 0.1.
+_DEGEN_MIN_TOKENS = 20
+_DEGEN_UNIQUE_RATIO = 0.1
 
 
 # Strip SRT formatting tags before normalization — `<i>...</i>`,
@@ -168,10 +185,35 @@ def _filter_out_windows(
 
 # ── Pollution detection ───────────────────────────────────────────────────
 
+def _is_degenerate_cue(flat_text: str) -> bool:
+    """A single cue is 'degenerate' when its word content collapses to
+    a handful of unique tokens repeated many times — the classic per-
+    cue whisper hallucination signature (`ha ha ha × 200`). Independent
+    of neighbouring cues, so it catches runs that consecutive-identical
+    detection misses because the repetition count varies between cues.
+
+    Short cues are exempt (real dialogue can legitimately be a short
+    run of one token: `"No no no."`, `"Yes."`); the degeneracy call
+    only fires once the cue is long enough to be past coincidence.
+    """
+    tokens = flat_text.split()
+    if len(tokens) < _DEGEN_MIN_TOKENS:
+        return False
+    unique = len(set(tokens))
+    return unique / len(tokens) < _DEGEN_UNIQUE_RATIO
+
+
 def find_pollution_windows(whisper_srt: Path) -> list[tuple[float, float]]:
     """Return time ranges (start_s, end_s) where whisper's decoder was
-    stuck in a hallucination loop (`_POLLUTION_RUN_THRESHOLD`+ consecutive
-    identical short phrases). Empty list if the transcript is clean.
+    stuck in a hallucination loop. Empty list if the transcript is clean.
+
+    Two independent pollution signals per cue:
+    - **Consecutive-identical run**: cue text bytewise equals previous
+      cue → running counter. A run of `_POLLUTION_RUN_THRESHOLD`+ cues
+      becomes a window.
+    - **Per-cue degeneracy**: cue's tokens are ≥90% duplicates. Each
+      such cue is a single-cue window on its own, regardless of what
+      neighbours look like.
 
     Windows are used by `verify_against_whisper` to filter cues from
     whisper (single-sided scrub) before scoring — a polluted stretch
@@ -184,7 +226,7 @@ def find_pollution_windows(whisper_srt: Path) -> list[tuple[float, float]]:
     Runs that span an empty-body cue are broken (safer — don't merge two
     unrelated runs across an accidental gap)."""
     cues = _real_cues(whisper_srt)
-    if len(cues) < _POLLUTION_RUN_THRESHOLD:
+    if not cues:
         return []
 
     windows: list[tuple[float, float]] = []
@@ -201,6 +243,11 @@ def find_pollution_windows(whisper_srt: Path) -> list[tuple[float, float]]:
             return
         windows.append((start_times[0], end_times[1]))
 
+    def _emit_degen(idx: int) -> None:
+        times = _cue_times(cues[idx])
+        if times is not None:
+            windows.append(times)
+
     for i, c in enumerate(cues):
         flat = _cue_text(c).strip().lower()
         if not flat:
@@ -209,6 +256,11 @@ def find_pollution_windows(whisper_srt: Path) -> list[tuple[float, float]]:
             run_start_idx = i + 1
             prev_text = None
             continue
+        # Per-cue degeneracy — self-contained pollution signal. Doesn't
+        # interact with the run counter; a degenerate cue in the middle
+        # of otherwise-varied text still gets its own window.
+        if _is_degenerate_cue(flat):
+            _emit_degen(i)
         if flat == prev_text:
             cur_run += 1
         else:
@@ -249,19 +301,20 @@ def pollution_cue_ratio(
 
 # ── WER scoring ───────────────────────────────────────────────────────────
 
-def verify_against_whisper(
+def wer_score(
     whisper_srt: Path,
     candidate_srt: Path,
     windows: Optional[list[tuple[float, float]]] = None,
-) -> tuple[bool, str]:
-    """WER-based content gate. Returns (pass, reason).
+) -> tuple[Optional[float], str]:
+    """Compute WER between whisper (reference) and candidate (hypothesis).
+    Returns (score, reason). Score is None when a computation isn't
+    possible (empty transcripts, forced-subs prefilter, malformed SRT,
+    jiwer error); the reason string explains why in every case for
+    logging.
 
     Concat all cue text from each side, strip SRT formatting +
-    punctuation, lowercase. Compute word error rate between whisper
-    (reference) and candidate (hypothesis); pass if WER ≤ 0.5.
-
-    Prefilter — reject candidates with fewer than `_MIN_REAL_CUES`
-    (typically forced-subs tracks) without a WER computation.
+    punctuation, lowercase. Cue-count prefilter (`_MIN_REAL_CUES`)
+    rejects forced-subs / partial tracks before computation.
 
     `windows` (optional) — time ranges to scrub from WHISPER (only)
     before scoring. Used when whisper has hallucination loops; see
@@ -272,17 +325,19 @@ def verify_against_whisper(
     covers too much of the runtime (single-side scrub can't rescue a
     mostly-hallucinated whisper).
 
-    Timing is deliberately not considered for scoring — alass handles
-    alignment after this gate passes."""
+    Timing is deliberately not considered — alass handles alignment
+    downstream once a candidate is picked. This is a content-match
+    scorer; the caller decides how to interpret the number (threshold
+    gate, min-of-N pick, etc.)."""
     w_cues = _real_cues(whisper_srt)
     c_cues = _real_cues(candidate_srt)
 
     if not w_cues:
-        return False, "whisper SRT empty or unparseable"
+        return None, "whisper SRT empty or unparseable"
     if not c_cues:
-        return False, "candidate SRT empty or unparseable"
+        return None, "candidate SRT empty or unparseable"
     if len(c_cues) < _MIN_REAL_CUES:
-        return False, (
+        return None, (
             f"only {len(c_cues)} real cues — below {_MIN_REAL_CUES} min "
             f"(likely forced-subs or partial)"
         )
@@ -293,18 +348,32 @@ def verify_against_whisper(
     w_text = _normalized_full_text(w_cues)
     c_text = _normalized_full_text(c_cues)
     if not w_text or not c_text:
-        return False, "normalized transcript empty after cleanup"
+        return None, "normalized transcript empty after cleanup"
 
     try:
         wer = jiwer.wer(w_text, c_text)
     except ValueError as e:
-        return False, f"WER computation failed: {e}"
+        return None, f"WER computation failed: {e}"
 
     scrub_note = f" (whisper scrubbed by {len(windows)} window(s))" if windows else ""
-    if wer <= _WER_PASS_MAX:
-        return True, f"WER {wer:.2f} ≤ {_WER_PASS_MAX}{scrub_note}"
+    return wer, f"WER {wer:.2f}{scrub_note}"
+
+
+def verify_against_whisper(
+    whisper_srt: Path,
+    candidate_srt: Path,
+    windows: Optional[list[tuple[float, float]]] = None,
+) -> tuple[bool, str]:
+    """Threshold-gate wrapper around `wer_score`. Returns (pass, reason).
+    Passes if WER ≤ `WER_PASS_MAX` (0.5). See `wer_score` for the
+    scoring semantics and how `windows` is applied."""
+    score, reason = wer_score(whisper_srt, candidate_srt, windows)
+    if score is None:
+        return False, reason
+    if score <= WER_PASS_MAX:
+        return True, f"{reason} ≤ {WER_PASS_MAX}"
     return False, (
-        f"WER {wer:.2f} > {_WER_PASS_MAX}{scrub_note} — likely different "
+        f"{reason} > {WER_PASS_MAX} — likely different "
         f"content / wrong cut / wrong language"
     )
 

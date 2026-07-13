@@ -35,11 +35,13 @@ from srt_source import (
 )
 from subs_finder import _parse_filename, iter_candidates
 from subs_verifier import (
+    WER_PASS_MAX,
     find_pollution_windows,
     pollution_cue_ratio,
     smart_pick_bundled,
     verify_against_whisper,
     verify_by_plot,
+    wer_score,
 )
 from storage import get_job, upsert_job
 
@@ -472,7 +474,17 @@ def _run_transcription(job_id: str, staging_mp4: str):
 # "archive" is tried first so a previously-canonical SRT that survived a
 # delete_torrent + re-download cycle is reused without paying whisper /
 # Sonnet / Gemini costs again. See archive.py for the mirror + lookup rules.
-_CANDIDATE_TAGS = ("archive", "embedded", "pgs-ocr", "bundled", "opensubtitles-hash", "opensubtitles-text")
+#
+# Split by whether the tier needs whisper as reference. Whisper-
+# independent tiers are attempted BEFORE whisper — if any hits, we skip
+# the 10-30 minute GPU pass entirely. Same-source content (embedded /
+# pgs-ocr from mkv container) and prior canonical (archive) don't need
+# a whisper ASR reference to be trusted; content is guaranteed by
+# construction. Only the "external release" tiers (bundled / OS) need
+# whisper as content-match reference (normal WER) or pollution
+# indicator (polluted-mode plot-check dispatch).
+_WHISPER_INDEPENDENT_TAGS = ("archive", "embedded", "pgs-ocr")
+_WHISPER_DEPENDENT_TAGS = ("bundled", "opensubtitles-hash", "opensubtitles-text")
 
 # With a paid OpenSubtitles subscription that lifts daily quota above the
 # free-tier 20, set 3–5 to k-try the top-N raw OS results per tier
@@ -493,8 +505,9 @@ def _find_bt_wrapper(canonical_video: Path) -> Path | None:
     find that inode and return the top-level wrapper.
 
     Cost: O(files-in-/bt) per call, but only invoked once per bundled-
-    tier lookup (result flows through `_pick_bundled`, cached
-    downstream via `_sources/<stem>.bundled.srt`). For a library on
+    tier lookup (result flows through `_pick_bundled_min_wer` /
+    `_pick_bundled_smart_plot`, cached downstream via
+    `_sources/<stem>.bundled.srt`). For a library on
     the order of thousands of bt files the walk is sub-second on SSD,
     which is negligible next to whisper's per-episode runtime.
 
@@ -747,11 +760,11 @@ def _extract_pgs_ocr(video: Path, dest: Path) -> Path | None:
 
 _BUNDLED_SUB_EXTS = (".srt", ".ass", ".ssa")
 
-# Minimum cue count for a bundled sub to be considered a real
+# Minimum cue count for a candidate to be considered a real
 # full-dialogue track. Same threshold as subs_verifier's forced-subs
-# prefilter — a match this thin is likely a partial / bonus / trailer
+# prefilter — a track this thin is likely a partial / bonus / trailer
 # sub, not what the release group actually paired with the main video.
-_MIN_BUNDLED_CUES = 100
+_MIN_CUES = 100
 
 
 def _bundled_wrapper_subs(wrapper: Path) -> list[Path]:
@@ -801,60 +814,52 @@ def _materialize_bundled_sub(sub: Path, staged: Path, rel: Path, video: Path) ->
             print(f"[bundled] {video.name!r}: stage failed for {rel}: {exc}", flush=True)
             return None
 
-    if not _bundled_cue_count_ok(staged, rel, video):
+    if not _cue_count_ok(staged, rel, video, tag="bundled"):
         return None
     return staged
 
 
-def _bundled_cue_count_ok(sub: Path, rel: Path, video: Path) -> bool:
-    """Reject bundled candidates with too few cues to plausibly be full
+def _cue_count_ok(sub: Path, rel: Path, video: Path, *, tag: str) -> bool:
+    """Reject candidates with too few cues to plausibly be full
     dialogue — cheap prefilter that drops forced-subs / trailer /
-    partial tracks before the (expensive) accept function ever sees
-    them. Normal-mode WER catches these anyway, but polluted-mode
-    plot-check costs a real Opus call per candidate, so bounded is
-    important."""
+    partial tracks before any expensive gate (WER, plot-check, or the
+    trust-tier "just copy it" branch). Called from bundled iteration
+    and the whisper-independent trust tiers alike."""
     try:
         text = sub.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
     cues = text.count("-->")
-    if cues < _MIN_BUNDLED_CUES:
-        print(f"[bundled] {video.name!r}: SKIP {rel} — only {cues} cues, "
-              f"below {_MIN_BUNDLED_CUES} min (likely forced-subs / partial)",
+    if cues < _MIN_CUES:
+        print(f"[{tag}] {video.name!r}: SKIP {rel} — only {cues} cues, "
+              f"below {_MIN_CUES} min (likely forced-subs / partial)",
               flush=True)
         return False
     return True
 
 
-def _pick_bundled(
+def _pick_bundled_min_wer(
     video: Path,
     dest: Path,
-    accept,
-    *,
-    smart_narrow: bool = False,
+    whisper_src: Path,
+    windows: list[tuple[float, float]],
 ) -> Path | None:
-    """Find a subtitle in the bt wrapper for `video`, verify with the
-    supplied `accept` callback, and stage the winner at `dest`.
+    """Normal mode: score every wrapper subtitle against whisper via
+    `wer_score`, pick the lowest, gate at `WER_PASS_MAX`.
 
-    Two selection strategies:
-      - smart_narrow=False (normal WER mode): iterate every .srt/.ass/.ssa
-        under the wrapper, `accept` first passer. Content-based match
-        (WER against whisper) is cheap enough to run on 20+ candidates
-        without cost concern; wrong-language / wrong-episode / forced-subs
-        candidates all fail naturally.
-      - smart_narrow=True (polluted mode, plot-check accept): LLM
-        (Haiku) picks the single most likely candidate by filename
-        convention; only that one goes to `accept`. Bounds cost to
-        one plot-check per bundled attempt (~$0.10) even in a
-        30-subtitle season pack.
+    Best-of-all (not first-passer). In a TV season pack with 20-30
+    English srts, different episodes of the same show can have enough
+    overlapping dialogue that a wrong-episode srt occasionally lands
+    just under the 0.5 pass threshold before the correct one is
+    iterated to — first-passer would pick that. Min-WER removes the
+    ordering dependency: the correct episode's srt will always score
+    lowest on its own audio.
 
     ASS/SSA candidates are ffmpeg-converted to SubRip in a scratch
-    tempdir before being handed to `accept`. Cue-count prefilter drops
-    tracks below `_MIN_BUNDLED_CUES` cheaply (before either WER or
-    plot-check runs).
-
-    Returns `dest` on success (winner materialized there), None if no
-    candidate passes or no wrapper found for `video`.
+    tempdir. Cue-count prefilter drops forced-subs / partial tracks
+    before scoring runs. Winner is copied to `dest`. Returns `dest`
+    on success, None when no wrapper is found, no candidates
+    materialize, or every candidate scores above threshold.
     """
     wrapper = _find_bt_wrapper(video)
     if wrapper is None:
@@ -864,7 +869,68 @@ def _pick_bundled(
     if not subs:
         return None
 
-    if smart_narrow and len(subs) > 1:
+    best: tuple[float, Path, str] | None = None  # (score, staged, rel)
+    with tempfile.TemporaryDirectory(prefix="bundled-stage-") as tmpdir:
+        tmp = Path(tmpdir)
+        for i, sub in enumerate(subs, 1):
+            rel = _safe_rel(sub, wrapper)
+            staged = _materialize_bundled_sub(sub, tmp / f"cand-{i}.srt", rel, video)
+            if staged is None:
+                continue
+            score, reason = wer_score(whisper_src, staged, windows)
+            if score is None:
+                print(f"[bundled] {video.name!r}: SKIP {rel} — {reason}", flush=True)
+                continue
+            print(f"[bundled] {video.name!r}: score {rel} — {reason}", flush=True)
+            if best is None or score < best[0]:
+                best = (score, staged, str(rel))
+
+        if best is None:
+            return None
+        wer, staged, rel = best
+        if wer > WER_PASS_MAX:
+            print(f"[bundled] {video.name!r}: best score {wer:.2f} > "
+                  f"{WER_PASS_MAX} — REJECT (no candidate matched content)",
+                  flush=True)
+            return None
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(staged), str(dest))
+        except OSError as exc:
+            print(f"[bundled] {video.name!r}: promote to dest failed: {exc}", flush=True)
+            return None
+        print(f"[bundled] {video.name!r}: WIN {rel} (WER {wer:.2f})", flush=True)
+        return dest
+
+
+def _pick_bundled_smart_plot(
+    video: Path,
+    dest: Path,
+    plot_accept,
+) -> Path | None:
+    """Polluted mode: Haiku smart-pick narrows all wrapper subs to one
+    by filename convention, then `plot_accept` (bool) verifies its
+    content via Opus plot-check. Bounds cost to one Haiku pick +
+    one Opus plot-check per bundled attempt, regardless of how many
+    srts the wrapper holds — iterating plot-check on a 30-sub season
+    pack would run into dollars per episode.
+
+    If only one candidate exists in the wrapper (after cue-count
+    prefilter would apply), the smart-pick step is skipped and that
+    candidate goes straight to `plot_accept`.
+
+    Returns `dest` on success, None if no wrapper is found, LLM
+    declined, or plot-check rejected the pick.
+    """
+    wrapper = _find_bt_wrapper(video)
+    if wrapper is None:
+        return None
+
+    subs = _bundled_wrapper_subs(wrapper)
+    if not subs:
+        return None
+
+    if len(subs) > 1:
         # Prefer the wrapper-side video filename over the canonical
         # /artifact one — the release-group naming there is what the
         # bundled srts were paired against, so exact-stem / SxxExx
@@ -885,7 +951,7 @@ def _pick_bundled(
             staged = _materialize_bundled_sub(sub, tmp / f"cand-{i}.srt", rel, video)
             if staged is None:
                 continue
-            if not accept(staged):
+            if not plot_accept(staged):
                 continue
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -961,16 +1027,12 @@ def _fetch_candidate(
         return _extract_pgs_ocr(video, dest)
 
     if tag == "bundled":
-        # Normal mode: WER accept, iterate every wrapper sub, first
-        # passer wins. Wrong-language / wrong-episode / forced-subs
-        # candidates all fail WER against whisper naturally — no
-        # filename heuristics needed.
-        def _wer_accept(cand: Path) -> bool:
-            ok, reason = verify_against_whisper(whisper_src, cand, windows)
-            print(f"[bundled] {video.name!r}: WER {cand.name} — "
-                  f"{'ACCEPT' if ok else 'REJECT'}: {reason}", flush=True)
-            return ok
-        return _pick_bundled(video, dest, _wer_accept)
+        # Normal mode: score every wrapper sub against whisper, pick
+        # min-WER, gate at WER_PASS_MAX. Best-of-all avoids the
+        # ordering pitfall where a wrong-episode srt in a season
+        # pack lands just under threshold before the correct one
+        # is tried.
+        return _pick_bundled_min_wer(video, dest, whisper_src, windows)
 
     if tag == "opensubtitles-hash":
         return _fetch_os_ktry(video, dest, whisper_src, windows, mode="hash")
@@ -1029,32 +1091,71 @@ def _fetch_os_ktry(
     return iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _accept)
 
 
+def _try_whisper_independent_tiers(video: Path, verified_src: Path) -> str | None:
+    """Try archive → embedded → pgs-ocr in order. These tiers don't
+    need whisper as a reference (archive is prior-verified past
+    pipeline output; embedded / pgs-ocr are same-source content
+    extracted from the mkv container itself), so calling this before
+    whisper lets a hit skip the 10-30 minute GPU pass entirely.
+
+    Cue-count filter drops broken extractions (partial tracks, OCR
+    complete failures) cheaply. Winner is copied verbatim to
+    `verified_src` — no alass (archive was aligned in its prior run,
+    embedded / pgs-ocr share the video's timeline by construction).
+
+    Returns winning tag or None if all three miss."""
+    for tag in _WHISPER_INDEPENDENT_TAGS:
+        cand_dest = _sources_path(video, tag)
+        # whisper_src / windows are unused by these three fetch paths.
+        cand_path = _fetch_candidate(tag, video, cand_dest,
+                                     whisper_src=Path("/dev/null"), windows=[])
+        if cand_path is None:
+            continue
+
+        # Archive is prior-verified past canonical, guaranteed to have
+        # been full-dialogue length when it was written; skip the
+        # redundant re-check. Embedded / pgs-ocr can produce short output
+        # (forced subs, OCR bomb) that the check catches.
+        if tag != "archive" and not _cue_count_ok(cand_path, cand_path.name,
+                                                  video, tag=tag):
+            continue
+
+        try:
+            verified_src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(cand_path), str(verified_src))
+        except OSError as exc:
+            print(f"[pipeline] {video.name!r}: {tag} → verified copy failed: {exc}", flush=True)
+            continue
+        print(f"[pipeline] {video.name!r}: {tag} → verified.srt "
+              f"(TRUST — same-source / prior-verified, whisper skipped)",
+              flush=True)
+        return tag
+    return None
+
+
 def _polluted_fallback_pick_candidate(
     video: Path,
     whisper_src: Path,
     verified_src: Path,
 ) -> str | None:
     """Coverage-bail fallback: whisper is >50% polluted, so WER can't
-    discriminate any candidate. Try tiers with content trust or LLM
-    plot-check as the accept signal.
+    discriminate any candidate. Reach for the whisper-dependent tiers
+    with plot-check as the accept signal instead.
 
-    Trust rules:
-    - `archive`: previously canonical, verified in a past clean-whisper
-      run — trust and use directly
-    - `embedded` / `pgs-ocr`: mux'd inside the video container by the
-      release group — same-source content guarantee, trust and use directly
-    - `bundled`: SRT sidecar(s) in the torrent wrapper. Walk them and
-      plot-check each with `verify_by_plot` — same LLM accept as OS
-      tiers, just applied to a local file so no OS quota is burned.
-      alass aligns the winner to the video's audio (bundled timing is
-      release-group-authored, close to correct but not byte-perfect
-      like same-source tiers).
+    Only called after the whisper-independent tiers (archive / embedded
+    / pgs-ocr) already missed — those are tried before whisper runs at
+    all, so by the time this fires they've been ruled out and we're
+    only reaching for bundled + OS.
+
+    - `bundled`: LLM smart-pick narrows the wrapper's srts to one by
+      filename convention; `verify_by_plot` verifies content. Bounds
+      cost to one Haiku pick + one Opus plot-check per attempt.
     - `opensubtitles-hash` / `opensubtitles-text`: k-try, but the accept
-      callback is `verify_by_plot` (Opus + web_search) instead of WER
+      callback is `verify_by_plot` (Opus + web_search) instead of WER.
+    alass aligns the winner to the video's audio for all three.
 
-    Returns the winning tag or None. On success, `verified_src` is
-    written by this function (or alass). The outer pipeline continues
-    to annotation as normal."""
+    Returns the winning tag or None. On success, `verified_src` has
+    been written."""
     info = _parse_filename(video)
     show = info.get("title") or ""
     season = info.get("season")
@@ -1071,20 +1172,16 @@ def _polluted_fallback_pick_candidate(
     def _plot_accept_local(cand: Path) -> tuple[bool, str]:
         return verify_by_plot(cand, show, season, episode)
 
-    for tag in _CANDIDATE_TAGS:
+    for tag in _WHISPER_DEPENDENT_TAGS:
         cand_dest = _sources_path(video, tag)
 
-        # bundled: LLM smart-pick narrows to one candidate (by filename
-        # convention), then plot-check verifies content. Bounds cost to
-        # one Haiku pick + one Opus plot-check per bundled attempt.
         if tag == "bundled":
             def _plot_accept_bundled(cand: Path) -> bool:
                 ok, reason = _plot_accept_local(cand)
                 print(f"[pipeline] {video.name!r}: polluted-mode bundled "
                       f"plot-check {cand.name} — {reason}", flush=True)
                 return ok
-            cand_path = _pick_bundled(video, cand_dest, _plot_accept_bundled,
-                                      smart_narrow=True)
+            cand_path = _pick_bundled_smart_plot(video, cand_dest, _plot_accept_bundled)
             if cand_path is None:
                 continue
             if _resync(video, cand_path, verified_src):
@@ -1092,45 +1189,23 @@ def _polluted_fallback_pick_candidate(
             print(f"[pipeline] {video.name!r}: polluted-mode bundled alass failed", flush=True)
             continue
 
-        # For archive / embedded / pgs-ocr: materialize + trust directly
-        if tag in ("archive", "embedded", "pgs-ocr"):
-            cand_path = _fetch_candidate(tag, video, cand_dest, whisper_src, windows=[])
-            if cand_path is None:
-                continue
-            print(f"[pipeline] {video.name!r}: polluted-mode TRUST {tag} "
-                  f"(same-source / prior-verified content)", flush=True)
-            # Same-source timing → skip alass; archive was already alass-aligned
-            # in its prior run.
-            try:
-                verified_src.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(cand_path), str(verified_src))
-            except OSError as exc:
-                print(f"[pipeline] {video.name!r}: polluted-mode {tag} → verified "
-                      f"copy failed: {exc}", flush=True)
-                continue
-            return tag
-
         # OS tiers: k-try with plot-check
-        if tag in ("opensubtitles-hash", "opensubtitles-text"):
-            mode = "hash" if tag == "opensubtitles-hash" else "text"
-            pattern = _os_ktry_indexed_pattern(cand_dest)
+        mode = "hash" if tag == "opensubtitles-hash" else "text"
+        pattern = _os_ktry_indexed_pattern(cand_dest)
 
-            def _plot_accept_os(cand: Path) -> bool:
-                ok, reason = _plot_accept_local(cand)
-                print(f"[pipeline] {video.name!r}: polluted-mode {mode} plot-check "
-                      f"{cand.name} — {reason}", flush=True)
-                return ok
+        def _plot_accept_os(cand: Path) -> bool:
+            ok, reason = _plot_accept_local(cand)
+            print(f"[pipeline] {video.name!r}: polluted-mode {mode} plot-check "
+                  f"{cand.name} — {reason}", flush=True)
+            return ok
 
-            winner = iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _plot_accept_os)
-            if winner is None:
-                continue
-
-            # OS candidates need alass alignment (their timeline was authored
-            # against a different release).
-            if _resync(video, winner, verified_src):
-                return tag
-            print(f"[pipeline] {video.name!r}: polluted-mode {tag} alass failed", flush=True)
+        winner = iter_candidates(video, "en", pattern, mode, OS_MAX_TRIES, _plot_accept_os)
+        if winner is None:
             continue
+
+        if _resync(video, winner, verified_src):
+            return tag
+        print(f"[pipeline] {video.name!r}: polluted-mode {tag} alass failed", flush=True)
 
     return None
 
@@ -1138,21 +1213,30 @@ def _polluted_fallback_pick_candidate(
 @_catch_unhandled
 def process_bt_file(job_id: str):
     """bt video pipeline — produces a canonical, annotated SRT through
-    four cacheable stages, each writing its output to `_sources/` and
-    only the final annotated text landing at the canonical path. Each
-    stage skips if its output already exists on disk, so any partial
-    progress survives crashes / restarts / manual deletions:
+    a two-stage source-selection process, each writing to `_sources/`
+    and only the final annotated text landing at the canonical path.
 
-      1. whisper      → /artifact/_sources/.../<stem>.whisper.srt
-      2. candidates   → /artifact/_sources/.../<stem>.{embedded,pgs-ocr,
-                                                       bundled,
-                                                       opensubtitles-*}.srt
-      3. verify+sync  → /artifact/_sources/.../<stem>.verified.srt
-                        (winner from step 2 → alass; embedded / pgs-ocr
-                         wins skip alass since timing is already aligned
-                         with the video master; or whisper itself if no
-                         candidate passed the WER gate)
-      4. annotate     → /artifact/.../<stem>.srt   (atomic mv tmp → canonical)
+      Stage A. Whisper-independent tiers (fast, no GPU) — try in order:
+                 archive     → /artifact/_sources/.../<stem>.archive.srt
+                 embedded    → /artifact/_sources/.../<stem>.embedded.srt
+                 pgs-ocr     → /artifact/_sources/.../<stem>.pgs-ocr.srt
+               Any hit → copy verbatim to verified.srt (no alass — timing
+               is same-source or already-aligned), skip Stage B entirely.
+      Stage B. Whisper + whisper-dependent tiers (only on Stage A miss):
+                 whisper     → <stem>.whisper.srt (GPU 10-30min)
+                 bundled     → <stem>.bundled.srt (WER inside pick, or
+                               polluted-mode smart-pick + plot-check)
+                 os-hash     → <stem>.opensubtitles-hash-N.srt
+                 os-text     → <stem>.opensubtitles-text-N.srt
+                 (bundled + os need whisper as WER reference / pollution
+                 dispatch signal — hence Stage B ordering)
+                 Winner → alass → verified.srt.
+                 All miss + clean whisper → whisper itself promoted to
+                 verified.srt. All miss + polluted → `.whisper-polluted`
+                 sidecar, halt.
+      Final.  annotate → /artifact/.../<stem>.srt (atomic mv tmp → canonical)
+               Skipped for archive wins — the archive.srt is already an
+               annotated canonical from a prior run.
 
     State recovery on restart: a pipeline that died mid-run leaves
     whatever it managed to write under `_sources/` intact. The next
@@ -1189,36 +1273,48 @@ def process_bt_file(job_id: str):
     job["updated_at"] = _now()
     upsert_job(job)
 
-    # ── 1. Whisper (cached) ───────────────────────────────────────────
-    if not whisper_src.exists():
-        try:
-            _run_whisper(job_id, video, whisper_src)
-        except Exception as exc:
-            try:
-                stamp_whisper_failed(video, str(exc))
-            except OSError:
-                pass
-            _fail(job_id, str(exc))
-            return
-    else:
-        print(f"[pipeline] reusing cached whisper SRT for {video.name!r}", flush=True)
+    winner_tag: str | None = None
+
+    # ── Stage A. Whisper-independent tiers ────────────────────────────
+    # archive / embedded / pgs-ocr don't need whisper as a reference
+    # (prior-verified content or same-source extraction). Try them
+    # first — a hit lets us skip the 10-30 min GPU pass entirely.
+    if not verified_src.exists():
+        winner_tag = _try_whisper_independent_tiers(video, verified_src)
 
     if _is_job_deleted(job_id):
         return
 
-    # ── 2 & 3. Verified.srt (cached) ──────────────────────────────────
-    winner_tag: str | None = None
-    if not verified_src.exists():
+    # ── Stage B. Whisper + whisper-dependent tiers ────────────────────
+    if winner_tag is None and not verified_src.exists():
+        if not whisper_src.exists():
+            try:
+                _run_whisper(job_id, video, whisper_src)
+            except Exception as exc:
+                try:
+                    stamp_whisper_failed(video, str(exc))
+                except OSError:
+                    pass
+                _fail(job_id, str(exc))
+                return
+        else:
+            print(f"[pipeline] reusing cached whisper SRT for {video.name!r}", flush=True)
+
+        if _is_job_deleted(job_id):
+            return
+
         # Detect whisper hallucination loops upfront and return the time
-        # ranges the decoder was stuck in. WER verify below single-side-
-        # scrubs these ranges from WHISPER before scoring, so a polluted
+        # ranges the decoder was stuck in. WER scoring inside
+        # `_pick_bundled_min_wer` and `_fetch_os_ktry` single-side-scrubs
+        # these ranges from WHISPER before computing WER, so a polluted
         # stretch doesn't tank an otherwise-matching candidate. Empty
-        # list = clean whisper, verify behaves normally.
+        # list = clean whisper, WER behaves normally.
         #
         # If more than _POLLUTION_CUE_RATIO_BAIL of whisper's cues fall
         # in hallucination windows, single-side scrub leaves too little
-        # reference for WER to discriminate. Fall back to the trust +
-        # plot-check loop; if that fails too, stamp `.whisper-polluted`.
+        # reference for WER to discriminate. Fall back to the plot-check
+        # loop (bundled smart-pick + os plot-check); if that fails too,
+        # stamp `.whisper-polluted`.
         windows = find_pollution_windows(whisper_src)
         if windows:
             cue_ratio = pollution_cue_ratio(whisper_src, windows)
@@ -1228,14 +1324,14 @@ def process_bt_file(job_id: str):
             if cue_ratio > _POLLUTION_CUE_RATIO_BAIL:
                 print(f"[pipeline] {video.name!r}: polluted cues > "
                       f"{_POLLUTION_CUE_RATIO_BAIL:.0%} — WER disabled; "
-                      f"falling back to trust + plot-check", flush=True)
+                      f"falling back to plot-check", flush=True)
                 winner_tag = _polluted_fallback_pick_candidate(
                     video, whisper_src, verified_src,
                 )
                 if winner_tag is None:
                     polluted_reason = (
                         f"{cue_ratio:.0%} of whisper cues are hallucinations, "
-                        f"no candidate passed trust / plot-check fallback"
+                        f"no candidate passed plot-check fallback"
                     )
                     try:
                         stamp_whisper_polluted(video, polluted_reason)
@@ -1246,45 +1342,21 @@ def process_bt_file(job_id: str):
                 if _is_job_deleted(job_id):
                     return
 
-        # Normal WER candidate loop — skip when the polluted-fallback
-        # branch already wrote verified.srt.
+        # Normal WER candidate loop for whisper-dependent tiers — skip
+        # when the polluted-fallback branch already wrote verified.srt.
         if winner_tag is None:
-            for tag in _CANDIDATE_TAGS:
+            for tag in _WHISPER_DEPENDENT_TAGS:
                 cand_dest = _sources_path(video, tag)
                 cand_path = _fetch_candidate(tag, video, cand_dest, whisper_src, windows)
                 if cand_path is None:
                     continue
 
-                # Bundled runs WER internally inside `_pick_bundled` (via
-                # the accept callback wired in _fetch_candidate), so a
-                # non-None return already means WER passed — skip the
-                # outer re-verify.
-                if tag == "bundled":
-                    print(f"[pipeline] {video.name!r}: {tag} ACCEPT "
-                          f"(WER passed inside pick)", flush=True)
-                else:
-                    ok, reason = verify_against_whisper(whisper_src, cand_path, windows)
-                    if not ok:
-                        print(f"[pipeline] {video.name!r}: {tag} REJECT — {reason}", flush=True)
-                        continue
-                    print(f"[pipeline] {video.name!r}: {tag} ACCEPT — {reason}", flush=True)
-
-                if tag in ("embedded", "pgs-ocr"):
-                    # Both candidate kinds come out of the mkv container
-                    # itself — the subtitle stream was authored against the
-                    # same master as the video, so timing is byte-perfect.
-                    # Running alass here would only introduce drift on a
-                    # stream that was already correct, so we promote
-                    # directly.
-                    try:
-                        verified_src.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(str(cand_path), str(verified_src))
-                        print(f"[pipeline] {video.name!r}: {tag} → verified.srt (alass skipped, same-source timing)", flush=True)
-                        winner_tag = tag
-                        break
-                    except OSError as exc:
-                        print(f"[pipeline] {video.name!r}: {tag} → verified copy failed: {exc}", flush=True)
-                        continue
+                # Both bundled and os-* verify content INSIDE `_fetch_candidate`
+                # (WER accept callback wired inline for bundled, iter_candidates
+                # accept for OS). A non-None return already means the candidate
+                # passed — no outer re-verify needed.
+                print(f"[pipeline] {video.name!r}: {tag} ACCEPT "
+                      f"(verified inside fetch)", flush=True)
 
                 if _resync(video, cand_path, verified_src):
                     winner_tag = tag
@@ -1324,7 +1396,7 @@ def process_bt_file(job_id: str):
                 except OSError as exc:
                     _fail(job_id, f"copy whisper → verified failed: {exc}")
                     return
-    else:
+    elif verified_src.exists() and winner_tag is None:
         print(f"[pipeline] reusing cached verified SRT for {video.name!r}", flush=True)
 
     if _is_job_deleted(job_id):

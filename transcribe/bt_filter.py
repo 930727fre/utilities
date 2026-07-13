@@ -4,7 +4,7 @@ Reads from /bt/<wrapper>/ (aria2's download dir — NEVER touched), writes
 canonical Movies/TV hardlinks under /artifact/. Bundled subtitles are
 NOT touched here — the downstream pipeline scans /bt for them at
 whisper-completion time and content-matches via WER (see
-tasks._pick_bundled).
+tasks._pick_bundled_min_wer).
 
 When a torrent finishes (no `.aria2` control files left under the
 wrapper), call `filter_wrapper(wrapper)`. The pass does two things:
