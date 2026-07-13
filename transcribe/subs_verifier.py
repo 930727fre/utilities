@@ -39,7 +39,7 @@ WER is authoritative — a candidate whose release-name / SxxExx metadata
 looks fine but whose content is actually a different show / cut fails
 WER anyway, and Haiku was empirically bypassed by uploaders spoofing
 metadata. Cheaper cue-count prefilter catches the forced-subs case that
-WER also catches but downloads-then-rejects. See `_MIN_REAL_CUES`.
+WER also catches but downloads-then-rejects. See `MIN_REAL_CUES`.
 """
 import os
 import re
@@ -76,7 +76,7 @@ WER_PASS_MAX = 0.5
 # 100 is well below the low end of real-dialogue counts and well above
 # the high end of forced tracks; a whole-episode subtitle with < 100
 # cues is not full dialogue.
-_MIN_REAL_CUES = 100
+MIN_REAL_CUES = 100
 
 # Pollution detection — two independent signals:
 #
@@ -119,6 +119,32 @@ _MULTI_WS_RE = re.compile(r"\s+")
 _TS_RE = re.compile(
     r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)"
 )
+
+
+def cue_count_ok(sub: Path, rel: Path, video: Path, *, tag: str) -> bool:
+    """Cheap cue-count prefilter — reject candidates with too few cues
+    to plausibly be a full-dialogue track (forced-subs / partial /
+    broken extraction / OCR-bomb). Uses `text.count("-->")` instead of
+    parsing cues; that's enough for a lower-bound sanity check and
+    avoids the parse cost.
+
+    Called before any expensive gate — WER, plot-check, or the
+    trust-tier "just copy it" branch.
+
+    `rel` is only for logging (the sub's relative path within its
+    container / wrapper); `tag` becomes the log prefix
+    (`[embedded]`, `[bundled]`, `[pgs-ocr]`, etc.)."""
+    try:
+        text = sub.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    cues = text.count("-->")
+    if cues < MIN_REAL_CUES:
+        print(f"[{tag}] {video.name!r}: SKIP {rel} — only {cues} cues, "
+              f"below {MIN_REAL_CUES} min (likely forced-subs / partial)",
+              flush=True)
+        return False
+    return True
 
 
 def _cue_text(cue: dict) -> str:
@@ -313,7 +339,7 @@ def wer_score(
     logging.
 
     Concat all cue text from each side, strip SRT formatting +
-    punctuation, lowercase. Cue-count prefilter (`_MIN_REAL_CUES`)
+    punctuation, lowercase. Cue-count prefilter (`MIN_REAL_CUES`)
     rejects forced-subs / partial tracks before computation.
 
     `windows` (optional) — time ranges to scrub from WHISPER (only)
@@ -336,9 +362,9 @@ def wer_score(
         return None, "whisper SRT empty or unparseable"
     if not c_cues:
         return None, "candidate SRT empty or unparseable"
-    if len(c_cues) < _MIN_REAL_CUES:
+    if len(c_cues) < MIN_REAL_CUES:
         return None, (
-            f"only {len(c_cues)} real cues — below {_MIN_REAL_CUES} min "
+            f"only {len(c_cues)} real cues — below {MIN_REAL_CUES} min "
             f"(likely forced-subs or partial)"
         )
 
@@ -579,9 +605,9 @@ def verify_by_plot(
 
     See module docstring for why Opus + web_search specifically."""
     cues = _real_cues(candidate_srt)
-    if len(cues) < _MIN_REAL_CUES:
+    if len(cues) < MIN_REAL_CUES:
         return False, (
-            f"only {len(cues)} real cues — below {_MIN_REAL_CUES} min "
+            f"only {len(cues)} real cues — below {MIN_REAL_CUES} min "
             f"(likely forced-subs or partial), skipped plot-check"
         )
 
