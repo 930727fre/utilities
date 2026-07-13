@@ -486,11 +486,26 @@ def _under_bonus(rel_video: Path, bonus_rels: list[Path]) -> bool:
     return False
 
 
-def _validated_regex(pattern: str, samples: list[Path]) -> re.Pattern | None:
+def _validated_regex(pattern: str, wrapper: Path, bonus_rels: list[Path]) -> re.Pattern | None:
     """Compile `pattern` and confirm it has the required named groups
-    AND matches at least one of the sample basenames with integer
-    captures. Returns the compiled Pattern on success, None otherwise —
-    caller stamps an empty sentinel on None."""
+    AND matches at least one real (non-bonus) episode filename in
+    `wrapper` with integer captures. Returns the compiled Pattern on
+    success, None otherwise — caller stamps an empty sentinel on None.
+
+    Iterates every non-bonus video (skip anything under `bonus_rels`),
+    breaks on the first successful match. Cost is O(#videos) regex
+    searches, but each search is microseconds on a filename-length
+    string, so a full 240-episode pack scans in single-digit ms
+    worst case — negligible next to whisper's per-episode runtime.
+
+    Semantic: 'at least one real episode matches'. Bonus-file
+    exclusion is what makes this correct — otherwise a wrapper whose
+    bonus content sorts alphabetically before Season/ directories
+    (Featurettes, Extras, Behind The Scenes, Bonus Disc, ...) would
+    silently fail because the first N sampled videos would all be
+    bonus, none matching SxxExx. Bug hit on Friends S1-S10 pack in
+    prod: 11 Featurettes/ mkvs sorted ahead of every real episode,
+    all validation samples missed, whole pack got empty-sentineled."""
     if not pattern:
         return None
     try:
@@ -499,8 +514,10 @@ def _validated_regex(pattern: str, samples: list[Path]) -> re.Pattern | None:
         return None
     if "season" not in compiled.groupindex or "episode" not in compiled.groupindex:
         return None
-    for sample in samples:
-        m = compiled.search(sample.name)
+    for video in _collect_videos(wrapper):
+        if _under_bonus(video.relative_to(wrapper), bonus_rels):
+            continue
+        m = compiled.search(video.name)
         if m is None:
             continue
         try:
@@ -684,11 +701,10 @@ def filter_wrapper(wrapper: Path) -> None:
             _write_sentinel(wrapper.name, [])
             return
         # Validate regex against actual filenames — bail if it doesn't
-        # capture season/episode as integers on at least one sample.
-        # Using first-few videos as validation samples: cheap + covers
-        # the common cases without a full-tree pre-walk.
-        samples = _collect_videos(wrapper)[:8]
-        regex = _validated_regex(pattern, samples)
+        # match at least one real (non-bonus) episode. See
+        # `_validated_regex` for why "any real episode" beats
+        # "first N sampled videos" as the check.
+        regex = _validated_regex(pattern, wrapper, bonus_rels)
         if regex is None:
             print(f"[filter {short}] tv_regex validation failed for pattern {pattern!r}; empty sentinel", flush=True)
             _write_sentinel(wrapper.name, [])
