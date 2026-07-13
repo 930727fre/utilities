@@ -87,7 +87,6 @@ def generate_json(prompt: str, response_schema: dict, *,
     body = {
         "model": model,
         "max_tokens": max_tokens,
-        "temperature": temperature,
         "messages": [{"role": "user", "content": prompt}],
         "tools": tools,
         # With web_search the model must be free to call it mid-turn,
@@ -98,6 +97,12 @@ def generate_json(prompt: str, response_schema: dict, *,
         "tool_choice": {"type": "any"} if web_search
                        else {"type": "tool", "name": _TOOL_NAME},
     }
+    # Anthropic deprecated `temperature` for Opus 4.x — passing it
+    # returns 400 invalid_request_error. Other model families
+    # (Sonnet / Haiku) still accept it, so include the param
+    # conditionally rather than dropping it globally.
+    if not model.startswith("claude-opus-4"):
+        body["temperature"] = temperature
 
     last_exc: Optional[Exception] = None
     for attempt in range(MAX_RETRIES):
