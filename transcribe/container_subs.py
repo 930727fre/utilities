@@ -279,17 +279,21 @@ def extract_vobsub_ocr(video: Path, dest: Path) -> Path | None:
         idx_path = sub_prefix.with_suffix(".idx")
         sub_path = sub_prefix.with_suffix(".sub")
 
-        # 1. ffmpeg demux VobSub bitstream to .idx + .sub. `-c:s copy`
-        # keeps raw packets intact; ffmpeg writes both siblings when
-        # the output filename ends in .idx (the sub payload lands at
-        # the matching .sub automatically).
+        # 1. ffmpeg demux VobSub bitstream. `-c:s copy` keeps raw
+        # packets intact; `-f vobsub` explicitly picks the vobsub muxer
+        # (needed because ffmpeg keys muxer selection on the output
+        # extension by default, and `.idx` isn't a registered muxer
+        # name — passing `.idx` directly returns "Invalid argument").
+        # The vobsub muxer writes BOTH `.sub` (bitstream) and `.idx`
+        # (palette/timing sidecar) when given `.sub` as output.
         try:
             r = subprocess.run(
                 ["ffmpeg", "-y", "-loglevel", "error",
                  "-i", str(video),
                  "-map", f"0:{stream_idx}",
                  "-c:s", "copy",
-                 str(idx_path)],
+                 "-f", "vobsub",
+                 str(sub_path)],
                 capture_output=True,
                 timeout=FFMPEG_SUB_EXTRACT_TIMEOUT,
             )
