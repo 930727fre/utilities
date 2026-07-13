@@ -200,10 +200,19 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
 
 5. Bundled candidate discovery (lazy, per video)
      → scans the bt-side wrapper for `.srt`, `.ass`, `.ssa` files;
+       picks by FILENAME match (highest priority first):
+         1. exact stem match — srt basename == video basename
+         2. SxxExx match — TV episode codes in both filenames match
+         3. single-video-single-srt wrapper → pair them
        ASS/SSA get ffmpeg-converted to SRT (override tags stripped)
-       before the check; for each, runs the WER gate (step 7) against
-       the whisper output; first passing candidate (sorted by filename)
-       gets copied to _sources/<stem>.bundled.srt
+       before staging; final srt lands at _sources/<stem>.bundled.srt.
+       Trust-based — no WER, no LLM. Rationale: bundled subs come from
+       the same release group that authored the video, so filename
+       match = same-episode. Running WER against whisper false-rejects
+       legitimate matches because professional English subs and
+       whisper's ASR use different phrasing for the same spoken line.
+       A cue-count sanity check (≥ 100 real cues) fires as belt-and-
+       suspenders against stray forced-subs SRTs in season packs.
 
 6. OS candidate fetch (lazy, per video)
      → _sources/<stem>.opensubtitles-hash.srt   (if hash search hits)
@@ -257,11 +266,10 @@ Whisper is the ground-truth listening reference; scraped subtitles are "literary
        - archive / embedded / pgs-ocr candidates are TRUSTED (prior
          verified run, or container same-source content guarantee) and
          used directly if they materialize
-       - bundled uses the SAME plot-check accept as OS — walk the
-         wrapper for `.srt` / `.ass` / `.ssa` files, ask Opus whether
-         each is the target episode's dialogue, alass-align the first
-         passer. No OS quota burned since the candidates are already
-         local.
+       - bundled is filename-trust (same logic as normal mode) — no
+         plot-check needed because bundled is authored by the same
+         release group as the video, so a filename match is
+         authoritative.
        - opensubtitles-hash / -text run their normal k-try, but the
          accept callback becomes `verify_by_plot` — Opus 4.7 with
          web_search reads the candidate's full dialogue (timestamps
@@ -331,7 +339,7 @@ canonical /artifact/.../<stem>.srt exists       → done; skip
 
 Failure sidecars are extension-less plain-text files holding the error reason — Jellyfin / Infuse never load them as subtitles, but `cat <stem>.whisper-failed` (or `.whisper-polluted`, `.annotate-failed`) shows you what broke. The UI ↻ button clears canonical + every sidecar; cached `_sources/` files are preserved so replay only re-does the missing stages.
 
-Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch them. Drop into `_sources/<stem>.bundled.srt` instead if you want the WER content gate to evaluate your candidate (and to get the automatic annotation pass).
+Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch them. Drop your srt next to the video in `/bt/<wrapper>/` with a matching filename if you want the bundled tier to pick it up on the next scan (and to get the automatic annotation pass).
 
 ## Rollback granularity
 
