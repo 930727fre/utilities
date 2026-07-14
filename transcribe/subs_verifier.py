@@ -56,8 +56,16 @@ from claude_client import generate_json
 # 0.1–0.3. With the extra noise of release-mismatch (CC vs full
 # dialogue, occasional missing lines, etc.) realistic same-content WER
 # lands around 0.2–0.5. Different content / wrong cut / wrong language
-# climbs >0.7. 0.5 is the conventional pass cutoff and leaves safety
-# margin in both directions.
+# climbs >0.7. Empirically wrong-episode subs from a season pack score
+# ≥1.5 — the 0.5–1.5 band is essentially empty in real data, so a
+# threshold up to ~0.6 is still safe against wrong-episode candidates.
+#
+# Raised to 0.55 (from 0.5) after the S04E09 GoT case: whisper only
+# transcribed ~70% of dialogue for that episode, so every correct-
+# episode candidate (both bundled and OS variants) clustered tightly
+# at 0.502–0.519, just above 0.5 — all rejected while wrong-episode
+# subs stayed at 1.7–2.4. Extra 0.05 catches this false-negative band
+# without moving into anything dangerous. See git log for the analysis.
 #
 # No cue-density pre-filter — WER alone catches every case density was
 # meant to: forced subs land at WER ~1 (massive deletions vs whisper);
@@ -65,7 +73,7 @@ from claude_client import generate_json
 # different content lands at WER >0.7. The density gate we used to have
 # false-rejected legitimate candidates when whisper produced anomalously
 # few cues for an episode.
-WER_PASS_MAX = 0.5
+WER_PASS_MAX = 0.55
 
 # Forced-subs prefilter — subtitle tracks that translate only foreign
 # signs / on-screen text typically ship 10–40 cues per episode (vs

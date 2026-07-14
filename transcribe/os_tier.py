@@ -72,7 +72,7 @@ def fetch_os_ktry(
 
     Compared to a "download all N, pick lowest WER" strategy: strictly
     fewer downloads (stops as soon as one passes), same worst case, no
-    ranking penalty (all passing candidates are above WER 0.5 anyway;
+    ranking penalty (all passing candidates are close to WER_PASS_MAX anyway;
     "lowest passer" and "first passer" are both correct enough — alass
     handles the rest).
 

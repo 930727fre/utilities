@@ -157,10 +157,10 @@ def pick_bundled_min_wer(
     Best-of-all (not first-passer). In a TV season pack with 20-30
     English srts, different episodes of the same show can have enough
     overlapping dialogue that a wrong-episode srt occasionally lands
-    just under the 0.5 pass threshold before the correct one is
-    iterated to — first-passer would pick that. Min-WER removes the
-    ordering dependency: the correct episode's srt will always score
-    lowest on its own audio.
+    just under the pass threshold before the correct one is iterated
+    to — first-passer would pick that. Min-WER removes the ordering
+    dependency: the correct episode's srt will always score lowest on
+    its own audio.
 
     ASS/SSA candidates are ffmpeg-converted to SubRip in a scratch
     tempdir. Cue-count prefilter drops forced-subs / partial tracks
