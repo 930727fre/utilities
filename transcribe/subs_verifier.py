@@ -315,6 +315,28 @@ def find_pollution_windows(whisper_srt: Path) -> list[tuple[float, float]]:
     return windows
 
 
+def write_srt_without_windows(
+    src_srt: Path,
+    windows: list[tuple[float, float]],
+    dest_srt: Path,
+) -> int:
+    """Read `src_srt`, drop every cue overlapping any window, renumber the
+    survivors 1..N, write to `dest_srt`. Returns count of surviving cues.
+
+    Used when a low-pollution whisper transcript is being promoted to
+    verified.srt as a no-candidate-salvage fallback — dropping the
+    hallucinated cues keeps them from appearing in the annotated
+    canonical output the user sees in Jellyfin."""
+    from annotate import render_srt
+    cues = _real_cues(src_srt)
+    kept = [c for c in cues if not _cue_in_windows(c, windows)]
+    for new_idx, c in enumerate(kept, 1):
+        c["idx"] = new_idx
+    dest_srt.parent.mkdir(parents=True, exist_ok=True)
+    dest_srt.write_text(render_srt(kept), encoding="utf-8")
+    return len(kept)
+
+
 def pollution_cue_ratio(
     whisper_srt: Path,
     windows: list[tuple[float, float]],

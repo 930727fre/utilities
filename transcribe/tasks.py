@@ -30,6 +30,7 @@ from subs_verifier import (
     find_pollution_windows,
     pollution_cue_ratio,
     verify_by_plot,
+    write_srt_without_windows,
 )
 from storage import get_job, upsert_job
 from whisper_client import run_whisper
@@ -52,6 +53,21 @@ RESYNC_TIMEOUT = 5 * 60            # alass on a long movie tops out well under t
 # Victoria (2015) case-in-point: 27% time coverage, 78% polluted-cue
 # ratio — the cue ratio catches it, time coverage lets it slip.
 _POLLUTION_CUE_RATIO_BAIL = 0.5
+
+# When the WER candidate loop finishes with no winner AND whisper has any
+# pollution windows, we normally refuse to promote whisper to verified
+# (because promoting a hallucinated transcript to canonical is worse than
+# stamping `.whisper-polluted` for user intervention). But at very low
+# pollution — say a single degenerate "ha ha ha" laughing scene in an
+# otherwise-clean 400-cue transcript — the pipeline was too strict: OS
+# happens to return wrong-movie candidates (all WER fail) and a ~1%
+# hallucination sinks an otherwise fine whisper. This threshold lets us
+# strip the polluted cues and promote the rest as verified.
+#
+# Kept below _POLLUTION_CUE_RATIO_BAIL by a wide margin — the two thresholds
+# operate on different code paths and shouldn't be confused. This one is
+# "accept trace pollution as noise"; that one is "reroute to plot-check".
+_WHISPER_ACCEPT_MAX_POLLUTION = 0.05
 
 # Single worker — pipeline (whisper + verify + alass + annotation) runs
 # end-to-end on one thread so per-job state mutations stay serial and the
@@ -670,19 +686,19 @@ def process_bt_file(job_id: str):
                 print(f"[pipeline] {video.name!r}: {tag} alass failed; trying next", flush=True)
 
             if winner_tag is None:
-                if windows:
-                    # Whisper had hallucination loops (below the cue-ratio
-                    # bail, so scrub was attempted) but no candidate salvaged
-                    # it — refuse to promote a partially-hallucinated whisper
-                    # to canonical. Stamp the sidecar so the scan loop stops
-                    # retrying and the UI surfaces the state for the user to
-                    # intervene (drop a bundled SRT, refetch OS once quota
-                    # recovers, etc.).
-                    ratio = pollution_cue_ratio(whisper_src, windows)
+                # No candidate passed WER + alass. Decide whether whisper
+                # itself is trustworthy enough to promote as verified.
+                ratio = pollution_cue_ratio(whisper_src, windows) if windows else 0.0
+                if ratio > _WHISPER_ACCEPT_MAX_POLLUTION:
+                    # Significant pollution — refuse to promote a
+                    # partially-hallucinated whisper to canonical. Stamp
+                    # the sidecar so the scan loop stops retrying and
+                    # the UI surfaces the state for user intervention
+                    # (drop a bundled SRT, refetch OS once quota recovers,
+                    # etc.).
                     polluted_reason = (
                         f"{len(windows)} polluted window(s), {ratio:.0%} of "
-                        f"whisper cues affected, no candidate salvaged after "
-                        f"whisper-side scrub"
+                        f"whisper cues affected, no candidate salvaged"
                     )
                     try:
                         stamp_whisper_polluted(video, polluted_reason)
@@ -690,12 +706,21 @@ def process_bt_file(job_id: str):
                         pass
                     _fail(job_id, f"whisper polluted, no usable candidate ({polluted_reason})")
                     return
-                # Whisper is clean and no candidate passed — fallback to
-                # whisper-as-verified (already audio-aligned, no alass).
+                # Whisper is clean (no windows) or nearly-clean (windows
+                # below _WHISPER_ACCEPT_MAX_POLLUTION). Promote it. For
+                # the nearly-clean case, strip the polluted cues first so
+                # the hallucinated stretch doesn't reach canonical.
                 try:
                     verified_src.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(str(whisper_src), str(verified_src))
-                    print(f"[pipeline] {video.name!r}: no candidate verified → whisper promoted to verified.srt", flush=True)
+                    if windows:
+                        kept = write_srt_without_windows(whisper_src, windows, verified_src)
+                        print(f"[pipeline] {video.name!r}: {ratio:.1%} pollution ≤ "
+                              f"{_WHISPER_ACCEPT_MAX_POLLUTION:.0%} — stripped "
+                              f"{len(windows)} window(s), promoted {kept} cues as verified",
+                              flush=True)
+                    else:
+                        shutil.copy2(str(whisper_src), str(verified_src))
+                        print(f"[pipeline] {video.name!r}: no candidate verified → whisper promoted to verified.srt", flush=True)
                 except OSError as exc:
                     _fail(job_id, f"copy whisper → verified failed: {exc}")
                     return
