@@ -11,11 +11,7 @@ from pathlib import Path
 import yt_dlp
 
 from annotate import annotate_srt
-from archive import (
-    find_archive_english,
-    find_archive_zh,
-    mirror_to_archive,
-)
+from archive import mirror_to_archive
 from bt_filter import _sources_path
 from bundled import pick_bundled_min_wer, pick_bundled_smart_plot
 from container_subs import extract_embedded, extract_pgs_ocr, extract_vobsub_ocr
@@ -352,13 +348,16 @@ def _run_transcription(job_id: str, staging_mp4: str):
 #
 # Split by whether the tier needs whisper as reference. Whisper-
 # independent tiers are attempted BEFORE whisper — if any hits, we skip
-# the 10-30 minute GPU pass entirely. Same-source content (embedded /
-# pgs-ocr from mkv container) and prior canonical (archive) don't need
-# a whisper ASR reference to be trusted; content is guaranteed by
-# construction. Only the "external release" tiers (bundled / OS) need
-# whisper as content-match reference (normal WER) or pollution
-# indicator (polluted-mode plot-check dispatch).
-_WHISPER_INDEPENDENT_TAGS = ("archive", "embedded", "pgs-ocr", "vobsub-ocr")
+# the 10-30 minute GPU pass entirely. Same-source container extractions
+# (embedded / pgs-ocr / vobsub-ocr from the mkv itself) don't need a
+# whisper ASR reference; content is guaranteed by construction.
+# (Archive-tier attach happens earlier, inside bt_filter.filter_wrapper,
+# and lands the SRT directly at canonical — those videos never reach
+# process_bt_file because `has_srt=True` filters them out at scan time.)
+# Only the "external release" tiers (bundled / OS) need whisper as
+# content-match reference (normal WER) or pollution indicator
+# (polluted-mode plot-check dispatch).
+_WHISPER_INDEPENDENT_TAGS = ("embedded", "pgs-ocr", "vobsub-ocr")
 _WHISPER_DEPENDENT_TAGS = ("bundled", "opensubtitles-hash", "opensubtitles-text")
 
 def _fetch_candidate(
@@ -371,21 +370,6 @@ def _fetch_candidate(
     Returns `dest` on success, None on miss."""
     if dest.exists():
         return dest
-
-    if tag == "archive":
-        # Copy the previously-produced canonical SRT from data/archive/
-        # into _sources/<stem>.archive.srt. Chinese sibling gets promoted
-        # separately at pipeline finalize (see the winner-tag branch there).
-        src = find_archive_english(video)
-        if src is None:
-            return None
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(src), str(dest))
-            return dest
-        except OSError as exc:
-            print(f"[pipeline] {video.name!r}: archive fetch failed — {exc}", flush=True)
-            return None
 
     if tag == "embedded":
         return extract_embedded(video, dest)
@@ -723,65 +707,44 @@ def process_bt_file(job_id: str):
 
     # ── 4. Annotation → canonical (atomic) ────────────────────────────
     #
-    # Archive winner short-circuits the annotate step: verified_src is
-    # already a fully-annotated SRT from a previous run. Copy it straight
-    # to canonical + promote sibling zh-tw if archive has one. Sonnet /
-    # Gemini calls skipped entirely — the whole point of the tier. Also
-    # skip mirror_to_archive here because canonical came FROM archive
-    # (avoids duplicate archive folders across LLM canonical drift).
-    if winner_tag == "archive":
-        # Read archive content and atomic-write to canonical so scan-loop's
-        # "canonical exists = done" invariant never sees a half-written file.
+    # (Archive-attached videos never reach this function — bt_filter
+    # copies archive SRT to canonical at wrapper-arrival time, and
+    # `_scan_bt` filters them out via `has_srt=True`. So process_bt_file
+    # always annotates + writes canonical + mirrors to archive.)
+    job["status"] = "ANNOTATING"
+    job["updated_at"] = _now()
+    upsert_job(job)
+
+    try:
+        annotated = annotate_srt(
+            verified_src,
+            is_cancelled=lambda: _is_job_deleted(job_id),
+        )
+    except Exception as exc:
+        traceback.print_exc()
         try:
-            _atomic_write_text(canonical, verified_src.read_text(encoding="utf-8"))
-        except OSError as exc:
-            _fail(job_id, f"archive → canonical write failed: {exc}")
-            return
-        # Chinese sibling — best-effort, non-fatal
-        src_eng = find_archive_english(video)
-        if src_eng is not None:
-            src_zh = find_archive_zh(src_eng)
-            if src_zh is not None:
-                zh_dest = canonical.parent / f"{canonical.stem}.zh-tw.srt"
-                try:
-                    _atomic_write_text(zh_dest, src_zh.read_text(encoding="utf-8"))
-                    print(f"[pipeline] {video.name!r}: promoted archive zh-tw", flush=True)
-                except OSError as exc:
-                    print(f"[pipeline] {video.name!r}: archive zh promote failed — {exc}", flush=True)
-    else:
-        job["status"] = "ANNOTATING"
-        job["updated_at"] = _now()
-        upsert_job(job)
+            stamp_annotate_failed(video, str(exc))
+        except OSError:
+            pass
+        _fail(job_id, f"Annotation failed: {exc}")
+        return
 
-        try:
-            annotated = annotate_srt(
-                verified_src,
-                is_cancelled=lambda: _is_job_deleted(job_id),
-            )
-        except Exception as exc:
-            traceback.print_exc()
-            try:
-                stamp_annotate_failed(video, str(exc))
-            except OSError:
-                pass
-            _fail(job_id, f"Annotation failed: {exc}")
-            return
+    if annotated is None:
+        # Cancelled (job DELETED). Nothing written to canonical; the
+        # next-time replay re-runs only the annotation step thanks to
+        # the cached verified.srt.
+        return
 
-        if annotated is None:
-            # Cancelled (job DELETED). Nothing written to canonical; the
-            # next-time replay re-runs only the annotation step thanks to
-            # the cached verified.srt.
-            return
+    try:
+        _atomic_write_text(canonical, annotated)
+    except OSError as exc:
+        _fail(job_id, f"write canonical failed: {exc}")
+        return
 
-        try:
-            _atomic_write_text(canonical, annotated)
-        except OSError as exc:
-            _fail(job_id, f"write canonical failed: {exc}")
-            return
-
-        # Mirror to data/archive/ so a future delete_torrent + re-download
-        # cycle can reuse this SRT (archive tier auto-attach in _fetch_candidate).
-        mirror_to_archive(canonical)
+    # Mirror to data/archive/ so a future delete_torrent + re-download
+    # cycle can reuse this SRT (bt_filter's archive-attach on next
+    # wrapper arrival picks it up via direct string match).
+    mirror_to_archive(canonical)
 
     # Successfully produced the canonical SRT — clear any stale failure
     # sidecars from a prior run so the file isn't accidentally skipped.

@@ -207,10 +207,19 @@ next to the main episodes (not in its own directory), your \
 episode_regex should not accidentally match it — otherwise it will \
 hardlink and clutter the Jellyfin library.
 
-If you're not sure about the canonical title / year of anything — \
-especially recent releases past your training cutoff — USE WEB SEARCH. \
-A wrong year breaks Jellyfin metadata lookup downstream, and \
-false-confidence guesses have caused real user damage.
+TITLE SOURCE OF TRUTH: use TMDb (themoviedb.org) canonical English \
+title EXACTLY as displayed on the TMDb page. When in doubt — especially \
+for recent releases past your training cutoff — USE WEB SEARCH and \
+visit the TMDb page for the work. Preserve TMDb punctuation verbatim: \
+hyphens, colons, apostrophes, ampersands, ellipses. Do NOT drop, add, \
+translate, or "normalize" characters. A wrong year breaks Jellyfin \
+metadata lookup downstream; a drifting title breaks archive-tier \
+auto-reattach on re-download (same-title archive folders are matched \
+by exact string equality, so consistency across runs is critical).
+
+Example: the 2018 animated Spider-Man film has TMDb title \
+"Spider-Man: Into the Spider-Verse" — canonical is exactly that, \
+with hyphen AND colon.
 
 Bundled subtitle files (`.srt`) are NOT your concern — the downstream \
 pipeline content-matches them via WER. You only classify videos.
@@ -723,7 +732,24 @@ def filter_wrapper(wrapper: Path) -> None:
         _write_sentinel(wrapper.name, [])
         return
 
-    # ── 3. Sentinel + manifest ────────────────────────────────────────
+    # ── 3. Archive attach ────────────────────────────────────────────
+    # For each canonical, if `/archive/<canonical_show>/` exists (direct
+    # string match on the folder name — canonical title is TMDb-pinned so
+    # cross-run drift is negligible), copy the matching SRT next to the
+    # canonical. Downstream `_scan_bt` sees `has_srt=True` and skips
+    # whisper + annotate for the video. Lazy import avoids circular:
+    # archive.py imports ARTIFACT_ROOT from this module.
+    from archive import attach_wrapper_from_archive
+    try:
+        attach_wrapper_from_archive(canonical_videos)
+    except Exception:
+        # Never let archive-attach failure block sentinel + pipeline —
+        # a missed attach just means the video gets full-pipeline
+        # treatment, which is the safe fallback.
+        import traceback
+        traceback.print_exc()
+
+    # ── 4. Sentinel + manifest ────────────────────────────────────────
     # No delete pass — /bt/ is read-only to us. Bonus content (videos
     # not hardlinked) simply doesn't get hardlinked; it stays in /bt for
     # aria2 to keep seeding and the user can remove the bt-side wrapper
