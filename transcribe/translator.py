@@ -319,6 +319,8 @@ def translate_video_zh(video: Path) -> None:
             err_path.write_text(reason, encoding="utf-8")
         except OSError as e:
             print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
+        from notifier import notify_zh_failure
+        notify_zh_failure(video, reason)
         return
 
     print(f"[translate-zh] translating {video.name!r} via Gemini (10-cue batches)", flush=True)
@@ -329,9 +331,13 @@ def translate_video_zh(video: Path) -> None:
         # can reuse the Chinese SRT alongside the English one (see archive.py).
         from archive import mirror_to_archive
         mirror_to_archive(zh_path)
+        from notifier import notify_zh_success
+        notify_zh_success(video)
     except Exception as exc:
         traceback.print_exc()
         try:
             err_path.write_text(f"translation failed: {exc}", encoding="utf-8")
         except OSError as e:
             print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
+        from notifier import notify_zh_failure
+        notify_zh_failure(video, f"translation failed: {exc}")

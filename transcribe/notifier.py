@@ -103,6 +103,44 @@ def _find_wrapper_for_video(video: Path) -> Optional[str]:
     return None
 
 
+def _wrapper_terminal_state_zh(wrapper_name: str) -> Optional[dict]:
+    """Return {total, translated_paths, failed_paths, all_terminal} for
+    Chinese translation of a wrapper. Denominator = canonicals that have
+    an English `.srt` (only translatable ones). Each candidate is either
+    translated (`.zh-tw.srt` exists), failed (`.zh-tw.srt.error` exists),
+    or pending. Returns None if the sentinel isn't readable."""
+    from bt_filter import load_manifest
+    canonical_videos = load_manifest(wrapper_name)
+    if not canonical_videos:
+        return None
+    translatable = [v for v in canonical_videos if v.with_suffix(".srt").exists()]
+    if not translatable:
+        return None
+    translated: list[Path] = []
+    failed: list[tuple[Path, str]] = []  # (video, reason)
+    pending: list[Path] = []
+    for video in translatable:
+        zh = video.parent / f"{video.stem}.zh-tw.srt"
+        err = Path(str(zh) + ".error")
+        if zh.exists():
+            translated.append(video)
+        elif err.exists():
+            try:
+                reason = err.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                reason = "(error sidecar unreadable)"
+            failed.append((video, reason))
+        else:
+            pending.append(video)
+    return {
+        "total": len(translatable),
+        "translated": translated,
+        "failed": failed,
+        "pending": pending,
+        "all_terminal": not pending,
+    }
+
+
 def _wrapper_terminal_state(wrapper_name: str) -> Optional[dict]:
     """Return {total, succeeded_paths, failed_paths, all_terminal} for a
     wrapper, computed by walking its canonical file list and checking
@@ -164,6 +202,25 @@ def _fmt_summary(wrapper_name: str, state: dict) -> str:
     return "\n".join(lines)
 
 
+def _fmt_summary_zh(wrapper_name: str, state: dict) -> str:
+    ok = len(state["translated"])
+    bad = len(state["failed"])
+    total = state["total"]
+    if bad == 0:
+        header = f"🈶 <b>{_escape_html(wrapper_name)}</b>\nzh: {ok}/{total} translated"
+    else:
+        header = f"⚠️ <b>{_escape_html(wrapper_name)}</b> (zh)\n{ok} ✅ / {bad} ❌ (of {total})"
+    if bad == 0:
+        return header
+    lines = [header, "", "Failed:"]
+    for video, reason in state["failed"][:10]:
+        short_reason = reason.replace("\n", " ")[:120]
+        lines.append(f"• {_escape_html(video.name)} — {_escape_html(short_reason)}")
+    if bad > 10:
+        lines.append(f"…and {bad - 10} more")
+    return "\n".join(lines)
+
+
 def _fmt_individual_success(video: Path, tier: str) -> str:
     return f"✅ <b>{_escape_html(video.name)}</b>\ntier: {_escape_html(tier)}"
 
@@ -209,3 +266,35 @@ def notify_failure(video: Path, kind: str, reason: str) -> None:
         _send(_fmt_individual_failure(video, kind, reason))
         return
     maybe_fire_wrapper_summary(wrapper)
+
+
+def maybe_fire_wrapper_summary_zh(wrapper_name: str) -> None:
+    """Chinese-side twin of `maybe_fire_wrapper_summary`. Fires when
+    every translatable file in the wrapper (i.e. every canonical with
+    an English `.srt`) has either a `.zh-tw.srt` or a `.zh-tw.srt.error`
+    sibling."""
+    state = _wrapper_terminal_state_zh(wrapper_name)
+    if state is None or not state["all_terminal"]:
+        return
+    _send(_fmt_summary_zh(wrapper_name, state))
+
+
+def notify_zh_success(video: Path) -> None:
+    """Called by the translator on successful zh-tw sibling write."""
+    wrapper = _find_wrapper_for_video(video)
+    if wrapper is None:
+        # Non-wrapper canonical (YT probably, though YT typically
+        # doesn't get translated). Individual notification.
+        _send(f"🈶 <b>{_escape_html(video.name)}</b>\nzh translated")
+        return
+    maybe_fire_wrapper_summary_zh(wrapper)
+
+
+def notify_zh_failure(video: Path, reason: str) -> None:
+    """Called by the translator when translation fails and an .error
+    sidecar is stamped."""
+    wrapper = _find_wrapper_for_video(video)
+    if wrapper is None:
+        _send(f"❌ <b>{_escape_html(video.name)}</b>\nzh failed: {_escape_html(reason)}")
+        return
+    maybe_fire_wrapper_summary_zh(wrapper)

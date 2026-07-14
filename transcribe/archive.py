@@ -167,11 +167,16 @@ def attach_wrapper_from_archive(canonical_videos: list[Path]) -> None:
         except OSError as exc:
             print(f"[archive] attach failed for {canonical_video.name}: {exc}", flush=True)
             continue
-        # No per-file notification here — wrapper-level summary is
-        # fired once by bt_filter after all attaches complete + the
-        # sentinel is written. Archive-attached files never reach
-        # process_bt_file (has_srt filter at scan time), so this is
-        # their only notification path.
+        # Fire wrapper-aggregating notification. The sentinel is already
+        # written by bt_filter (step 3, before this attach step 4), so
+        # notify_success can look up the wrapper by canonical path. The
+        # last attach in an all-archive wrapper naturally observes
+        # all-terminal state and fires the wrapper summary.
+        try:
+            from notifier import notify_success
+            notify_success(canonical_video, "archive")
+        except Exception as exc:
+            print(f"[archive] notify_success failed: {exc}", flush=True)
         # zh-tw sibling — best-effort, non-fatal.
         zh = _find_archive_zh_sibling(eng)
         if zh is None:
