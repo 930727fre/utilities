@@ -15,6 +15,7 @@ from archive import mirror_to_archive
 from bt_filter import _sources_path
 from bundled import pick_bundled_min_wer, pick_bundled_smart_plot
 from container_subs import extract_embedded, extract_pgs_ocr, extract_vobsub_ocr
+from notifier import notify_failure, notify_success
 from os_tier import fetch_os_ktry, os_ktry
 from srt_source import (
     annotate_failed_path,
@@ -618,6 +619,7 @@ def process_bt_file(job_id: str):
                     stamp_whisper_failed(video, str(exc))
                 except OSError:
                     pass
+                notify_failure(video.name, "whisper failed", str(exc))
                 _fail(job_id, str(exc))
                 return
         else:
@@ -656,6 +658,7 @@ def process_bt_file(job_id: str):
                         stamp_whisper_polluted(video, polluted_reason)
                     except OSError:
                         pass
+                    notify_failure(video.name, "whisper polluted", polluted_reason)
                     _fail(job_id, f"whisper polluted, no salvage possible ({polluted_reason})")
                     return
                 if _is_job_deleted(job_id):
@@ -704,6 +707,7 @@ def process_bt_file(job_id: str):
                         stamp_whisper_polluted(video, polluted_reason)
                     except OSError:
                         pass
+                    notify_failure(video.name, "whisper polluted", polluted_reason)
                     _fail(job_id, f"whisper polluted, no usable candidate ({polluted_reason})")
                     return
                 # Whisper is clean (no windows) or nearly-clean (windows
@@ -751,6 +755,7 @@ def process_bt_file(job_id: str):
             stamp_annotate_failed(video, str(exc))
         except OSError:
             pass
+        notify_failure(video.name, "annotate failed", str(exc))
         _fail(job_id, f"Annotation failed: {exc}")
         return
 
@@ -789,6 +794,7 @@ def process_bt_file(job_id: str):
     job["status"] = "SUCCESS"
     job["updated_at"] = _now()
     upsert_job(job)
+    notify_success(video.name, winner_tag or "whisper")
 
 
 def _fail(job_id: str, error: str):
