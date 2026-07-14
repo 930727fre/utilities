@@ -619,7 +619,7 @@ def process_bt_file(job_id: str):
                     stamp_whisper_failed(video, str(exc))
                 except OSError:
                     pass
-                notify_failure(video.name, "whisper failed", str(exc))
+                notify_failure(video, "whisper failed", str(exc))
                 _fail(job_id, str(exc))
                 return
         else:
@@ -658,7 +658,7 @@ def process_bt_file(job_id: str):
                         stamp_whisper_polluted(video, polluted_reason)
                     except OSError:
                         pass
-                    notify_failure(video.name, "whisper polluted", polluted_reason)
+                    notify_failure(video, "whisper polluted", polluted_reason)
                     _fail(job_id, f"whisper polluted, no salvage possible ({polluted_reason})")
                     return
                 if _is_job_deleted(job_id):
@@ -707,7 +707,7 @@ def process_bt_file(job_id: str):
                         stamp_whisper_polluted(video, polluted_reason)
                     except OSError:
                         pass
-                    notify_failure(video.name, "whisper polluted", polluted_reason)
+                    notify_failure(video, "whisper polluted", polluted_reason)
                     _fail(job_id, f"whisper polluted, no usable candidate ({polluted_reason})")
                     return
                 # Whisper is clean (no windows) or nearly-clean (windows
@@ -755,7 +755,7 @@ def process_bt_file(job_id: str):
             stamp_annotate_failed(video, str(exc))
         except OSError:
             pass
-        notify_failure(video.name, "annotate failed", str(exc))
+        notify_failure(video, "annotate failed", str(exc))
         _fail(job_id, f"Annotation failed: {exc}")
         return
 
@@ -794,7 +794,7 @@ def process_bt_file(job_id: str):
     job["status"] = "SUCCESS"
     job["updated_at"] = _now()
     upsert_job(job)
-    notify_success(video.name, winner_tag or "whisper")
+    notify_success(video, winner_tag or "whisper")
 
 
 def _fail(job_id: str, error: str):

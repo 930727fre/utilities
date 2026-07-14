@@ -755,3 +755,17 @@ def filter_wrapper(wrapper: Path) -> None:
     # aria2 to keep seeding and the user can remove the bt-side wrapper
     # when they're done with the torrent.
     _write_sentinel(wrapper.name, canonical_videos)
+
+    # ── 5. Wrapper-summary notification (best-effort) ────────────────
+    # If archive-attach covered all files, the wrapper is already
+    # terminal and no pipeline events will fire — the summary needs
+    # kicking here. If some files still need pipeline work, the check
+    # sees non-terminal and no-ops; the last pipeline event will fire
+    # the summary later. Lazy import to avoid circular (notifier imports
+    # from this module).
+    try:
+        from notifier import maybe_fire_wrapper_summary
+        maybe_fire_wrapper_summary(wrapper.name)
+    except Exception:
+        import traceback
+        traceback.print_exc()

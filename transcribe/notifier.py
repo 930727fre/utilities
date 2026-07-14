@@ -1,37 +1,48 @@
 """Telegram push notifications for pipeline lifecycle events.
 
-Phase 1: pure text notifications, no interactive buttons. FastAPI (this
-container) → Telegram Bot API → user's chat. No separate bot process,
-no long-polling — outbound HTTP only.
+Wrapper-level aggregation, stateless. Every pipeline event (success or
+failure) triggers a filesystem check — is the wrapper fully terminal?
+Only the last event in a wrapper sees "all done" and fires a summary.
+Failures don't get individual push notifications; they roll up into the
+same wrapper summary alongside successes.
 
-Fires on:
-  - `notify_success`: canonical SRT successfully produced (via any tier
-    — bundled / OS / whisper fallback / archive attach)
-  - `notify_failure`: `.whisper-failed` / `.whisper-polluted` /
-    `.annotate-failed` stamped (i.e. pipeline gave up and needs the
-    user to intervene)
+Design invariants:
+  - No in-memory bookkeeping — pure derivation from filesystem.
+  - `.filtered` sentinel is the authoritative canonical list per wrapper.
+  - Canonical `.srt` existence + failure sidecars are the completion signals.
+  - Same event may re-fire summary if wrapper's state changed (e.g., user
+    retry succeeds → wrapper terminal with 9 ✅ / 1 ❌ → later retry succeeds
+    → wrapper terminal with 10 ✅ / 0 ❌ → new summary fires).
+
+Concurrency: the English pipeline runs on a single-worker executor so
+per-file events are naturally serialised — only the final event sees
+all-terminal. The Chinese translator has 2 workers; in the extreme case
+both may see all-terminal simultaneously and double-fire. Accepted as a
+rare no-op; duplicate message is harmless.
 
 Config (both required, both silent-disable on absence):
-  TELEGRAM_BOT_TOKEN  — from @BotFather (Telegram, /newbot flow)
-  TELEGRAM_CHAT_ID    — the numeric chat_id of your DM with the bot
-
-Getting chat_id after creating the bot:
-  1. Send any message to your bot in Telegram
-  2. curl "https://api.telegram.org/bot<TOKEN>/getUpdates" | jq
-  3. Copy result.message.chat.id (an integer, may be negative)
+  TELEGRAM_BOT_TOKEN  — from @BotFather (/newbot flow)
+  TELEGRAM_CHAT_ID    — numeric chat_id of your DM with the bot
 
 Failure handling: any HTTP / config error is caught and logged. The
 notifier NEVER raises — pipeline correctness takes priority over
 notification delivery.
 """
 import os
+from pathlib import Path
 from typing import Optional
 
 import httpx
 
+from srt_source import (
+    annotate_failed_path,
+    whisper_failed_path,
+    whisper_polluted_path,
+)
+
 _BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 _CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-_API_TIMEOUT = 5.0  # seconds — short since we don't want to slow pipeline
+_API_TIMEOUT = 5.0  # short; we don't want to slow the pipeline
 
 
 def _enabled() -> bool:
@@ -39,7 +50,7 @@ def _enabled() -> bool:
 
 
 def _send(text: str) -> None:
-    """Fire-and-forget send. Best-effort HTTP POST to Telegram; failure
+    """Fire-and-forget HTTP POST to Telegram. Best-effort — failure
     is logged and swallowed."""
     if not _enabled():
         return
@@ -61,38 +72,140 @@ def _send(text: str) -> None:
         print(f"[notifier] send failed: {exc}", flush=True)
 
 
-def _fmt_elapsed(sec: Optional[float]) -> str:
-    if sec is None or sec <= 0:
-        return ""
-    m, s = divmod(int(sec), 60)
-    if m >= 60:
-        h, m = divmod(m, 60)
-        return f" | {h}:{m:02d}:{s:02d}"
-    return f" | {m}:{s:02d}"
-
-
 def _escape_html(s: str) -> str:
-    """Minimal HTML escape for text we drop inside <b>…</b>. Telegram's
-    HTML parse mode requires escaping &, <, > in body text."""
+    """Escape &, <, > for Telegram HTML parse mode."""
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def notify_success(video_name: str, tier: str, elapsed_sec: Optional[float] = None) -> None:
-    """Called when a canonical SRT lands. `tier` names how the pipeline
-    got there (e.g. 'archive', 'bundled', 'opensubtitles-text',
-    'whisper'). `elapsed_sec` is optional wall-clock duration since the
-    pipeline started on this file."""
-    text = f"✅ <b>{_escape_html(video_name)}</b>\ntier: {_escape_html(tier)}{_fmt_elapsed(elapsed_sec)}"
-    _send(text)
+# ── wrapper lookup + state derivation ──────────────────────────────────
+
+def _find_wrapper_for_video(video: Path) -> Optional[str]:
+    """Return the bt wrapper name whose `.filtered` sentinel lists this
+    video's canonical path, or None if the video isn't tracked by any
+    sentinel (e.g. YouTube pipeline, manual placement).
+
+    Cheap linear scan over `_processed/*.filtered` — sentinel files are
+    small and there are only a few dozen at most for a typical library."""
+    from bt_filter import ARTIFACT_ROOT, PROCESSED_DIR
+    try:
+        rel_str = str(video.resolve().relative_to(ARTIFACT_ROOT.resolve()))
+    except ValueError:
+        return None
+    if not PROCESSED_DIR.is_dir():
+        return None
+    for sentinel in PROCESSED_DIR.glob("*.filtered"):
+        try:
+            text = sentinel.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if rel_str in text.splitlines():
+            return sentinel.stem
+    return None
 
 
-def notify_failure(video_name: str, kind: str, reason: str) -> None:
-    """Called when the pipeline stamps a failure sidecar and gives up.
-    `kind` is the failure category (short label — 'whisper failed',
-    'whisper polluted', 'annotate failed'). `reason` is the free-text
-    detail written into the sidecar."""
-    text = (
-        f"❌ <b>{_escape_html(video_name)}</b>\n"
+def _wrapper_terminal_state(wrapper_name: str) -> Optional[dict]:
+    """Return {total, succeeded_paths, failed_paths, all_terminal} for a
+    wrapper, computed by walking its canonical file list and checking
+    each for `.srt` (success) or any of the three failure sidecars.
+
+    Returns None if the sentinel can't be read (deleted between event
+    and check, treat as no-op)."""
+    from bt_filter import load_manifest
+    canonical_videos = load_manifest(wrapper_name)
+    if not canonical_videos:
+        return None
+    succeeded: list[Path] = []
+    failed: list[tuple[Path, str, str]] = []  # (video, kind, reason)
+    for video in canonical_videos:
+        srt = video.with_suffix(".srt")
+        if srt.exists():
+            succeeded.append(video)
+            continue
+        for kind, path_fn in (
+            ("whisper failed", whisper_failed_path),
+            ("whisper polluted", whisper_polluted_path),
+            ("annotate failed", annotate_failed_path),
+        ):
+            sidecar = path_fn(video)
+            if sidecar.exists():
+                try:
+                    reason = sidecar.read_text(encoding="utf-8", errors="replace").strip()
+                except OSError:
+                    reason = "(sidecar unreadable)"
+                failed.append((video, kind, reason))
+                break
+    return {
+        "total": len(canonical_videos),
+        "succeeded": succeeded,
+        "failed": failed,
+        "all_terminal": len(succeeded) + len(failed) == len(canonical_videos),
+    }
+
+
+# ── summary rendering ─────────────────────────────────────────────────
+
+def _fmt_summary(wrapper_name: str, state: dict) -> str:
+    ok = len(state["succeeded"])
+    bad = len(state["failed"])
+    total = state["total"]
+    if bad == 0:
+        header = f"✅ <b>{_escape_html(wrapper_name)}</b>\n{ok}/{total} done"
+    else:
+        header = f"⚠️ <b>{_escape_html(wrapper_name)}</b>\n{ok} ✅ / {bad} ❌ (of {total})"
+    if bad == 0:
+        return header
+    lines = [header, "", "Failed:"]
+    for video, kind, reason in state["failed"][:10]:  # cap to avoid Telegram msg length
+        # Shorten reason for readability
+        short_reason = reason.replace("\n", " ")[:120]
+        lines.append(f"• {_escape_html(video.name)} — {_escape_html(kind)}: {_escape_html(short_reason)}")
+    if bad > 10:
+        lines.append(f"…and {bad - 10} more")
+    return "\n".join(lines)
+
+
+def _fmt_individual_success(video: Path, tier: str) -> str:
+    return f"✅ <b>{_escape_html(video.name)}</b>\ntier: {_escape_html(tier)}"
+
+
+def _fmt_individual_failure(video: Path, kind: str, reason: str) -> str:
+    return (
+        f"❌ <b>{_escape_html(video.name)}</b>\n"
         f"{_escape_html(kind)}: {_escape_html(reason)}"
     )
-    _send(text)
+
+
+# ── public API ─────────────────────────────────────────────────────────
+
+def maybe_fire_wrapper_summary(wrapper_name: str) -> None:
+    """Check the given wrapper's terminal state; if all its canonical
+    files have either a `.srt` or a failure sidecar, fire a Telegram
+    summary. Idempotent per call — safe to call from multiple pipeline
+    events (only the "last-event" call will see `all_terminal` True)."""
+    state = _wrapper_terminal_state(wrapper_name)
+    if state is None or not state["all_terminal"]:
+        return
+    _send(_fmt_summary(wrapper_name, state))
+
+
+def notify_success(video: Path, tier: str) -> None:
+    """Called by the pipeline when a canonical SRT is produced. Routes
+    to wrapper-level summary if the video is part of a tracked bt
+    wrapper, otherwise falls back to an individual notification
+    (YouTube canonicals, manual placements)."""
+    wrapper = _find_wrapper_for_video(video)
+    if wrapper is None:
+        _send(_fmt_individual_success(video, tier))
+        return
+    maybe_fire_wrapper_summary(wrapper)
+
+
+def notify_failure(video: Path, kind: str, reason: str) -> None:
+    """Called by the pipeline when a failure sidecar is stamped. Same
+    routing as `notify_success`: bt wrapper → wrapper summary (once all
+    siblings are terminal); non-wrapper canonical → individual push."""
+    wrapper = _find_wrapper_for_video(video)
+    if wrapper is None:
+        _send(_fmt_individual_failure(video, kind, reason))
+        return
+    maybe_fire_wrapper_summary(wrapper)
