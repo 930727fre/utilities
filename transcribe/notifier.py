@@ -1,26 +1,30 @@
 """Telegram push notifications for pipeline lifecycle events.
 
-Wrapper-level aggregation, stateless. Every pipeline event (success or
-failure) triggers a filesystem check — is the wrapper fully terminal?
-Only the last event in a wrapper sees "all done" and fires a summary.
-Failures don't get individual push notifications; they roll up into the
-same wrapper summary alongside successes.
+Season/movie-level aggregation, stateless. Every pipeline event
+(success or failure) triggers a filesystem check — is the video's
+"group" fully terminal? Only the last event in a group sees "all done"
+and fires a summary.
+
+Grouping (semantic media unit, not the raw torrent wrapper):
+  Movies/<title>/*.mkv               → group = "<title>"
+  TV/<show>/Season NN/*.mkv          → group = "<show> S NN"
+
+For a single-season torrent pack the group == wrapper — no change in
+behavior. For a complete-series pack (e.g. `GoT S01-S08`), one summary
+fires per season as each season completes, instead of a single silent
+18-hour wait for the whole pack.
 
 Design invariants:
   - No in-memory bookkeeping — pure derivation from filesystem.
-  - `.filtered` sentinel is the authoritative canonical list per wrapper.
-  - Canonical `.srt` existence + failure sidecars are the completion signals.
-  - Same event may re-fire summary if wrapper's state changed (e.g., user
-    retry succeeds → wrapper terminal with 9 ✅ / 1 ❌ → later retry succeeds
-    → wrapper terminal with 10 ✅ / 0 ❌ → new summary fires).
+  - Group = the parent directory the canonical video lives in. Its
+    sibling `.mkv/.mp4/…` files are the group members.
+  - `.srt` existence + failure sidecars are the completion signals.
 
-Concurrency: the English pipeline runs on a single-worker executor so
-per-file events are naturally serialised — only the final event sees
-all-terminal. The Chinese translator has 2 workers; in the extreme case
-both may see all-terminal simultaneously and double-fire. Accepted as a
-rare no-op; duplicate message is harmless.
+Concurrency: English pipeline is single-worker → serial events → no
+race. Chinese translator has 2 workers; extreme corner case can
+double-fire — accepted as harmless.
 
-Config (both required, both silent-disable on absence):
+Config (both required at compose parse time):
   TELEGRAM_BOT_TOKEN  — from @BotFather (/newbot flow)
   TELEGRAM_CHAT_ID    — numeric chat_id of your DM with the bot
 
@@ -49,7 +53,12 @@ except Exception:
 
 _BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 _CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-_API_TIMEOUT = 5.0  # short; we don't want to slow the pipeline
+_API_TIMEOUT = 5.0
+
+# Video extension set for identifying canonical siblings inside a group
+# directory. Kept in sync with bt_filter.VIDEO_EXTS but duplicated here
+# to keep notifier decoupled from bt_filter's internals.
+_VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 
 
 def _enabled() -> bool:
@@ -80,95 +89,110 @@ def _send(text: str) -> None:
 
 def _now_stamp() -> str:
     """Formatted timestamp aligned with utilities/backup — Asia/Taipei
-    timezone, ISO-ish `YYYY-MM-DD HH:MM:SS` (no timezone suffix)."""
+    timezone, `YYYY-MM-DD HH:MM:SS`."""
     return datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _summarize_wrapper_title(wrapper_name: str) -> str:
-    """Derive a clean human title from the wrapper's canonical outputs
-    instead of showing the raw torrent directory name (which is often
-    `Show.Name.S01.Complete.1080p.WEB-DL.CODEC-GROUP` — noisy).
+# ── group lookup + state derivation ────────────────────────────────────
 
-    Reads `.filtered` sentinel, parses each canonical path shape:
-      Movies/<title>/<file>              → "<title>"
-      TV/<show>/Season NN/<file>         → "<show> S01"  (single season)
-                                         → "<show> S01-S08"  (range)
+def _find_group_for_video(video: Path) -> Optional[tuple[Path, str]]:
+    """Return `(group_dir, group_label)` for a canonical video, or None
+    if the path shape isn't a recognized bt canonical layout (YouTube
+    dumps, staging paths — those get individual notifications).
 
-    Falls back to the raw wrapper name if parse fails."""
-    from bt_filter import ARTIFACT_ROOT, load_manifest
-    canonical_videos = load_manifest(wrapper_name)
-    if not canonical_videos:
-        return wrapper_name
-    shows: set[str] = set()
-    seasons_by_show: dict[str, set[str]] = {}
-    for v in canonical_videos:
-        try:
-            parts = v.resolve().relative_to(ARTIFACT_ROOT.resolve()).parts
-        except ValueError:
-            continue
-        if len(parts) < 2 or parts[0] not in ("Movies", "TV"):
-            continue
-        show = parts[1]
-        shows.add(show)
-        if parts[0] == "TV" and len(parts) >= 3:
-            seasons_by_show.setdefault(show, set()).add(parts[2])
-    if not shows:
-        return wrapper_name
-    if len(shows) > 1:
-        first = sorted(shows)[0]
-        return f"{first} +{len(shows) - 1} more"
-    show = next(iter(shows))
-    seasons = sorted(seasons_by_show.get(show, set()))
-    if not seasons:
-        return show                          # movie
-    def _short(s: str) -> str:
-        return s.replace("Season ", "S")
-    if len(seasons) == 1:
-        return f"{show} {_short(seasons[0])}"
-    return f"{show} {_short(seasons[0])}-{_short(seasons[-1])}"
+    Group_dir is the directory whose sibling videos define the aggregation
+    set. Group_label is what shows up in the Telegram message (clean
+    canonical title, no release-group junk).
 
-
-# ── wrapper lookup + state derivation ──────────────────────────────────
-
-def _find_wrapper_for_video(video: Path) -> Optional[str]:
-    """Return the bt wrapper name whose `.filtered` sentinel lists this
-    video's canonical path, or None if the video isn't tracked by any
-    sentinel (e.g. YouTube pipeline, manual placement).
-
-    Cheap linear scan over `_processed/*.filtered` — sentinel files are
-    small and there are only a few dozen at most for a typical library."""
-    from bt_filter import ARTIFACT_ROOT, PROCESSED_DIR
+      /artifact/Movies/<title>/<file>.mkv
+        → (<title>-dir, "<title>")
+      /artifact/TV/<show>/Season NN/<file>.mkv
+        → (<Season NN>-dir, "<show> SNN")
+    """
+    from bt_filter import ARTIFACT_ROOT
     try:
-        rel_str = str(video.resolve().relative_to(ARTIFACT_ROOT.resolve()))
+        parts = video.resolve().relative_to(ARTIFACT_ROOT.resolve()).parts
     except ValueError:
         return None
-    if not PROCESSED_DIR.is_dir():
+    if len(parts) < 2 or parts[0] not in ("Movies", "TV"):
         return None
-    for sentinel in PROCESSED_DIR.glob("*.filtered"):
-        try:
-            text = sentinel.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if rel_str in text.splitlines():
-            return sentinel.stem
+    if parts[0] == "Movies":
+        return video.parent, parts[1]
+    # TV: parts must be TV/<show>/Season NN/<file>
+    if len(parts) < 4:
+        return None
+    show = parts[1]
+    season_dir = parts[2]                                # e.g. "Season 01"
+    season_short = season_dir.replace("Season ", "S")    # → "S01"
+    return video.parent, f"{show} {season_short}"
+
+
+def _group_video_siblings(group_dir: Path) -> list[Path]:
+    """Every canonical video living directly inside `group_dir`. Used to
+    compute the group's aggregation members."""
+    try:
+        return sorted(
+            p for p in group_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in _VIDEO_EXTS
+        )
+    except OSError:
+        return []
+
+
+def _has_any_failure_sidecar(video: Path) -> Optional[tuple[str, str]]:
+    """If the video has any of the 3 failure sidecars, return
+    (kind, reason). Otherwise None."""
+    for kind, path_fn in (
+        ("whisper failed", whisper_failed_path),
+        ("whisper polluted", whisper_polluted_path),
+        ("annotate failed", annotate_failed_path),
+    ):
+        sidecar = path_fn(video)
+        if sidecar.exists():
+            try:
+                reason = sidecar.read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                reason = "(sidecar unreadable)"
+            return kind, reason
     return None
 
 
-def _wrapper_terminal_state_zh(wrapper_name: str) -> Optional[dict]:
-    """Return {total, translated_paths, failed_paths, all_terminal} for
-    Chinese translation of a wrapper. Denominator = canonicals that have
-    an English `.srt` (only translatable ones). Each candidate is either
-    translated (`.zh-tw.srt` exists), failed (`.zh-tw.srt.error` exists),
-    or pending. Returns None if the sentinel isn't readable."""
-    from bt_filter import load_manifest
-    canonical_videos = load_manifest(wrapper_name)
-    if not canonical_videos:
+def _group_terminal_state(group_dir: Path) -> Optional[dict]:
+    """{total, succeeded, failed, all_terminal} for an English pipeline
+    group. Returns None if the directory has no video siblings."""
+    siblings = _group_video_siblings(group_dir)
+    if not siblings:
         return None
-    translatable = [v for v in canonical_videos if v.with_suffix(".srt").exists()]
+    succeeded: list[Path] = []
+    failed: list[tuple[Path, str, str]] = []
+    for video in siblings:
+        if video.with_suffix(".srt").exists():
+            succeeded.append(video)
+            continue
+        f = _has_any_failure_sidecar(video)
+        if f is not None:
+            kind, reason = f
+            failed.append((video, kind, reason))
+    return {
+        "total": len(siblings),
+        "succeeded": succeeded,
+        "failed": failed,
+        "all_terminal": len(succeeded) + len(failed) == len(siblings),
+    }
+
+
+def _group_terminal_state_zh(group_dir: Path) -> Optional[dict]:
+    """{total, translated, failed, all_terminal} for zh translation of
+    a group. Denominator = siblings that have an English `.srt` (only
+    translatable ones). Returns None if no translatable siblings."""
+    siblings = _group_video_siblings(group_dir)
+    if not siblings:
+        return None
+    translatable = [v for v in siblings if v.with_suffix(".srt").exists()]
     if not translatable:
         return None
     translated: list[Path] = []
-    failed: list[tuple[Path, str]] = []  # (video, reason)
+    failed: list[tuple[Path, str]] = []
     pending: list[Path] = []
     for video in translatable:
         zh = video.parent / f"{video.stem}.zh-tw.srt"
@@ -192,76 +216,33 @@ def _wrapper_terminal_state_zh(wrapper_name: str) -> Optional[dict]:
     }
 
 
-def _wrapper_terminal_state(wrapper_name: str) -> Optional[dict]:
-    """Return {total, succeeded_paths, failed_paths, all_terminal} for a
-    wrapper, computed by walking its canonical file list and checking
-    each for `.srt` (success) or any of the three failure sidecars.
-
-    Returns None if the sentinel can't be read (deleted between event
-    and check, treat as no-op)."""
-    from bt_filter import load_manifest
-    canonical_videos = load_manifest(wrapper_name)
-    if not canonical_videos:
-        return None
-    succeeded: list[Path] = []
-    failed: list[tuple[Path, str, str]] = []  # (video, kind, reason)
-    for video in canonical_videos:
-        srt = video.with_suffix(".srt")
-        if srt.exists():
-            succeeded.append(video)
-            continue
-        for kind, path_fn in (
-            ("whisper failed", whisper_failed_path),
-            ("whisper polluted", whisper_polluted_path),
-            ("annotate failed", annotate_failed_path),
-        ):
-            sidecar = path_fn(video)
-            if sidecar.exists():
-                try:
-                    reason = sidecar.read_text(encoding="utf-8", errors="replace").strip()
-                except OSError:
-                    reason = "(sidecar unreadable)"
-                failed.append((video, kind, reason))
-                break
-    return {
-        "total": len(canonical_videos),
-        "succeeded": succeeded,
-        "failed": failed,
-        "all_terminal": len(succeeded) + len(failed) == len(canonical_videos),
-    }
-
-
 # ── summary rendering ─────────────────────────────────────────────────
 
-def _fmt_summary(wrapper_name: str, state: dict) -> str:
+def _fmt_summary(label: str, state: dict) -> str:
     ok = len(state["succeeded"])
     bad = len(state["failed"])
     total = state["total"]
-    title = _summarize_wrapper_title(wrapper_name)
     ts = _now_stamp()
     verb = "done" if bad == 0 else "partial"
-    line1 = f"Transcribe {verb} {ts} | {title} | {ok}/{total} ok"
+    line1 = f"Transcribe {verb} {ts} | {label} | {ok}/{total} ok"
     if bad:
         line1 += f" | {bad}/{total} failed"
     if bad == 0:
         return line1
-    failed_bits = []
-    for video, kind, reason in state["failed"][:10]:
-        failed_bits.append(f"{video.name} ({kind})")
+    failed_bits = [f"{v.name} ({kind})" for v, kind, _ in state["failed"][:10]]
     tail = "Failed: " + ", ".join(failed_bits)
     if bad > 10:
         tail += f", …+{bad - 10}"
     return line1 + "\n" + tail
 
 
-def _fmt_summary_zh(wrapper_name: str, state: dict) -> str:
+def _fmt_summary_zh(label: str, state: dict) -> str:
     ok = len(state["translated"])
     bad = len(state["failed"])
     total = state["total"]
-    title = _summarize_wrapper_title(wrapper_name)
     ts = _now_stamp()
     verb = "done" if bad == 0 else "partial"
-    line1 = f"Transcribe zh {verb} {ts} | {title} | {ok}/{total} ok"
+    line1 = f"Transcribe zh {verb} {ts} | {label} | {ok}/{total} ok"
     if bad:
         line1 += f" | {bad}/{total} failed"
     if bad == 0:
@@ -284,68 +265,51 @@ def _fmt_individual_failure(video: Path, kind: str, reason: str) -> str:
 
 # ── public API ─────────────────────────────────────────────────────────
 
-def maybe_fire_wrapper_summary(wrapper_name: str) -> None:
-    """Check the given wrapper's terminal state; if all its canonical
-    files have either a `.srt` or a failure sidecar, fire a Telegram
-    summary. Idempotent per call — safe to call from multiple pipeline
-    events (only the "last-event" call will see `all_terminal` True)."""
-    state = _wrapper_terminal_state(wrapper_name)
-    if state is None or not state["all_terminal"]:
-        return
-    _send(_fmt_summary(wrapper_name, state))
+def _maybe_fire_group(video: Path, zh: bool = False) -> bool:
+    """Locate the video's group, check terminal state, fire if terminal.
+    Returns True if it fired a wrapper summary (caller may need to know
+    to skip individual notification)."""
+    g = _find_group_for_video(video)
+    if g is None:
+        return False
+    group_dir, label = g
+    if zh:
+        state = _group_terminal_state_zh(group_dir)
+        if state is None or not state["all_terminal"]:
+            return True   # in-group but not terminal — still don't send individual
+        _send(_fmt_summary_zh(label, state))
+    else:
+        state = _group_terminal_state(group_dir)
+        if state is None or not state["all_terminal"]:
+            return True
+        _send(_fmt_summary(label, state))
+    return True
 
 
 def notify_success(video: Path, tier: str) -> None:
     """Called by the pipeline when a canonical SRT is produced. Routes
-    to wrapper-level summary if the video is part of a tracked bt
-    wrapper, otherwise falls back to an individual notification
-    (YouTube canonicals, manual placements)."""
-    wrapper = _find_wrapper_for_video(video)
-    if wrapper is None:
+    to group-level summary if the video is in a recognized canonical
+    layout, otherwise falls back to an individual notification (YT,
+    manual drops)."""
+    if not _maybe_fire_group(video, zh=False):
         _send(_fmt_individual_success(video, tier))
-        return
-    maybe_fire_wrapper_summary(wrapper)
 
 
 def notify_failure(video: Path, kind: str, reason: str) -> None:
     """Called by the pipeline when a failure sidecar is stamped. Same
-    routing as `notify_success`: bt wrapper → wrapper summary (once all
-    siblings are terminal); non-wrapper canonical → individual push."""
-    wrapper = _find_wrapper_for_video(video)
-    if wrapper is None:
+    routing as `notify_success`."""
+    if not _maybe_fire_group(video, zh=False):
         _send(_fmt_individual_failure(video, kind, reason))
-        return
-    maybe_fire_wrapper_summary(wrapper)
-
-
-def maybe_fire_wrapper_summary_zh(wrapper_name: str) -> None:
-    """Chinese-side twin of `maybe_fire_wrapper_summary`. Fires when
-    every translatable file in the wrapper (i.e. every canonical with
-    an English `.srt`) has either a `.zh-tw.srt` or a `.zh-tw.srt.error`
-    sibling."""
-    state = _wrapper_terminal_state_zh(wrapper_name)
-    if state is None or not state["all_terminal"]:
-        return
-    _send(_fmt_summary_zh(wrapper_name, state))
 
 
 def notify_zh_success(video: Path) -> None:
     """Called by the translator on successful zh-tw sibling write."""
-    wrapper = _find_wrapper_for_video(video)
-    if wrapper is None:
-        # Non-wrapper canonical (YT probably, though YT typically
-        # doesn't get translated). Individual notification.
+    if not _maybe_fire_group(video, zh=True):
         _send(f"Transcribe zh done {_now_stamp()} | {video.name}")
-        return
-    maybe_fire_wrapper_summary_zh(wrapper)
 
 
 def notify_zh_failure(video: Path, reason: str) -> None:
-    """Called by the translator when translation fails and an .error
-    sidecar is stamped."""
-    wrapper = _find_wrapper_for_video(video)
-    if wrapper is None:
+    """Called by the translator when translation fails."""
+    if not _maybe_fire_group(video, zh=True):
         short = reason.replace("\n", " ")[:120]
         _send(f"Transcribe zh failed {_now_stamp()} | {video.name} | {short}")
-        return
-    maybe_fire_wrapper_summary_zh(wrapper)
