@@ -108,6 +108,22 @@ _DEGEN_UNIQUE_RATIO = 0.1
 # spoken-word content only.
 _SRT_TAG_RE = re.compile(r"<[^>]+>|\{[^}]+\}")
 
+# SDH (hearing-impaired) annotation strip: sound-effect brackets and
+# speaker labels. Whisper never produces these, so leaving them in
+# makes each SDH token count as an insertion against the reference
+# and inflates candidate WER by ~0.03-0.05 on SDH-heavy releases
+# (S02 GoT SDH: 63-92 annotations per episode). Applied to both sides
+# for symmetry — whisper side is a no-op, candidate side gets cleaned.
+#
+# Bracketed cues: (URINATING), [door slams], ♪music♪. Regex tolerates
+# nested content but not nested brackets (real SDH doesn't nest).
+_SDH_TAG_RE = re.compile(r"[\(\[][^\)\]]*[\)\]]|♪[^♪]*♪")
+# Speaker labels: MAN:, MAN 2:, LORD VARYS:, etc. All caps + optional
+# digits, colon followed by whitespace or end. Requires ≥2 uppercase
+# to avoid stray "I:" / "A:" matches; applied BEFORE lowercase step so
+# the caps constraint has signal.
+_SDH_SPEAKER_RE = re.compile(r"\b[A-Z]{2,}(?:[A-Z0-9 ]{0,20})?:(?=\s|$)")
+
 # Drop everything that isn't a word character, whitespace, or apostrophe
 # (apostrophes are kept so "don't" / "it's" don't get split mid-word).
 _PUNCT_RE = re.compile(r"[^\w\s']", re.UNICODE)
@@ -173,11 +189,14 @@ def _real_cues(srt_path: Path) -> list[dict]:
 
 
 def _normalized_full_text(cues: list[dict]) -> str:
-    """Concatenate every cue's text, strip SRT formatting, lowercase,
-    drop punctuation (except apostrophes), collapse whitespace. Result is
-    a clean space-separated word stream ready to feed jiwer.wer."""
+    """Concatenate every cue's text, strip SRT formatting + SDH
+    annotations, lowercase, drop punctuation (except apostrophes),
+    collapse whitespace. Result is a clean space-separated word stream
+    ready to feed jiwer.wer."""
     raw = " ".join(_cue_text(c) for c in cues)
     s = _SRT_TAG_RE.sub("", raw)
+    s = _SDH_TAG_RE.sub(" ", s)
+    s = _SDH_SPEAKER_RE.sub(" ", s)
     s = s.lower()
     s = _PUNCT_RE.sub(" ", s)
     s = _MULTI_WS_RE.sub(" ", s)
