@@ -29,6 +29,7 @@ notifier NEVER raises — pipeline correctness takes priority over
 notification delivery.
 """
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -39,6 +40,12 @@ from srt_source import (
     whisper_failed_path,
     whisper_polluted_path,
 )
+
+try:
+    from zoneinfo import ZoneInfo
+    _TZ = ZoneInfo("Asia/Taipei")
+except Exception:
+    _TZ = timezone.utc
 
 _BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 _CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -61,7 +68,6 @@ def _send(text: str) -> None:
             json={
                 "chat_id": _CHAT_ID,
                 "text": text,
-                "parse_mode": "HTML",
                 "disable_web_page_preview": True,
             },
             timeout=_API_TIMEOUT,
@@ -72,9 +78,54 @@ def _send(text: str) -> None:
         print(f"[notifier] send failed: {exc}", flush=True)
 
 
-def _escape_html(s: str) -> str:
-    """Escape &, <, > for Telegram HTML parse mode."""
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def _now_stamp() -> str:
+    """Formatted timestamp aligned with utilities/backup — Asia/Taipei
+    timezone, ISO-ish `YYYY-MM-DD HH:MM:SS` (no timezone suffix)."""
+    return datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _summarize_wrapper_title(wrapper_name: str) -> str:
+    """Derive a clean human title from the wrapper's canonical outputs
+    instead of showing the raw torrent directory name (which is often
+    `Show.Name.S01.Complete.1080p.WEB-DL.CODEC-GROUP` — noisy).
+
+    Reads `.filtered` sentinel, parses each canonical path shape:
+      Movies/<title>/<file>              → "<title>"
+      TV/<show>/Season NN/<file>         → "<show> S01"  (single season)
+                                         → "<show> S01-S08"  (range)
+
+    Falls back to the raw wrapper name if parse fails."""
+    from bt_filter import ARTIFACT_ROOT, load_manifest
+    canonical_videos = load_manifest(wrapper_name)
+    if not canonical_videos:
+        return wrapper_name
+    shows: set[str] = set()
+    seasons_by_show: dict[str, set[str]] = {}
+    for v in canonical_videos:
+        try:
+            parts = v.resolve().relative_to(ARTIFACT_ROOT.resolve()).parts
+        except ValueError:
+            continue
+        if len(parts) < 2 or parts[0] not in ("Movies", "TV"):
+            continue
+        show = parts[1]
+        shows.add(show)
+        if parts[0] == "TV" and len(parts) >= 3:
+            seasons_by_show.setdefault(show, set()).add(parts[2])
+    if not shows:
+        return wrapper_name
+    if len(shows) > 1:
+        first = sorted(shows)[0]
+        return f"{first} +{len(shows) - 1} more"
+    show = next(iter(shows))
+    seasons = sorted(seasons_by_show.get(show, set()))
+    if not seasons:
+        return show                          # movie
+    def _short(s: str) -> str:
+        return s.replace("Season ", "S")
+    if len(seasons) == 1:
+        return f"{show} {_short(seasons[0])}"
+    return f"{show} {_short(seasons[0])}-{_short(seasons[-1])}"
 
 
 # ── wrapper lookup + state derivation ──────────────────────────────────
@@ -186,50 +237,49 @@ def _fmt_summary(wrapper_name: str, state: dict) -> str:
     ok = len(state["succeeded"])
     bad = len(state["failed"])
     total = state["total"]
+    title = _summarize_wrapper_title(wrapper_name)
+    ts = _now_stamp()
+    verb = "done" if bad == 0 else "partial"
+    line1 = f"Transcribe {verb} {ts} | {title} | {ok}/{total} ok"
+    if bad:
+        line1 += f" | {bad}/{total} failed"
     if bad == 0:
-        header = f"✅ <b>{_escape_html(wrapper_name)}</b>\n{ok}/{total} done"
-    else:
-        header = f"⚠️ <b>{_escape_html(wrapper_name)}</b>\n{ok} ✅ / {bad} ❌ (of {total})"
-    if bad == 0:
-        return header
-    lines = [header, "", "Failed:"]
-    for video, kind, reason in state["failed"][:10]:  # cap to avoid Telegram msg length
-        # Shorten reason for readability
-        short_reason = reason.replace("\n", " ")[:120]
-        lines.append(f"• {_escape_html(video.name)} — {_escape_html(kind)}: {_escape_html(short_reason)}")
+        return line1
+    failed_bits = []
+    for video, kind, reason in state["failed"][:10]:
+        failed_bits.append(f"{video.name} ({kind})")
+    tail = "Failed: " + ", ".join(failed_bits)
     if bad > 10:
-        lines.append(f"…and {bad - 10} more")
-    return "\n".join(lines)
+        tail += f", …+{bad - 10}"
+    return line1 + "\n" + tail
 
 
 def _fmt_summary_zh(wrapper_name: str, state: dict) -> str:
     ok = len(state["translated"])
     bad = len(state["failed"])
     total = state["total"]
+    title = _summarize_wrapper_title(wrapper_name)
+    ts = _now_stamp()
+    verb = "done" if bad == 0 else "partial"
+    line1 = f"Transcribe zh {verb} {ts} | {title} | {ok}/{total} ok"
+    if bad:
+        line1 += f" | {bad}/{total} failed"
     if bad == 0:
-        header = f"🈶 <b>{_escape_html(wrapper_name)}</b>\nzh: {ok}/{total} translated"
-    else:
-        header = f"⚠️ <b>{_escape_html(wrapper_name)}</b> (zh)\n{ok} ✅ / {bad} ❌ (of {total})"
-    if bad == 0:
-        return header
-    lines = [header, "", "Failed:"]
-    for video, reason in state["failed"][:10]:
-        short_reason = reason.replace("\n", " ")[:120]
-        lines.append(f"• {_escape_html(video.name)} — {_escape_html(short_reason)}")
+        return line1
+    failed_bits = [v.name for v, _ in state["failed"][:10]]
+    tail = "Failed: " + ", ".join(failed_bits)
     if bad > 10:
-        lines.append(f"…and {bad - 10} more")
-    return "\n".join(lines)
+        tail += f", …+{bad - 10}"
+    return line1 + "\n" + tail
 
 
 def _fmt_individual_success(video: Path, tier: str) -> str:
-    return f"✅ <b>{_escape_html(video.name)}</b>\ntier: {_escape_html(tier)}"
+    return f"Transcribe done {_now_stamp()} | {video.name} | tier={tier}"
 
 
 def _fmt_individual_failure(video: Path, kind: str, reason: str) -> str:
-    return (
-        f"❌ <b>{_escape_html(video.name)}</b>\n"
-        f"{_escape_html(kind)}: {_escape_html(reason)}"
-    )
+    short = reason.replace("\n", " ")[:120]
+    return f"Transcribe failed {_now_stamp()} | {video.name} | {kind}: {short}"
 
 
 # ── public API ─────────────────────────────────────────────────────────
@@ -285,7 +335,7 @@ def notify_zh_success(video: Path) -> None:
     if wrapper is None:
         # Non-wrapper canonical (YT probably, though YT typically
         # doesn't get translated). Individual notification.
-        _send(f"🈶 <b>{_escape_html(video.name)}</b>\nzh translated")
+        _send(f"Transcribe zh done {_now_stamp()} | {video.name}")
         return
     maybe_fire_wrapper_summary_zh(wrapper)
 
@@ -295,6 +345,7 @@ def notify_zh_failure(video: Path, reason: str) -> None:
     sidecar is stamped."""
     wrapper = _find_wrapper_for_video(video)
     if wrapper is None:
-        _send(f"❌ <b>{_escape_html(video.name)}</b>\nzh failed: {_escape_html(reason)}")
+        short = reason.replace("\n", " ")[:120]
+        _send(f"Transcribe zh failed {_now_stamp()} | {video.name} | {short}")
         return
     maybe_fire_wrapper_summary_zh(wrapper)
