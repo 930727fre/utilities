@@ -30,7 +30,7 @@ services:
       # rebuild, wasting quota and stamping .whisper-polluted on
       # episodes that would have salvaged with 3 tries. Fail loudly
       # at compose parse time instead.
-      - OS_MAX_TRIES=${OS_MAX_TRIES:?OS_MAX_TRIES must be exported before docker compose up (1 = free-tier single-shot, 3-5 = paid tier)}
+      - OS_MAX_TRIES=${OS_MAX_TRIES:?OS_MAX_TRIES must be exported before docker compose up (integer string; 1 = free-tier single-shot, 3-5 = paid tier; `export OS_MAX_TRIES=3` or `="3"` both work)}
       # BT_PIPELINE_ENABLED: default 1 = normal (bt_filter LLM + hardlink,
       # whisper, annotation, everything). Set to 0 to make the container
       # a pure aria2 downloader — auto-loops go idle, downloads and
