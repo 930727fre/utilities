@@ -44,10 +44,10 @@ DOWNLOAD_TIMEOUT = 60 * 60         # 1 hour
 RESYNC_TIMEOUT = 5 * 60            # alass on a long movie tops out well under this
 
 # If more than this fraction of whisper's cues fall inside hallucination
-# windows, single-side scrub leaves a shredded reference — WER against
-# any full-length candidate becomes noise-dominated. Bail straight to
-# the plot-check fallback loop (LLM decides content match directly);
-# if that fails too, stamp `.whisper-polluted` for user intervention.
+# windows, whisper is too degraded to serve as a WER reference — any
+# full-length candidate scores noise-dominated. Bail straight to the
+# plot-check fallback loop (LLM decides content match directly); if that
+# fails too, stamp `.whisper-polluted` for user intervention.
 #
 # Cue-based rather than time-based: a movie can have 20% of its runtime
 # eaten by "Hey." loops in silent scenes and still test "under
@@ -366,13 +366,9 @@ def _fetch_candidate(
     video: Path,
     dest: Path,
     whisper_src: Path,
-    windows: list[tuple[float, float]],
 ) -> Path | None:
     """Materialize a candidate SRT at `dest` if we don't already have it.
-    Returns `dest` on success, None on miss.
-
-    `windows` — pollution time ranges from whisper (empty list if clean).
-    Threaded into per-tier verify calls that need to scrub both sides."""
+    Returns `dest` on success, None on miss."""
     if dest.exists():
         return dest
 
@@ -406,13 +402,13 @@ def _fetch_candidate(
         # ordering pitfall where a wrong-episode srt in a season
         # pack lands just under threshold before the correct one
         # is tried.
-        return pick_bundled_min_wer(video, dest, whisper_src, windows)
+        return pick_bundled_min_wer(video, dest, whisper_src)
 
     if tag == "opensubtitles-hash":
-        return fetch_os_ktry(video, dest, whisper_src, windows, mode="hash")
+        return fetch_os_ktry(video, dest, whisper_src, mode="hash")
 
     if tag == "opensubtitles-text":
-        return fetch_os_ktry(video, dest, whisper_src, windows, mode="text")
+        return fetch_os_ktry(video, dest, whisper_src, mode="text")
 
     return None
 
@@ -432,9 +428,9 @@ def _try_whisper_independent_tiers(video: Path, verified_src: Path) -> str | Non
     Returns winning tag or None if all three miss."""
     for tag in _WHISPER_INDEPENDENT_TAGS:
         cand_dest = _sources_path(video, tag)
-        # whisper_src / windows are unused by these three fetch paths.
+        # whisper_src is unused by these fetch paths.
         cand_path = _fetch_candidate(tag, video, cand_dest,
-                                     whisper_src=Path("/dev/null"), windows=[])
+                                     whisper_src=Path("/dev/null"))
         if cand_path is None:
             continue
 
@@ -630,18 +626,14 @@ def process_bt_file(job_id: str):
         if _is_job_deleted(job_id):
             return
 
-        # Detect whisper hallucination loops upfront and return the time
-        # ranges the decoder was stuck in. WER scoring inside
-        # `bundled.pick_bundled_min_wer` and `os_tier.fetch_os_ktry`
-        # single-side-scrubs these ranges from WHISPER before computing
-        # WER, so a polluted stretch doesn't tank an otherwise-matching
-        # candidate. Empty list = clean whisper, WER behaves normally.
-        #
-        # If more than _POLLUTION_CUE_RATIO_BAIL of whisper's cues fall
-        # in hallucination windows, single-side scrub leaves too little
-        # reference for WER to discriminate. Fall back to the plot-check
-        # loop (bundled smart-pick + os plot-check); if that fails too,
-        # stamp `.whisper-polluted`.
+        # Detect whisper hallucination loops upfront. The windows are used
+        # as a ROUTING signal only: if pollution_cue_ratio exceeds
+        # _POLLUTION_CUE_RATIO_BAIL, whisper is too degraded to be a
+        # useful WER reference — fall back to the plot-check loop
+        # (bundled smart-pick + os plot-check); if that fails too, stamp
+        # `.whisper-polluted`. Below the threshold, WER is computed on
+        # raw whisper (no scrub — single-side scrub was empirically
+        # harmful; see commit removing it).
         windows = find_pollution_windows(whisper_src)
         if windows:
             cue_ratio = pollution_cue_ratio(whisper_src, windows)
@@ -674,7 +666,7 @@ def process_bt_file(job_id: str):
         if winner_tag is None:
             for tag in _WHISPER_DEPENDENT_TAGS:
                 cand_dest = _sources_path(video, tag)
-                cand_path = _fetch_candidate(tag, video, cand_dest, whisper_src, windows)
+                cand_path = _fetch_candidate(tag, video, cand_dest, whisper_src)
                 if cand_path is None:
                     continue
 

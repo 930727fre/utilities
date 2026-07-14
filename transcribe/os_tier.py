@@ -56,7 +56,6 @@ def fetch_os_ktry(
     video: Path,
     dest: Path,
     whisper_src: Path,
-    windows: list[tuple[float, float]],
     mode: str,
 ) -> Path | None:
     """K-try OpenSubtitles fetch — download raw results one at a time, run
@@ -81,7 +80,7 @@ def fetch_os_ktry(
     quota is exhausted (handled inside iter_candidates via its cache).
     """
     def _accept(cand: Path) -> bool:
-        ok, reason = verify_against_whisper(whisper_src, cand, windows)
+        ok, reason = verify_against_whisper(whisper_src, cand)
         print(f"[pipeline] {video.name!r}: {mode} k-try {cand.name} — "
               f"{'ACCEPT' if ok else 'REJECT'}: {reason}", flush=True)
         return ok

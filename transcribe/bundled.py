@@ -150,7 +150,6 @@ def pick_bundled_min_wer(
     video: Path,
     dest: Path,
     whisper_src: Path,
-    windows: list[tuple[float, float]],
 ) -> Path | None:
     """Normal mode: score every wrapper subtitle against whisper via
     `wer_score`, pick the lowest, gate at `WER_PASS_MAX`.
@@ -185,7 +184,7 @@ def pick_bundled_min_wer(
             staged = _materialize(sub, tmp / f"cand-{i}.srt", rel, video)
             if staged is None:
                 continue
-            score, reason = wer_score(whisper_src, staged, windows)
+            score, reason = wer_score(whisper_src, staged)
             if score is None:
                 print(f"[bundled] {video.name!r}: SKIP {rel} — {reason}", flush=True)
                 continue

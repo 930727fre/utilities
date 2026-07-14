@@ -1,25 +1,23 @@
 """Content-level subtitle verification against whisper (WER + LLM plot).
 
-`verify_against_whisper(whisper_srt, candidate_srt, windows=None)` — WER
-gate (default path). Whisper output is the ground-truth listening
-reference; the candidate is a "literary upgrade" we accept only if its
-full transcript text is close enough to whisper's that they're plausibly
-the same audio. Timing is intentionally ignored for scoring — alass
-handles alignment downstream once a candidate passes.
+`verify_against_whisper(whisper_srt, candidate_srt)` — WER gate (default
+path). Whisper output is the ground-truth listening reference; the
+candidate is a "literary upgrade" we accept only if its full transcript
+text is close enough to whisper's that they're plausibly the same
+audio. Timing is intentionally ignored for scoring — alass handles
+alignment downstream once a candidate passes.
 
-`find_pollution_windows(whisper_srt)` — detect whisper decoder
-hallucination loops (long runs of consecutive identical short phrases).
-Returns time ranges the caller passes back into `verify_against_whisper`
-as `windows`, which scrubs those ranges from WHISPER (only) before
-running WER — a polluted stretch doesn't tank an otherwise-matching
-candidate. Scrub is single-sided (whisper only, not candidate) because
-candidates from OS / bundled tiers haven't been alass-aligned yet at
-this point, so their timeline may drift from whisper's — dropping
-candidate cues by whisper's timeline would strip the wrong stretches.
-Whisper-only scrub inflates WER slightly (candidate has content whisper
-lost during pollution → those become "insertions"), but 5 min of
-pollution in a 50 min episode only pushes WER up by ~0.1, well inside
-the 0.5 pass margin.
+`find_pollution_windows(whisper_srt)` + `pollution_cue_ratio(...)` —
+detect whisper decoder hallucination loops (long runs of consecutive
+identical short phrases). Used as a ROUTING signal by the caller: if
+`pollution_cue_ratio` exceeds the polluted-fallback threshold the
+pipeline switches to `verify_by_plot`. WER itself never scrubs the
+polluted stretches from whisper; empirically single-side scrub either
+does nothing (pollution windows already overlap silence, candidate
+matches independently) or makes things worse (scrub removes real
+dialogue whisper mis-transcribed → those words become insertions
+against the candidate → WER inflates). See git log for the S2 GoT
+dataset that motivated the removal.
 
 `verify_by_plot(candidate_srt, show, season, episode)` — LLM fallback
 gate for the edge case where pollution covers > 50% of runtime and WER
@@ -200,13 +198,6 @@ def _cue_in_windows(cue: dict, windows: list[tuple[float, float]]) -> bool:
     return False
 
 
-def _filter_out_windows(
-    cues: list[dict],
-    windows: list[tuple[float, float]],
-) -> list[dict]:
-    if not windows:
-        return cues
-    return [c for c in cues if not _cue_in_windows(c, windows)]
 
 
 # ── Pollution detection ───────────────────────────────────────────────────
@@ -241,13 +232,11 @@ def find_pollution_windows(whisper_srt: Path) -> list[tuple[float, float]]:
       such cue is a single-cue window on its own, regardless of what
       neighbours look like.
 
-    Windows are used by `verify_against_whisper` to filter cues from
-    whisper (single-sided scrub) before scoring — a polluted stretch
-    would otherwise blow up WER against an honest candidate that has
-    the real dialogue for that time range. Caller should first check
-    that pollution is a small fraction of the transcript (see
-    `pollution_cue_ratio`); when it's not, no salvage is meaningful
-    and the pipeline should stamp `.whisper-polluted` directly.
+    Windows are consumed by `pollution_cue_ratio` for the routing
+    decision: high ratio → pipeline switches from WER to plot-check
+    fallback; low ratio → WER is trusted as-is (no scrub — see module
+    docstring). Windows also feed the whisper-polluted sidecar message
+    for user diagnostics.
 
     Runs that span an empty-body cue are broken (safer — don't merge two
     unrelated runs across an accidental gap)."""
@@ -330,7 +319,6 @@ def pollution_cue_ratio(
 def wer_score(
     whisper_srt: Path,
     candidate_srt: Path,
-    windows: Optional[list[tuple[float, float]]] = None,
 ) -> tuple[Optional[float], str]:
     """Compute WER between whisper (reference) and candidate (hypothesis).
     Returns (score, reason). Score is None when a computation isn't
@@ -342,19 +330,16 @@ def wer_score(
     punctuation, lowercase. Cue-count prefilter (`MIN_REAL_CUES`)
     rejects forced-subs / partial tracks before computation.
 
-    `windows` (optional) — time ranges to scrub from WHISPER (only)
-    before scoring. Used when whisper has hallucination loops; see
-    `find_pollution_windows`. Candidate is NOT scrubbed — its timeline
-    may drift from whisper's (alass hasn't run yet at this point) so
-    time-window scrub on candidate would strip the wrong stretches.
-    Caller is responsible for bailing before calling here if pollution
-    covers too much of the runtime (single-side scrub can't rescue a
-    mostly-hallucinated whisper).
-
     Timing is deliberately not considered — alass handles alignment
     downstream once a candidate is picked. This is a content-match
     scorer; the caller decides how to interpret the number (threshold
-    gate, min-of-N pick, etc.)."""
+    gate, min-of-N pick, etc.).
+
+    No pollution-window scrub: single-side scrub only inflates the
+    score when whisper's hallucination happened during real dialogue
+    (whisper lost the true words → candidate has them → +insertions).
+    Callers route to `verify_by_plot` via `pollution_cue_ratio` for
+    the high-pollution case instead."""
     w_cues = _real_cues(whisper_srt)
     c_cues = _real_cues(candidate_srt)
 
@@ -368,9 +353,6 @@ def wer_score(
             f"(likely forced-subs or partial)"
         )
 
-    if windows:
-        w_cues = _filter_out_windows(w_cues, windows)
-
     w_text = _normalized_full_text(w_cues)
     c_text = _normalized_full_text(c_cues)
     if not w_text or not c_text:
@@ -381,19 +363,16 @@ def wer_score(
     except ValueError as e:
         return None, f"WER computation failed: {e}"
 
-    scrub_note = f" (whisper scrubbed by {len(windows)} window(s))" if windows else ""
-    return wer, f"WER {wer:.2f}{scrub_note}"
+    return wer, f"WER {wer:.2f}"
 
 
 def verify_against_whisper(
     whisper_srt: Path,
     candidate_srt: Path,
-    windows: Optional[list[tuple[float, float]]] = None,
 ) -> tuple[bool, str]:
     """Threshold-gate wrapper around `wer_score`. Returns (pass, reason).
-    Passes if WER ≤ `WER_PASS_MAX` (0.5). See `wer_score` for the
-    scoring semantics and how `windows` is applied."""
-    score, reason = wer_score(whisper_srt, candidate_srt, windows)
+    Passes if WER ≤ `WER_PASS_MAX` (0.5)."""
+    score, reason = wer_score(whisper_srt, candidate_srt)
     if score is None:
         return False, reason
     if score <= WER_PASS_MAX:
