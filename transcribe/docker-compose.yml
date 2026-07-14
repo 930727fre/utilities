@@ -43,15 +43,18 @@ services:
       # differs.
       - ARIA2_URL=${ARIA2_URL:-http://aria2-gluetun:8080}
       # Telegram push notifications for pipeline lifecycle events.
-      # Both empty = notifier silently disabled (default; container runs
-      # without Telegram). Both set = push on success/failure.
+      # Required: forgetting to export = notifier silently no-ops, which
+      # is exactly the "silently breaks downstream" pattern the compose
+      # :?required syntax exists for. Fail loud at compose parse time
+      # so a stale shell without exports doesn't ship a container that
+      # you *think* is notifying you.
       # Setup: message @BotFather /newbot to get the token, then hit
       # https://api.telegram.org/bot<TOKEN>/getUpdates after messaging
       # the bot once to find your chat_id. Export in shell before
       # `docker compose up` — the coding agent must never see these,
       # so they stay out of files.
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be exported before docker compose up}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID must be exported before docker compose up}
     restart: unless-stopped
     networks:
       - default
