@@ -33,7 +33,6 @@ notifier NEVER raises — pipeline correctness takes priority over
 notification delivery.
 """
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -44,12 +43,6 @@ from srt_source import (
     whisper_failed_path,
     whisper_polluted_path,
 )
-
-try:
-    from zoneinfo import ZoneInfo
-    _TZ = ZoneInfo("Asia/Taipei")
-except Exception:
-    _TZ = timezone.utc
 
 _BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 _CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -85,12 +78,6 @@ def _send(text: str) -> None:
             print(f"[notifier] send returned {r.status_code}: {r.text[:200]}", flush=True)
     except httpx.HTTPError as exc:
         print(f"[notifier] send failed: {exc}", flush=True)
-
-
-def _now_stamp() -> str:
-    """Formatted timestamp aligned with utilities/backup — Asia/Taipei
-    timezone, `YYYY-MM-DD HH:MM:SS`."""
-    return datetime.now(_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ── group lookup + state derivation ────────────────────────────────────
@@ -222,9 +209,8 @@ def _fmt_summary(label: str, state: dict) -> str:
     ok = len(state["succeeded"])
     bad = len(state["failed"])
     total = state["total"]
-    ts = _now_stamp()
     verb = "done" if bad == 0 else "partial"
-    line1 = f"Transcribe {verb} {ts} | {label} | {ok}/{total} ok"
+    line1 = f"Transcribe {verb} | {label} | {ok}/{total} ok"
     if bad:
         line1 += f" | {bad}/{total} failed"
     if bad == 0:
@@ -240,9 +226,8 @@ def _fmt_summary_zh(label: str, state: dict) -> str:
     ok = len(state["translated"])
     bad = len(state["failed"])
     total = state["total"]
-    ts = _now_stamp()
     verb = "done" if bad == 0 else "partial"
-    line1 = f"Transcribe zh {verb} {ts} | {label} | {ok}/{total} ok"
+    line1 = f"Transcribe zh {verb} | {label} | {ok}/{total} ok"
     if bad:
         line1 += f" | {bad}/{total} failed"
     if bad == 0:
@@ -255,12 +240,12 @@ def _fmt_summary_zh(label: str, state: dict) -> str:
 
 
 def _fmt_individual_success(video: Path, tier: str) -> str:
-    return f"Transcribe done {_now_stamp()} | {video.name} | tier={tier}"
+    return f"Transcribe done | {video.name} | tier={tier}"
 
 
 def _fmt_individual_failure(video: Path, kind: str, reason: str) -> str:
     short = reason.replace("\n", " ")[:120]
-    return f"Transcribe failed {_now_stamp()} | {video.name} | {kind}: {short}"
+    return f"Transcribe failed | {video.name} | {kind}: {short}"
 
 
 # ── public API ─────────────────────────────────────────────────────────
@@ -305,11 +290,11 @@ def notify_failure(video: Path, kind: str, reason: str) -> None:
 def notify_zh_success(video: Path) -> None:
     """Called by the translator on successful zh-tw sibling write."""
     if not _maybe_fire_group(video, zh=True):
-        _send(f"Transcribe zh done {_now_stamp()} | {video.name}")
+        _send(f"Transcribe zh done | {video.name}")
 
 
 def notify_zh_failure(video: Path, reason: str) -> None:
     """Called by the translator when translation fails."""
     if not _maybe_fire_group(video, zh=True):
         short = reason.replace("\n", " ")[:120]
-        _send(f"Transcribe zh failed {_now_stamp()} | {video.name} | {short}")
+        _send(f"Transcribe zh failed | {video.name} | {short}")
