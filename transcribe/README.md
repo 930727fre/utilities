@@ -154,9 +154,9 @@ bt manual: PENDING → TRANSCRIBING → ANNOTATING → SUCCESS     (legacy /api/
                                    ↘ FAILED
 ```
 
-Magnet submissions don't enter `jobs.json` at all. The bt-tab UI shows two live views: the aria2c subprocess's torrent list (downloading + seeding state, from `/api/bt/torrents`) and the filesystem scan (annotation + Chinese-sub state, from `/api/bt`). Whisper + annotation per video are queued by the background `_bt_work_loop` once files land in `/bt`. Chinese translation is button-triggered, not scan-triggered — every click submits the wrapper's videos to the translator executor.
+Magnet submissions don't enter `jobs.json` at all. The bt-tab UI shows two live views: the aria2c subprocess's torrent list (downloading + seeding state, from `/api/bt/torrents`) and the filesystem scan (annotation + Chinese-sub state, from `/api/bt`). Whisper + annotation per video are dispatched by the background `_bt_reconcile_loop` once files land in `/bt` — a declarative reconciler that each tick compares actual filesystem state to desired state (every canonical video has an annotated SRT or an explicit failure sidecar) and enqueues work to close the gap. Chinese translation is button-triggered, not reconcile-triggered — every click submits the wrapper's videos to the translator executor.
 
-Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` / `ANNOTATING` jobs flip to `FAILED` on startup. For bt jobs the background scan tick re-queues the pipeline, which resumes from whichever stage's output is missing under `_sources/`.
+Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` / `ANNOTATING` jobs flip to `FAILED` on startup. For bt jobs the reconciler re-enqueues the pipeline on its next tick, which resumes from whichever stage's output is missing under `_sources/`.
 
 ## SRT pipeline (bt path)
 

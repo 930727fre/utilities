@@ -157,12 +157,12 @@ async def lifespan(app: FastAPI):
     # FastAPI lifespan handles resume_all() at startup and shutdown()
     # at teardown. Nothing for us to do here.
 
-    annotation_loop_task = asyncio.create_task(_bt_work_loop())
+    reconcile_task = asyncio.create_task(_bt_reconcile_loop())
 
     try:
         yield
     finally:
-        annotation_loop_task.cancel()
+        reconcile_task.cancel()
         executor.shutdown(wait=False, cancel_futures=True)
         translator_executor.shutdown(wait=False, cancel_futures=True)
         _aria2_client.close()
@@ -874,6 +874,13 @@ async def bt_translate_zh(req: BtTranslateZhRequest):
         # final step (annotation included), so existence here implies
         # the English transcript is finished and ready for translation.
         if not srt.exists():
+            # Files with a permanent pipeline failure will never get an
+            # SRT — skip them so bulk translate can still run over the
+            # rest of the season. Files still in-flight (no SRT, no
+            # failure sidecar) block the whole call, since translating
+            # a subset would silently omit episodes still processing.
+            if any_failure_reason(video):
+                continue
             raise HTTPException(status_code=409, detail=f"{video.name} has no SRT yet")
         videos.append(video)
     # rglob order is filesystem-dependent (inode order on ext4). Sort by
@@ -992,10 +999,13 @@ async def transcribe_bt_file(req: BtTranscribeRequest):
 
 # ── Background annotation loop ────────────────────────────────────────────
 
-def _run_pending_filter():
-    """For every aria2 wrapper under /bt that has finished downloading
-    (no `.aria2` control files) and hasn't been filtered into /artifact
-    yet, run the LLM cleanup + SRT-match + hardlink pass.
+def _reconcile_bt_filter():
+    """Reconcile filter state: every finished wrapper should have a
+    filter sentinel. Enqueue filter_wrapper for wrappers that don't.
+
+    Desired state per wrapper:
+      - no `.aria2` control files (aria2 finished)
+      - sentinel exists at /artifact/_processed/<wrapper>.filtered
 
     Sentinel lives at /artifact/_processed/<wrapper>.filtered (not in
     the bt-side wrapper, which is read-only to us, and not in the
@@ -1058,32 +1068,38 @@ def _run_pending_filter():
                 pass
 
 
-def _queue_pending_bt_work():
-    """Decide what each bt video needs and enqueue the right worker.
+def _reconcile_bt_state():
+    """Reconcile bt state — top-level of the reconciler loop. Runs
+    _reconcile_bt_filter first (so newly-filtered wrappers immediately
+    contribute canonical videos to the pipeline stage in the same tick),
+    then _reconcile_bt_pipeline for each canonical video.
 
-    Three states by file existence alone — no marker reads:
+    Desired state per canonical video (decided by file existence alone,
+    no marker reads):
 
-      - canonical SRT exists      → SKIP (pipeline finished; canonical is
-                                    only written atomically after annotation)
-      - whisper-failed sidecar    → SKIP (user must ↻ to retry)
-      - whisper-polluted sidecar  → SKIP (whisper hallucinated; user must
-                                    drop a candidate or refetch OS then ↻)
-      - annotate-failed sidecar   → SKIP (user must ↻ to retry)
-      - none of the above         → queue process_bt_file (which itself
-                                    resumes at whichever pipeline stage
-                                    is missing in `_sources/`)
+      - canonical SRT exists    → satisfied; SKIP
+      - `.pipeline-failed`      → explicit failure recorded; SKIP
+                                  (user must ↻ to clear sidecar and opt back in)
+      - in-flight job present   → worker running; SKIP
+      - none of the above       → enqueue process_bt_file (which itself
+                                  resumes at whichever pipeline stage is
+                                  missing in `_sources/` — brand-new video
+                                  starts from stage 0, crash-recovered
+                                  video skips already-cached stages)
 
     Manual SRT drops at the canonical path are accepted as final — pipeline
     won't touch them. Drop into `_sources/<stem>.bundled.srt` instead if
-    you want the content gate to evaluate your candidate before promotion.
+    you want the content gate to evaluate your candidate before promotion;
+    the next reconcile tick sees "no canonical, no sidecar" and enqueues
+    process_bt_file, which reads _sources/ during stage selection.
 
-    Global BT_PIPELINE_ENABLED gate: when set to 0, both this loop and
-    the filter loop short-circuit — the container becomes a pure aria2
-    downloader. See BT_PIPELINE_ENABLED docstring for the rationale.
+    Global BT_PIPELINE_ENABLED gate: when set to 0, both reconcile passes
+    short-circuit — the container becomes a pure aria2 downloader. See
+    BT_PIPELINE_ENABLED docstring for the rationale.
     """
     if not BT_PIPELINE_ENABLED:
         return
-    _run_pending_filter()
+    _reconcile_bt_filter()
     items = _scan_bt()
     jobs = read_jobs()
     in_flight_paths = set()
@@ -1104,14 +1120,41 @@ def _queue_pending_bt_work():
         executor.submit(process_bt_file, job_id)
 
 
-async def _bt_work_loop():
-    """Periodically scan /bt for files needing whisper or annotation, and queue them."""
+async def _bt_reconcile_loop():
+    """Reconciler loop for the bt pipeline. Runs every BT_SCAN_INTERVAL.
+
+    Model: this is a declarative reconciler, NOT a retry loop. Each tick
+    reads current filesystem state, compares against desired state, and
+    enqueues work to close the gap. Idempotent by construction — items
+    already at desired state (or with an explicit failure sidecar, or an
+    in-flight job) are skipped.
+
+    Desired state:
+      - Every finished bt wrapper (no `.aria2` files) has a filter sentinel
+        under /artifact/_processed/, meaning bt_filter has classified and
+        hardlinked its videos into /artifact/Movies|TV/.
+      - Every canonical video under /artifact/ has either an annotated
+        `.srt` sibling, OR a `.pipeline-failed` sidecar explaining why not.
+
+    Failure model — the tick does NOT retry failed work automatically:
+      - `.pipeline-failed` sidecar blocks re-dispatch; UI ↻ button clears
+        the sidecar to opt back in.
+      - Successful items (canonical `.srt` exists) are never re-dispatched.
+      - Only "no result, no explicit failure, not in flight" gets enqueued —
+        i.e. brand-new videos, or ones whose worker died before it could
+        stamp a sidecar (container OOM / restart). The latter resumes from
+        cached `_sources/` stage output rather than redoing everything.
+
+    So in steady state each tick is a no-op — the primary work is
+    dispatching brand-new aria2 downloads. Crash recovery is a free
+    side-effect of the same code path.
+    """
     if not BT_PIPELINE_ENABLED:
-        print("[bt-work-loop] BT_PIPELINE_ENABLED=0 — filter + pipeline halted; "
+        print("[bt-reconcile] BT_PIPELINE_ENABLED=0 — filter + pipeline halted; "
               "downloads still active. Set to 1 and restart to resume.", flush=True)
     while True:
         try:
-            await asyncio.to_thread(_queue_pending_bt_work)
+            await asyncio.to_thread(_reconcile_bt_state)
         except Exception:
             traceback.print_exc()
         await asyncio.sleep(BT_SCAN_INTERVAL)

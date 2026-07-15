@@ -245,13 +245,18 @@ export default function Bt() {
     if (myItems.some(it => it.zh_in_flight)) {
       return { ready: false, count: 0, reason: 'Translation in progress…' }
     }
-    const done = myItems.filter(it => it.has_srt).length
-    if (done < myItems.length) {
-      return { ready: false, count: 0, reason: `${done} of ${myItems.length} videos annotated — wait for the rest` }
+    // `settled` = has an English SRT OR has a permanent pipeline_error.
+    // Failed files can never be translated (no source SRT), but treating
+    // them as "still working" would block bulk translate forever — so
+    // count them as done for the gate.
+    const settled = myItems.filter(it => it.has_srt || it.pipeline_error).length
+    if (settled < myItems.length) {
+      const working = myItems.length - settled
+      return { ready: false, count: 0, reason: `${working} video${working === 1 ? '' : 's'} still processing — wait for the rest` }
     }
-    const untranslated = myItems.filter(it => !it.has_zh_srt).length
+    const untranslated = myItems.filter(it => it.has_srt && !it.has_zh_srt).length
     if (untranslated === 0) {
-      return { ready: false, count: 0, reason: 'All videos already have Chinese subs' }
+      return { ready: false, count: 0, reason: 'All translatable videos already have Chinese subs' }
     }
     return {
       ready: true,
