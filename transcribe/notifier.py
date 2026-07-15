@@ -253,6 +253,9 @@ def _maybe_fire_group(video: Path, zh: bool = False) -> bool:
         if state is None or not state["all_terminal"]:
             return True
         _send(_fmt_summary(label, state))
+    # New canonical / zh files landed → tell Jellyfin to re-index.
+    from jellyfin_client import rescan_library
+    rescan_library()
     return True
 
 
