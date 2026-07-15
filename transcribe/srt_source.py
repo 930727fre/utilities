@@ -1,36 +1,42 @@
-"""Sidecar files that record pipeline failure for a video.
+"""Sidecar file that records pipeline failure for a video.
 
-Four failure modes the background scan loop needs to remember:
+One canonical sidecar type:
 
-  <stem>.whisper-failed     — whisper run did not produce an SRT
-  <stem>.whisper-polluted   — whisper produced an SRT but it's a
-                              hallucination loop ("No. No. No." × 100s).
-                              Pipeline detected the pattern, no candidate
-                              was available to substitute, so it refused
-                              to promote the junk to canonical.
-  <stem>.annotate-failed    — annotation pass crashed (SRT still playable
-                              at <stem>.srt; only the ※ annotation work
-                              never landed)
-  <stem>.pipeline-crashed   — catch-all for unexpected exceptions inside
-                              process_bt_file / process_video that the
-                              stage-specific try/except blocks didn't
-                              catch. Without this sidecar the scan loop
-                              would re-enqueue the file every 30s in a
-                              retry-forever loop.
+  <stem>.pipeline-failed    — canonical was NOT written; the scan loop
+                              should stop re-enqueueing this file until
+                              the user retries. Body format:
+                                  <kind>: <reason>
+                              e.g.
+                                  whisper polluted: 8.7% cues affected...
+                                  annotate failed: sonnet timeout
+                                  pipeline crashed: TypeError('x')
 
-Body is the (short, single-line) error message so the user can see WHY
-without opening docker logs. Filename, not file extension, is the
-state signal — both sidecars are extension-less so Jellyfin / Infuse
-never try to load them as subtitles.
+`kind` is a short label chosen by the caller; it appears in the
+Telegram summary and the UI tooltip. It's purely informational —
+the scan loop treats all kinds identically.
 
-The UI ↻ button clears both the sidecar and (for whisper-failed) any
-matching SRT, so the next scan tick replays the pipeline fresh.
+Legacy sidecars still on disk from earlier releases:
+  .whisper-failed, .whisper-polluted, .annotate-failed, .pipeline-crashed
 
-`※ annotated` is the only marker still living inside SRT bodies — it's
-the natural in-place signal of "annotation has been applied to this
-SRT file" and lives in annotate.py.
+`any_failure_sidecar_with_kind` recognises both new and legacy formats
+so nothing gets stranded. Only the new `.pipeline-failed` is written
+going forward; legacy sidecars get cleaned by the user's next retry.
+
+Filename, not extension, is the state signal — sidecars are
+extension-less so Jellyfin / Infuse never try to load them as
+subtitles.
 """
 from pathlib import Path
+from typing import Optional
+
+_PIPELINE_FAILED_SUFFIX = ".pipeline-failed"
+
+_LEGACY_SUFFIXES: tuple[tuple[str, str], ...] = (
+    (".whisper-failed", "whisper failed"),
+    (".whisper-polluted", "whisper polluted"),
+    (".annotate-failed", "annotate failed"),
+    (".pipeline-crashed", "pipeline crashed"),
+)
 
 
 def _short(msg: str) -> str:
@@ -39,69 +45,66 @@ def _short(msg: str) -> str:
     return msg.replace("\n", " ").replace("\r", " ").strip()[:500]
 
 
-def whisper_failed_path(video: Path) -> Path:
-    """Path of the whisper-failed sidecar for a given video."""
-    return video.with_suffix(".whisper-failed")
+def pipeline_failed_path(video: Path) -> Path:
+    """Path of the pipeline-failed sidecar for a given video."""
+    return video.with_suffix(_PIPELINE_FAILED_SUFFIX)
 
 
-def whisper_polluted_path(video: Path) -> Path:
-    """Path of the whisper-polluted sidecar for a given video."""
-    return video.with_suffix(".whisper-polluted")
-
-
-def annotate_failed_path(video: Path) -> Path:
-    """Path of the annotate-failed sidecar for a given video."""
-    return video.with_suffix(".annotate-failed")
-
-
-def pipeline_crashed_path(video: Path) -> Path:
-    """Path of the pipeline-crashed sidecar for a given video (catch-all
-    for unexpected exceptions surfaced via `_catch_unhandled`)."""
-    return video.with_suffix(".pipeline-crashed")
-
-
-def stamp_whisper_failed(video: Path, error: str) -> None:
-    """Write a `<stem>.whisper-failed` sidecar so the scan loop stops
-    retrying. Body is the short error reason."""
-    p = whisper_failed_path(video)
+def stamp_pipeline_failed(video: Path, kind: str, reason: str) -> None:
+    """Write a `<stem>.pipeline-failed` sidecar so the scan loop stops
+    retrying. `kind` is a short label (`whisper polluted`, `annotate
+    failed`, `pipeline crashed`, etc.) prepended to `reason` in the body."""
+    p = pipeline_failed_path(video)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(_short(error) + "\n", encoding="utf-8")
+    p.write_text(f"{_short(kind)}: {_short(reason)}\n", encoding="utf-8")
 
 
-def stamp_whisper_polluted(video: Path, reason: str) -> None:
-    """Write a `<stem>.whisper-polluted` sidecar so the scan loop stops
-    retrying. Body is the detected loop signature (e.g. `437 consecutive
-    identical cues 'no.'`). User intervention is needed — dropping a
-    bundled SRT into `/bt`, refetching OS, or accepting the limitation
-    on this episode."""
-    p = whisper_polluted_path(video)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(_short(reason) + "\n", encoding="utf-8")
+def all_failure_sidecar_paths(video: Path) -> list[Path]:
+    """Every sidecar path (new + legacy) that could indicate this video
+    has failed. Used by retry / cleanup — delete everything that
+    matches so a fresh pipeline attempt is un-blocked."""
+    return [
+        pipeline_failed_path(video),
+        *(video.with_suffix(s) for s, _ in _LEGACY_SUFFIXES),
+    ]
 
 
-def stamp_annotate_failed(video: Path, error: str) -> None:
-    """Write a `<stem>.annotate-failed` sidecar. The SRT at <stem>.srt
-    is left untouched and remains usable for playback minus annotations."""
-    p = annotate_failed_path(video)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(_short(error) + "\n", encoding="utf-8")
+def any_failure_sidecar_with_kind(
+    video: Path,
+) -> Optional[tuple[str, str]]:
+    """Return `(kind, reason)` from any failure sidecar on this video,
+    or None if the video is not in a failed state.
+
+    New-format `.pipeline-failed`: body is `<kind>: <reason>` — parsed.
+    Legacy sidecars: kind derived from filename suffix, body is the
+    reason. Returns the first match (new format preferred)."""
+    p = pipeline_failed_path(video)
+    if p.is_file():
+        raw = _read_or_empty(p)
+        if ":" in raw:
+            kind, _, reason = raw.partition(":")
+            return kind.strip(), reason.strip()
+        return "failed", raw
+    for suffix, kind in _LEGACY_SUFFIXES:
+        legacy = video.with_suffix(suffix)
+        if legacy.is_file():
+            return kind, _read_or_empty(legacy)
+    return None
 
 
-def stamp_pipeline_crashed(video: Path, error: str) -> None:
-    """Write a `<stem>.pipeline-crashed` sidecar so the scan loop stops
-    re-enqueueing this file after an unhandled exception. Body is the
-    short exception summary."""
-    p = pipeline_crashed_path(video)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(_short(error) + "\n", encoding="utf-8")
-
-
-def read_failure_reason(sidecar: Path) -> str | None:
-    """Return the failure reason recorded in a sidecar file, or None
-    if it doesn't exist / can't be read."""
-    if not sidecar.is_file():
+def any_failure_reason(video: Path) -> Optional[str]:
+    """Convenience: just the reason string (without kind prefix), or
+    None if the video isn't in a failed state. Retains the kind by
+    joining as `<kind>: <reason>` for display."""
+    got = any_failure_sidecar_with_kind(video)
+    if got is None:
         return None
+    kind, reason = got
+    return f"{kind}: {reason}" if reason else kind
+
+
+def _read_or_empty(sidecar: Path) -> str:
     try:
         return sidecar.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
-        return None
+        return ""

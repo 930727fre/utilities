@@ -38,11 +38,7 @@ from typing import Optional
 
 import httpx
 
-from srt_source import (
-    annotate_failed_path,
-    whisper_failed_path,
-    whisper_polluted_path,
-)
+from srt_source import any_failure_sidecar_with_kind
 
 _BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 _CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -127,21 +123,10 @@ def _group_video_siblings(group_dir: Path) -> list[Path]:
 
 
 def _has_any_failure_sidecar(video: Path) -> Optional[tuple[str, str]]:
-    """If the video has any of the 3 failure sidecars, return
-    (kind, reason). Otherwise None."""
-    for kind, path_fn in (
-        ("whisper failed", whisper_failed_path),
-        ("whisper polluted", whisper_polluted_path),
-        ("annotate failed", annotate_failed_path),
-    ):
-        sidecar = path_fn(video)
-        if sidecar.exists():
-            try:
-                reason = sidecar.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                reason = "(sidecar unreadable)"
-            return kind, reason
-    return None
+    """If the video has a failure sidecar (new .pipeline-failed or any
+    legacy sidecar), return (kind, reason). Otherwise None. Delegates
+    to srt_source for the sidecar recognition + parsing."""
+    return any_failure_sidecar_with_kind(video)
 
 
 def _group_terminal_state(group_dir: Path) -> Optional[dict]:

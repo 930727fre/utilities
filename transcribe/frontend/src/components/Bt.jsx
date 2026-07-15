@@ -379,7 +379,7 @@ export default function Bt() {
 function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate }) {
   const engState = deriveEngState(item)
   const zhState = deriveZhState(item)
-  const engErrMsg = item.whisper_error || item.whisper_polluted_error || item.annotate_error || item.pipeline_crashed_error || ''
+  const engErrMsg = item.pipeline_error || ''
   return (
     <div className="fade-in" style={styles.row} onClick={onToggle}>
       <div style={styles.topRow}>
@@ -443,7 +443,7 @@ function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate }) {
 function deriveEngState(item) {
   if (item.in_flight_job_id) return 'working'
   if (item.has_srt) return 'done'
-  if (item.whisper_error || item.whisper_polluted_error || item.annotate_error || item.pipeline_crashed_error) return 'failed'
+  if (item.pipeline_error) return 'failed'
   return 'working'
 }
 

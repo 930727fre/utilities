@@ -25,11 +25,8 @@ from bt_filter import (
 )
 from gpu_lock import release_all_held
 from srt_source import (
-    annotate_failed_path,
-    pipeline_crashed_path,
-    read_failure_reason,
-    whisper_failed_path,
-    whisper_polluted_path,
+    all_failure_sidecar_paths,
+    any_failure_reason,
 )
 from storage import ensure_jobs_file, get_job, read_jobs, upsert_job, write_jobs
 from translator import translate_video_zh, translator_executor
@@ -415,10 +412,7 @@ def _scan_bt() -> list[dict]:
             # is the state — extension-less so Jellyfin / Infuse never
             # try to load them as subtitles. Canonical SRT existence
             # alone is the "fully done" signal — no marker reads.
-            whisper_error = read_failure_reason(whisper_failed_path(video))
-            whisper_polluted_error = read_failure_reason(whisper_polluted_path(video))
-            annotate_error = read_failure_reason(annotate_failed_path(video))
-            pipeline_crashed_error = read_failure_reason(pipeline_crashed_path(video))
+            pipeline_error = any_failure_reason(video)
             # Chinese sub state (user-triggered translate-zh button output).
             # `.zh-tw.srt` is the sidecar; `.zh-tw.srt.error` records a
             # failure reason from the Chinese translator when it surfaces one.
@@ -449,10 +443,7 @@ def _scan_bt() -> list[dict]:
                 "wrapper": wrapper_name,
                 "root": str(root),
                 "has_srt": has_srt,
-                "whisper_error": whisper_error,
-                "whisper_polluted_error": whisper_polluted_error,
-                "annotate_error": annotate_error,
-                "pipeline_crashed_error": pipeline_crashed_error,
+                "pipeline_error": pipeline_error,
                 "has_zh_srt": has_zh_srt,
                 "zh_in_flight": zh_in_flight,
                 "zh_error": zh_error,
@@ -960,22 +951,17 @@ class BtRetryRequest(BaseModel):
 async def bt_retry(req: BtRetryRequest):
     """Clear failure state for a video so the scan loop replays its pipeline.
 
-    Deletes: the canonical SRT + every failure sidecar
-    (`.whisper-failed`, `.whisper-polluted`, `.annotate-failed`,
-    `.pipeline-crashed`).
+    Deletes: the canonical SRT + every failure sidecar (new
+    `.pipeline-failed` plus legacy `.whisper-failed` /
+    `.whisper-polluted` / `.annotate-failed` / `.pipeline-crashed`
+    from earlier releases).
     Keeps the `_sources/` candidate cache — whisper output and OS hits
     stick around so the next pipeline run replays cheaply (no GPU re-pass,
     no OS quota re-burn). For a hard reset that wipes cached sources too,
     manual rm under /artifact/_sources/ is the right escape hatch.
     """
     path = _validate_bt_path(req.path)
-    for target in (
-        path.with_suffix(".srt"),
-        whisper_failed_path(path),
-        whisper_polluted_path(path),
-        annotate_failed_path(path),
-        pipeline_crashed_path(path),
-    ):
+    for target in (path.with_suffix(".srt"), *all_failure_sidecar_paths(path)):
         if target.exists():
             try:
                 target.unlink()
@@ -1103,9 +1089,7 @@ def _queue_pending_bt_work():
     for item in items:
         if item["path"] in in_flight_paths:
             continue
-        if (item["has_srt"] or item["whisper_error"]
-                or item["whisper_polluted_error"] or item["annotate_error"]
-                or item["pipeline_crashed_error"]):
+        if item["has_srt"] or item["pipeline_error"]:
             continue
         job_id = str(uuid.uuid4())
         job = _new_bt_job(job_id, item["path"])

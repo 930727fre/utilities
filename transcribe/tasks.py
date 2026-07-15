@@ -18,14 +18,8 @@ from container_subs import extract_embedded, extract_pgs_ocr, extract_vobsub_ocr
 from notifier import notify_failure, notify_success
 from os_tier import fetch_os_ktry, os_ktry
 from srt_source import (
-    annotate_failed_path,
-    pipeline_crashed_path,
-    stamp_annotate_failed,
-    stamp_pipeline_crashed,
-    stamp_whisper_failed,
-    stamp_whisper_polluted,
-    whisper_failed_path,
-    whisper_polluted_path,
+    all_failure_sidecar_paths,
+    stamp_pipeline_failed,
 )
 from subs_finder import _parse_filename
 from subs_verifier import (
@@ -106,7 +100,7 @@ def _catch_unhandled(fn):
             if source_path:
                 video = Path(source_path)
                 try:
-                    stamp_pipeline_crashed(video, f"pipeline crash: {exc}")
+                    stamp_pipeline_failed(video, "pipeline crashed", str(exc))
                 except OSError:
                     pass
                 notify_failure(video, "pipeline crashed", str(exc))
@@ -630,7 +624,7 @@ def process_bt_file(job_id: str):
                             lock_reason=f"whisper:{job_id}")
             except Exception as exc:
                 try:
-                    stamp_whisper_failed(video, str(exc))
+                    stamp_pipeline_failed(video, "whisper failed", str(exc))
                 except OSError:
                     pass
                 notify_failure(video, "whisper failed", str(exc))
@@ -669,7 +663,7 @@ def process_bt_file(job_id: str):
                         f"no candidate passed plot-check fallback"
                     )
                     try:
-                        stamp_whisper_polluted(video, polluted_reason)
+                        stamp_pipeline_failed(video, "whisper polluted", polluted_reason)
                     except OSError:
                         pass
                     notify_failure(video, "whisper polluted", polluted_reason)
@@ -718,7 +712,7 @@ def process_bt_file(job_id: str):
                         f"whisper cues affected, no candidate salvaged"
                     )
                     try:
-                        stamp_whisper_polluted(video, polluted_reason)
+                        stamp_pipeline_failed(video, "whisper polluted", polluted_reason)
                     except OSError:
                         pass
                     notify_failure(video, "whisper polluted", polluted_reason)
@@ -766,7 +760,7 @@ def process_bt_file(job_id: str):
     except Exception as exc:
         traceback.print_exc()
         try:
-            stamp_annotate_failed(video, str(exc))
+            stamp_pipeline_failed(video, "annotate failed", str(exc))
         except OSError:
             pass
         notify_failure(video, "annotate failed", str(exc))
@@ -791,13 +785,9 @@ def process_bt_file(job_id: str):
     mirror_to_archive(canonical)
 
     # Successfully produced the canonical SRT — clear any stale failure
-    # sidecars from a prior run so the file isn't accidentally skipped.
-    for sidecar in (
-        whisper_failed_path(video),
-        whisper_polluted_path(video),
-        annotate_failed_path(video),
-        pipeline_crashed_path(video),
-    ):
+    # sidecars (new + legacy) from a prior run so the file isn't
+    # accidentally skipped.
+    for sidecar in all_failure_sidecar_paths(video):
         try:
             sidecar.unlink(missing_ok=True)
         except OSError:
