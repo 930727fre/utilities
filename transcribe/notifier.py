@@ -298,3 +298,13 @@ def notify_zh_failure(video: Path, reason: str) -> None:
     if not _maybe_fire_group(video, zh=True):
         short = reason.replace("\n", " ")[:120]
         _send(f"Transcribe zh failed | {video.name} | {short}")
+
+
+def notify_filter_failure(wrapper_name: str, reason: str) -> None:
+    """Called by bt_filter.filter_wrapper when the wrapper's LLM analysis
+    fails or produces something unusable (empty tree, missing regex,
+    malformed schema, etc.) — cases where the wrapper never reaches
+    per-video pipeline. Individual notification (no aggregation domain
+    exists yet at filter time)."""
+    short = reason.replace("\n", " ")[:150]
+    _send(f"Transcribe filter failed | {wrapper_name} | {short}")

@@ -667,9 +667,12 @@ def filter_wrapper(wrapper: Path) -> None:
 
     short = wrapper.name[:40]
     tree_text = _smart_tree_summary(wrapper)
+    from notifier import notify_filter_failure
+
     if not _collect_videos(wrapper):
         # No videos at all — write empty sentinel, nothing to do.
         _write_sentinel(wrapper.name, [])
+        notify_filter_failure(wrapper.name, "no videos in wrapper")
         return
 
     # ── 1. LLM: mode dispatch + canonical naming ─────────────────────
@@ -685,6 +688,7 @@ def filter_wrapper(wrapper: Path) -> None:
     except Exception as e:
         print(f"[filter {short}] LLM call failed ({e}); writing empty sentinel", flush=True)
         _write_sentinel(wrapper.name, [])
+        notify_filter_failure(wrapper.name, f"LLM call failed: {e}")
         return
 
     mode = result.get("mode")
@@ -709,6 +713,10 @@ def filter_wrapper(wrapper: Path) -> None:
         if not title or year <= 0 or not pattern:
             print(f"[filter {short}] tv_regex mode missing series_title / year / regex; empty sentinel", flush=True)
             _write_sentinel(wrapper.name, [])
+            notify_filter_failure(
+                wrapper.name,
+                "tv_regex mode missing series_title / year / regex",
+            )
             return
         # Validate regex against actual filenames — bail if it doesn't
         # match at least one real (non-bonus) episode. See
@@ -718,6 +726,10 @@ def filter_wrapper(wrapper: Path) -> None:
         if regex is None:
             print(f"[filter {short}] tv_regex validation failed for pattern {pattern!r}; empty sentinel", flush=True)
             _write_sentinel(wrapper.name, [])
+            notify_filter_failure(
+                wrapper.name,
+                f"tv_regex validation failed for pattern {pattern!r}",
+            )
             return
         print(f"[filter {short}] tv_regex mode: {title} ({year}) pattern={pattern!r}", flush=True)
         canonical_videos = _hardlink_tv_by_regex(wrapper, regex, title, year, bonus_rels, short)
@@ -730,6 +742,7 @@ def filter_wrapper(wrapper: Path) -> None:
     else:
         print(f"[filter {short}] unknown mode {mode!r}; empty sentinel", flush=True)
         _write_sentinel(wrapper.name, [])
+        notify_filter_failure(wrapper.name, f"unknown mode {mode!r}")
         return
 
     # ── 3. Sentinel + manifest ────────────────────────────────────────
