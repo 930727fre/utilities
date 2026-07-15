@@ -15,28 +15,14 @@ One canonical sidecar type:
 Telegram summary and the UI tooltip. It's purely informational —
 the scan loop treats all kinds identically.
 
-Legacy sidecars still on disk from earlier releases:
-  .whisper-failed, .whisper-polluted, .annotate-failed, .pipeline-crashed
-
-`any_failure_sidecar_with_kind` recognises both new and legacy formats
-so nothing gets stranded. Only the new `.pipeline-failed` is written
-going forward; legacy sidecars get cleaned by the user's next retry.
-
-Filename, not extension, is the state signal — sidecars are
-extension-less so Jellyfin / Infuse never try to load them as
-subtitles.
+Filename, not extension, is the state signal — sidecar is
+extension-less so Jellyfin / Infuse never try to load it as a
+subtitle.
 """
 from pathlib import Path
 from typing import Optional
 
 _PIPELINE_FAILED_SUFFIX = ".pipeline-failed"
-
-_LEGACY_SUFFIXES: tuple[tuple[str, str], ...] = (
-    (".whisper-failed", "whisper failed"),
-    (".whisper-polluted", "whisper polluted"),
-    (".annotate-failed", "annotate failed"),
-    (".pipeline-crashed", "pipeline crashed"),
-)
 
 
 def _short(msg: str) -> str:
@@ -60,51 +46,37 @@ def stamp_pipeline_failed(video: Path, kind: str, reason: str) -> None:
 
 
 def all_failure_sidecar_paths(video: Path) -> list[Path]:
-    """Every sidecar path (new + legacy) that could indicate this video
-    has failed. Used by retry / cleanup — delete everything that
-    matches so a fresh pipeline attempt is un-blocked."""
-    return [
-        pipeline_failed_path(video),
-        *(video.with_suffix(s) for s, _ in _LEGACY_SUFFIXES),
-    ]
+    """Every sidecar path that could indicate this video has failed.
+    Currently just one; kept as a helper so callers don't need to know
+    the single-sidecar invariant."""
+    return [pipeline_failed_path(video)]
 
 
 def any_failure_sidecar_with_kind(
     video: Path,
 ) -> Optional[tuple[str, str]]:
-    """Return `(kind, reason)` from any failure sidecar on this video,
-    or None if the video is not in a failed state.
-
-    New-format `.pipeline-failed`: body is `<kind>: <reason>` — parsed.
-    Legacy sidecars: kind derived from filename suffix, body is the
-    reason. Returns the first match (new format preferred)."""
+    """Return `(kind, reason)` from the pipeline-failed sidecar, or
+    None if the video is not in a failed state. Body format is
+    `<kind>: <reason>`; body missing the colon (should not happen with
+    stamp_pipeline_failed but defensive) falls back to `("failed", body)`."""
     p = pipeline_failed_path(video)
-    if p.is_file():
-        raw = _read_or_empty(p)
-        if ":" in raw:
-            kind, _, reason = raw.partition(":")
-            return kind.strip(), reason.strip()
-        return "failed", raw
-    for suffix, kind in _LEGACY_SUFFIXES:
-        legacy = video.with_suffix(suffix)
-        if legacy.is_file():
-            return kind, _read_or_empty(legacy)
-    return None
+    if not p.is_file():
+        return None
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if ":" in raw:
+        kind, _, reason = raw.partition(":")
+        return kind.strip(), reason.strip()
+    return "failed", raw
 
 
 def any_failure_reason(video: Path) -> Optional[str]:
-    """Convenience: just the reason string (without kind prefix), or
-    None if the video isn't in a failed state. Retains the kind by
-    joining as `<kind>: <reason>` for display."""
+    """Convenience: `<kind>: <reason>` string for display, or None if
+    the video isn't in a failed state."""
     got = any_failure_sidecar_with_kind(video)
     if got is None:
         return None
     kind, reason = got
     return f"{kind}: {reason}" if reason else kind
-
-
-def _read_or_empty(sidecar: Path) -> str:
-    try:
-        return sidecar.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return ""
