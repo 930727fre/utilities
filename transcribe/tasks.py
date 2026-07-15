@@ -19,7 +19,9 @@ from notifier import notify_failure, notify_success
 from os_tier import fetch_os_ktry, os_ktry
 from srt_source import (
     annotate_failed_path,
+    pipeline_crashed_path,
     stamp_annotate_failed,
+    stamp_pipeline_crashed,
     stamp_whisper_failed,
     stamp_whisper_polluted,
     whisper_failed_path,
@@ -96,6 +98,18 @@ def _catch_unhandled(fn):
         except Exception as exc:
             traceback.print_exc()
             _fail(job_id, f"Unhandled error: {exc}")
+            # Stamp .pipeline-crashed sidecar so the scan loop stops
+            # re-enqueueing this file — otherwise the same exception
+            # would repeat every 30 s, burning GPU / LLM cost.
+            job = get_job(job_id)
+            source_path = (job or {}).get("source_path")
+            if source_path:
+                video = Path(source_path)
+                try:
+                    stamp_pipeline_crashed(video, f"pipeline crash: {exc}")
+                except OSError:
+                    pass
+                notify_failure(video, "pipeline crashed", str(exc))
     return wrapped
 
 
@@ -782,6 +796,7 @@ def process_bt_file(job_id: str):
         whisper_failed_path(video),
         whisper_polluted_path(video),
         annotate_failed_path(video),
+        pipeline_crashed_path(video),
     ):
         try:
             sidecar.unlink(missing_ok=True)
