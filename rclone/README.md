@@ -26,47 +26,32 @@ want to rewatch   →  ./restore.sh "<wrapper name>"   (downloads back into /bt/
 
 You need an `rclone.conf` with two remotes:
 
-- **`gdrive`** — Google Drive remote (OAuth-authorized to your account)
+- **`gdrive`** — Google Drive remote (OAuth-authorized to your account,
+  with your own OAuth Client ID from Google Cloud Console)
 - **`gdrive-crypt`** — crypt remote wrapping `gdrive:transcribe-backup/`
-  with your chosen encryption password
+  with your chosen encryption password + salt
 
 Because OAuth needs a browser, `rclone config` is easiest run on any
 machine with `rclone` installed + a browser (your laptop). Then copy
 the resulting `rclone.conf` to `config/rclone.conf` in this directory.
 
-### On your laptop (once)
+See the OAuth Client ID walkthrough in `rclone.org/drive/#making-your-own-client-id`
+— the built-in shared key is heavily rate-limited and unusable for
+large backups. Publish the OAuth app to production (in Google Cloud
+Console → OAuth consent screen) so the token doesn't expire every 7
+days.
+
+After `rclone config` completes on the laptop:
 
 ```bash
-rclone config
+rclone config file                                             # print path
+scp ~/.config/rclone/rclone.conf server:/…/utilities/rclone/config/rclone.conf
 ```
 
-Interactive flow:
-
-1. `n` → new remote → name `gdrive` → type `drive` → follow OAuth
-   prompts, log in as your 5 TB Google account.
-2. `n` → new remote → name `gdrive-crypt` → type `crypt`
-   - `remote` = `gdrive:transcribe-backup/`   (the folder inside Drive
-     where encrypted blobs live; will auto-create on first upload)
-   - `filename_encryption` = `standard`       (filenames also encrypted;
-     use `off` if you want to see wrapper names in the Drive UI)
-   - `directory_name_encryption` = `true`
-   - `password` = **choose a strong one, save it in Bitwarden**
-   - `password2` (salt) = **generate one, save it too**
-3. `q` to quit.
-
-`rclone config file` prints the path (usually `~/.config/rclone/rclone.conf`).
-Copy that file to this project:
+Server side:
 
 ```bash
-scp ~/.config/rclone/rclone.conf your-server:/path/to/utilities/rclone/config/rclone.conf
-```
-
-### On the server (once)
-
-```bash
-cd utilities/rclone
-chmod 600 config/rclone.conf   # secret file, restrict perms
-./backup.sh "test-wrapper-name"   # trial run to confirm it works
+chmod 600 config/rclone.conf
 ```
 
 ## ⚠️ Losing the password = losing the data
@@ -75,18 +60,102 @@ chmod 600 config/rclone.conf   # secret file, restrict perms
 recovery mechanism**. Store the password + salt in a password manager
 (Bitwarden, 1Password, whatever) the moment you set them.
 
-## Files here
+## Everyday commands
 
-- `docker-compose.yml` — service definition using `rclone/rclone:latest`
-- `backup.sh` — `./backup.sh <wrapper>` → sync `/bt/<wrapper>/` → gdrive
-- `restore.sh` — `./restore.sh <wrapper>` → sync gdrive → `/bt/<wrapper>/`
-- `config/rclone.conf` — **your** rclone credentials, gitignored
+All commands run through the rclone container (no rclone install needed
+on the host). Assumes you're in `utilities/rclone/`.
 
-## What if I want to see what's in the backup
+### Backup a wrapper
+
+```bash
+./backup.sh "<wrapper name>"
+```
+
+or equivalent explicit form:
+
+```bash
+docker compose run --rm rclone sync \
+    "/bt/<wrapper name>" \
+    "gdrive-crypt:transcribe/<wrapper name>" \
+    --progress --stats-one-line --checksum
+```
+
+### Restore a wrapper
+
+```bash
+./restore.sh "<wrapper name>"
+```
+
+or:
+
+```bash
+docker compose run --rm rclone sync \
+    "gdrive-crypt:transcribe/<wrapper name>" \
+    "/bt/<wrapper name>" \
+    --progress --stats-one-line --checksum
+```
+
+### List what's backed up
 
 ```bash
 docker compose run --rm rclone lsd gdrive-crypt:transcribe/
-docker compose run --rm rclone tree gdrive-crypt:transcribe/<wrapper>/
 ```
 
-Filenames are decrypted on-the-fly for these read commands.
+Prints each wrapper as a directory line with mtime and size. Filenames
+are decrypted on the fly — from your side these look like the original
+wrapper names.
+
+### Check size of one backed-up wrapper
+
+```bash
+docker compose run --rm rclone size gdrive-crypt:transcribe/"<wrapper name>"
+```
+
+### List files inside one wrapper on remote
+
+```bash
+docker compose run --rm rclone lsf gdrive-crypt:transcribe/"<wrapper name>"
+```
+
+### Delete a wrapper from remote
+
+```bash
+docker compose run --rm rclone purge gdrive-crypt:transcribe/"<wrapper name>"
+```
+
+### Total remote size / free space check
+
+```bash
+docker compose run --rm rclone about gdrive:
+```
+
+Prints your Google Drive total / used / free (crypt overhead is
+negligible — a few bytes per file for the encryption header).
+
+### Verify one backup matches local
+
+```bash
+docker compose run --rm rclone check \
+    "/bt/<wrapper name>" \
+    "gdrive-crypt:transcribe/<wrapper name>"
+```
+
+Reports any files that differ. Uses checksums, not just mtime — slower
+but authoritative.
+
+### Dry-run a backup (see what would upload without actually doing it)
+
+```bash
+docker compose run --rm rclone sync --dry-run \
+    "/bt/<wrapper name>" \
+    "gdrive-crypt:transcribe/<wrapper name>" \
+    --progress
+```
+
+## Files here
+
+- `docker-compose.yml` — service definition using `rclone/rclone:latest`
+- `backup.sh` — thin wrapper around `docker compose run … sync /bt/ gdrive-crypt:`
+- `restore.sh` — same, reversed direction
+- `config/rclone.conf` — **your** rclone credentials, gitignored
+- `.gitignore` — keeps rclone.conf out of the repo
