@@ -1,0 +1,17 @@
+services:
+  rclone:
+    image: rclone/rclone:latest
+    # rclone.conf is bind-mounted read-only. It contains the Google
+    # OAuth token + the crypt password — treated as secret, kept out
+    # of the repo (see .gitignore). Regenerate on any host by running
+    # `rclone config` interactively (see README).
+    environment:
+      - RCLONE_CONFIG=/config/rclone.conf
+    volumes:
+      - ./config/rclone.conf:/config/rclone.conf:ro
+      # /bt/ mount from transcribe — read/write so restore can put
+      # a wrapper back. Path is relative to this file's directory.
+      - ../transcribe/data/bt:/bt
+    # No `command:` — the entrypoint is `rclone`. Invoke ad-hoc via
+    # `docker compose run --rm rclone <rclone-subcommand> …`. See
+    # backup.sh / restore.sh for the two common workflows.
