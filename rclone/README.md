@@ -12,15 +12,23 @@ to re-watch later without re-downloading the torrent.
 ## Workflow
 
 ```
-disk full         →  ./backup.sh "<wrapper name>"     (uploads to gdrive-crypt)
+routine backup    →  ./backup.sh                       (bulk: all /bt/* to gdrive-crypt)
+                  →  idempotent, safe to re-run any time — already-uploaded
+                    wrappers skipped by size + mtime match, nothing deleted
+
+disk full         →  ./backup.sh                       (make sure everything's up)
                   →  UI ✕ delete torrent               (cascade removes /bt/, /artifact/…, sentinel)
-                  →  wrapper gone locally, srts in /archive/ preserved
+                  →  wrapper gone locally, srts in /archive/ preserved,
+                    backup on Drive UNTOUCHED (copy semantics, not sync)
 
 want to rewatch   →  ./restore.sh "<wrapper name>"   (downloads back into /bt/)
                   →  transcribe scan tick picks it up in ~30 s
                   →  filter_wrapper Opus runs (~$0.10) → archive tier catches → canonical srts land instantly
                   →  Jellyfin sees the show again
 ```
+
+`backup.sh` accepts an optional single-wrapper arg if you want to target
+just one: `./backup.sh "<wrapper name>"`. Restore is always per-wrapper.
 
 ## One-time setup
 
@@ -65,19 +73,28 @@ recovery mechanism**. Store the password + salt in a password manager
 All commands run through the rclone container (no rclone install needed
 on the host). Assumes you're in `utilities/rclone/`.
 
-### Backup a wrapper
+### Backup everything under /bt/
+
+```bash
+./backup.sh
+```
+
+or explicit form:
+
+```bash
+docker compose run --rm rclone copy \
+    /bt \
+    gdrive-crypt:transcribe \
+    --progress --stats-one-line
+```
+
+Uses `rclone copy`, NOT `sync` — skips already-uploaded content (size +
+mtime match) and never deletes remote-only content. Safe to re-run.
+
+### Backup a single wrapper
 
 ```bash
 ./backup.sh "<wrapper name>"
-```
-
-or equivalent explicit form:
-
-```bash
-docker compose run --rm rclone sync \
-    "/bt/<wrapper name>" \
-    "gdrive-crypt:transcribe/<wrapper name>" \
-    --progress --stats-one-line --checksum
 ```
 
 ### Restore a wrapper
@@ -89,10 +106,10 @@ docker compose run --rm rclone sync \
 or:
 
 ```bash
-docker compose run --rm rclone sync \
+docker compose run --rm rclone copy \
     "gdrive-crypt:transcribe/<wrapper name>" \
     "/bt/<wrapper name>" \
-    --progress --stats-one-line --checksum
+    --progress --stats-one-line
 ```
 
 ### List what's backed up

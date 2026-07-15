@@ -3,24 +3,25 @@
 #
 # Usage: ./restore.sh "<wrapper_name>"
 #
-# Target is utilities/transcribe/data/bt/<wrapper>/. After the sync
-# finishes, transcribe's scan tick will pick up the wrapper within
-# ~30 s: no `.aria2` control file → sentinel absent → mtime settled
-# → filter_wrapper runs → archive tier attaches the annotated SRTs
-# from /archive/ (assuming you had them from a prior processing pass).
+# Restore is per-wrapper by design — you rarely want to restore
+# everything at once (defeats the "offload for disk space" purpose).
+#
+# Uses `rclone copy` (matches backup.sh) — skips any files already
+# present locally with matching size + mtime, so an interrupted restore
+# can be resumed by re-running.
 set -eu
 
 if [ $# -ne 1 ]; then
     echo "usage: $0 <wrapper_name>" >&2
+    echo "       (see wrapper list with: docker compose run --rm rclone lsd gdrive-crypt:transcribe/)" >&2
     exit 1
 fi
 WRAPPER="$1"
 
 cd "$(dirname "$0")"
 
-docker compose run --rm rclone sync \
+docker compose run --rm rclone copy \
     "gdrive-crypt:transcribe/${WRAPPER}" \
     "/bt/${WRAPPER}" \
     --progress \
-    --stats-one-line \
-    --checksum
+    --stats-one-line
