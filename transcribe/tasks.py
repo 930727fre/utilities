@@ -22,6 +22,7 @@ from srt_source import (
     stamp_pipeline_failed,
 )
 from subs_finder import _parse_filename
+from translator import translate_video_zh
 from subs_verifier import (
     cue_count_ok,
     find_pollution_windows,
@@ -564,22 +565,24 @@ def process_bt_file(job_id: str):
                  All miss + clean whisper → whisper itself promoted to
                  verified.srt. All miss + polluted → `.whisper-polluted`
                  sidecar, halt.
-      Final.  annotate → /artifact/.../<stem>.srt (atomic mv tmp → canonical)
+      Stage 4. annotate → /artifact/.../<stem>.srt (atomic mv tmp → canonical)
                Skipped for archive wins — the archive.srt is already an
                annotated canonical from a prior run.
+      Stage 5. translate → /artifact/.../<stem>.zh-tw.srt (Gemini Flash Lite)
+               User can't consume English SRT directly, so a video isn't
+               "done" until Chinese exists too. Idempotent skip if
+               .zh-tw.srt already present (crash recovery).
 
     State recovery on restart: a pipeline that died mid-run leaves
-    whatever it managed to write under `_sources/` intact. The next
-    scan tick re-queues `process_bt_file`, which picks up at the first
-    stage whose output is missing — no manual intervention, no marker
-    reads, no jobs.json overlay.
+    whatever it managed to write under `_sources/` (and canonical /
+    zh-tw at the artifact level) intact. The next reconcile tick
+    re-enqueues `process_bt_file`, which picks up at the first stage
+    whose output is missing — no manual intervention, no marker reads,
+    no jobs.json overlay.
 
-    Whisper failure → `<stem>.whisper-failed` sidecar, halt; canonical
-    never written, _sources/ left as-is (might be empty).
-
-    Annotation failure → `<stem>.annotate-failed` sidecar, halt;
-    canonical never written, `_sources/<stem>.verified.srt` retained so
-    ↻ replay only re-runs annotation.
+    Any stage failure → `<stem>.pipeline-failed` sidecar with
+    "<kind>: <reason>" body, halt; whatever's already in `_sources/` /
+    canonical is retained so ↻ replay resumes at the failing stage.
     """
     job = get_job(job_id)
     if not job or job["status"] in ("DELETED", "SUCCESS"):
@@ -744,49 +747,74 @@ def process_bt_file(job_id: str):
 
     # ── 4. Annotation → canonical (atomic) ────────────────────────────
     #
-    # (Archive-attached videos never reach this function — bt_filter
-    # copies archive SRT to canonical at wrapper-arrival time, and
-    # `_scan_bt` filters them out via `has_srt=True`. So process_bt_file
-    # always annotates + writes canonical + mirrors to archive.)
-    job["status"] = "ANNOTATING"
-    job["updated_at"] = _now()
-    upsert_job(job)
+    # Skip when canonical already exists — crash recovery between
+    # annotate and translate, or a translate-stage retry after ↻
+    # cleared only the .pipeline-failed sidecar. Reconciler dispatches
+    # us when has_zh_srt is False, so if has_srt is True we're here
+    # solely to finish stage 5.
+    if not canonical.exists():
+        job["status"] = "ANNOTATING"
+        job["updated_at"] = _now()
+        upsert_job(job)
 
+        try:
+            annotated = annotate_srt(
+                verified_src,
+                is_cancelled=lambda: _is_job_deleted(job_id),
+            )
+        except Exception as exc:
+            traceback.print_exc()
+            try:
+                stamp_pipeline_failed(video, "annotate failed", str(exc))
+            except OSError:
+                pass
+            notify_failure(video, "annotate failed", str(exc))
+            _fail(job_id, f"Annotation failed: {exc}")
+            return
+
+        if annotated is None:
+            # Cancelled (job DELETED). Nothing written to canonical; the
+            # next-time replay re-runs only the annotation step thanks to
+            # the cached verified.srt.
+            return
+
+        try:
+            _atomic_write_text(canonical, annotated)
+        except OSError as exc:
+            _fail(job_id, f"write canonical failed: {exc}")
+            return
+
+        # Mirror to data/archive/ so a future delete_torrent + re-download
+        # cycle can reuse this SRT (bt_filter's archive-attach on next
+        # wrapper arrival picks it up via direct string match).
+        mirror_to_archive(canonical)
+    else:
+        print(f"[pipeline] reusing cached canonical SRT for {video.name!r}", flush=True)
+
+    if _is_job_deleted(job_id):
+        return
+
+    # ── 5. Chinese translation → <stem>.zh-tw.srt ────────────────────
+    # User can't consume English SRT directly, so the pipeline isn't
+    # "done" until zh-tw is written. Failure stamps the same
+    # .pipeline-failed sidecar as any other stage failure — reconciler
+    # skips until user clears via UI ↻, then process_bt_file resumes
+    # here (canonical .srt cached, translate re-runs only).
     try:
-        annotated = annotate_srt(
-            verified_src,
-            is_cancelled=lambda: _is_job_deleted(job_id),
-        )
+        translate_video_zh(video)
     except Exception as exc:
         traceback.print_exc()
         try:
-            stamp_pipeline_failed(video, "annotate failed", str(exc))
+            stamp_pipeline_failed(video, "translate failed", str(exc))
         except OSError:
             pass
-        notify_failure(video, "annotate failed", str(exc))
-        _fail(job_id, f"Annotation failed: {exc}")
+        notify_failure(video, "translate failed", str(exc))
+        _fail(job_id, f"Translate failed: {exc}")
         return
 
-    if annotated is None:
-        # Cancelled (job DELETED). Nothing written to canonical; the
-        # next-time replay re-runs only the annotation step thanks to
-        # the cached verified.srt.
-        return
-
-    try:
-        _atomic_write_text(canonical, annotated)
-    except OSError as exc:
-        _fail(job_id, f"write canonical failed: {exc}")
-        return
-
-    # Mirror to data/archive/ so a future delete_torrent + re-download
-    # cycle can reuse this SRT (bt_filter's archive-attach on next
-    # wrapper arrival picks it up via direct string match).
-    mirror_to_archive(canonical)
-
-    # Successfully produced the canonical SRT — clear any stale failure
-    # sidecars (new + legacy) from a prior run so the file isn't
-    # accidentally skipped.
+    # Full success — English + Chinese both landed. Clear any stale
+    # failure sidecars from a prior run so the file isn't accidentally
+    # skipped by the reconciler.
     for sidecar in all_failure_sidecar_paths(video):
         try:
             sidecar.unlink(missing_ok=True)

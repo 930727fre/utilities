@@ -32,10 +32,10 @@ services:
       # at compose parse time instead.
       - OS_MAX_TRIES=${OS_MAX_TRIES:?OS_MAX_TRIES must be exported before docker compose up (integer string; 1 = free-tier single-shot, 3-5 = paid tier; `export OS_MAX_TRIES=3` or `="3"` both work)}
       # BT_PIPELINE_ENABLED: default 1 = normal (bt_filter LLM + hardlink,
-      # whisper, annotation, everything). Set to 0 to make the container
-      # a pure aria2 downloader — auto-loops go idle, downloads and
-      # seeding still work, manual buttons (retry, translate-zh,
-      # upgrade-english) still work. For a "download-only" period.
+      # whisper, annotate, translate, everything). Set to 0 to make the
+      # container a pure aria2 downloader — reconciler goes idle, downloads
+      # and seeding still work, manual retry button still works. For a
+      # "download-only" period.
       - BT_PIPELINE_ENABLED=${BT_PIPELINE_ENABLED:-1}
       # aria2 subprocess sidecar (utilities/aria2/) — BT peer/tracker
       # traffic exits through Surfshark VPN over there; we only talk

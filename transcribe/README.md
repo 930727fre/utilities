@@ -1,20 +1,19 @@
 # transcribe
 
-Three ways in:
+Two ways in:
 
 - **yt tab** — paste a URL, get an mp4 + Whisper SRT in `data/downloads/`, named after the video.
 - **bt tab** — paste a magnet link. Handed off to the sibling [aria2](../aria2) service (BT traffic exits through Surfshark VPN over there); it spawns a one-shot `aria2c` subprocess that writes into `data/bt/<per-torrent-wrapper>/` (bind-mounted between both containers) and keeps seeding until its limit (1440 min or ratio 1.0). The bt tab lists every wrapper folder; phase comes from filesystem inspection — `.aria2` control file present means downloading, gone means seeding, subprocess exit means done.
-- **bt tab → "translate to 中" button per torrent** — for shows whose English+annotation pass isn't enough (Sopranos-grade dialect / mob slang), click the per-torrent button to produce `<stem>.zh-tw.srt` sidecars in place. Gemini Flash Lite (10-cue batches with sliding-window context + count/index validation) translates the carried-over English `<stem>.srt`; ~$0.02 and ~30-60 s per video. No separate folder, no whisper fallback.
 
-For the yt + bt branches, Claude annotation runs automatically once a transcript exists. The background loop also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.05.
+For the yt + bt branches, Claude annotation runs automatically once a transcript exists, followed by Gemini Chinese translation as the pipeline's final stage. The background reconciler also catches externally-arriving SRTs (torrent-bundled subs, manual drops). Cost per ~1-hour SRT is around $0.06 (annotate $0.05 + translate $0.01).
 
-`data/downloads/` holds the yt-tab output; `data/bt/` holds the BT downloads (mounted at `/bt`), with `.zh-tw.srt` sidecars sitting next to their videos when produced. [jellyfin](../jellyfin) reads both for playback. The bt-side pipeline never writes to `jobs.json` — every torrent is a directory under `/bt` plus (while live) an in-memory `subprocess.Popen` handle in the [aria2](../aria2) sidecar. Chinese sub state is also a filesystem-only signal: `<stem>.zh-tw.srt` present = done, `<stem>.zh-tw.srt.error` present = failed.
+`data/downloads/` holds the yt-tab output; `data/bt/` holds the BT downloads (mounted at `/bt`), with `.zh-tw.srt` sidecars sitting next to their videos when the pipeline completes. [jellyfin](../jellyfin) reads both for playback. The bt-side pipeline never writes to `jobs.json` — every torrent is a directory under `/bt` plus (while live) an in-memory `subprocess.Popen` handle in the [aria2](../aria2) sidecar. All state is filesystem-only: `<stem>.srt` + `<stem>.zh-tw.srt` present = fully done, `<stem>.pipeline-failed` present = halted at some stage with reason recorded inline.
 
 ## Stack
 
 | Layer | Tech |
 |------|------|
-| Frontend | Vite + React — two tabs: yt (URL submit) and bt (magnet submit + library browser; per-torrent "translate to 中" button on annotated torrents) |
+| Frontend | Vite + React — two tabs: yt (URL submit) and bt (magnet submit + library browser) |
 | Backend | FastAPI on port 8000 — API + in-process orchestrator |
 | Worker | `ThreadPoolExecutor(max_workers=1)` — serializes our per-job state mutations |
 | Downloader | `yt-dlp` (yt, in-container) + sibling [aria2](../aria2) service for bt (one-shot `aria2c` per magnet, 1440 min / ratio 1.0 seed limits; peer traffic exits via Surfshark gluetun so tracker / peer / DHT IPs never leak transcribe's origin) |
@@ -40,16 +39,18 @@ data/bt/<wrapper>/                              ← aria2 download dir (READ-ONL
 
 data/artifact/Movies/Title (Year)/              ← Jellyfin scans here
   Title (Year).mkv                              hardlinked from data/bt
-  Title (Year).srt                              FINAL (verified + annotated)
-  Title (Year).zh-tw.srt                        from "translate to 中" button
+  Title (Year).srt                              English (verified + annotated)
+  Title (Year).zh-tw.srt                        Chinese (final pipeline stage)
 
 data/artifact/TV/Title (Year)/Season 01/
   Title (Year) - S01E01.mkv
   Title (Year) - S01E01.srt
-  Title (Year) - S01E01.annotate-failed         sidecar IF annotation crashed
-  Title (Year) - S01E01.whisper-failed          sidecar IF whisper crashed
-                                                (extension-less so Jellyfin
-                                                ignores them)
+  Title (Year) - S01E01.zh-tw.srt
+  Title (Year) - S01E01.pipeline-failed         sidecar IF any stage crashed
+                                                (whisper/annotate/translate)
+                                                — body is "<kind>: <reason>";
+                                                extension-less so Jellyfin
+                                                ignores it
 
 data/artifact/_processed/                       pipeline state
   <wrapper>.filtered                            bt_filter sentinel (one per
@@ -112,7 +113,7 @@ Prereqs:
 
 Optional:
 - `OS_MAX_TRIES` (required, no default) — k-try the top-N raw OS results per tier (download one, WER-check, first passer wins; stops early). Set `1` for free-tier (20 downloads/day cap; even one bad hit per episode chews through the quota fast). Set `3-5` if you have a paid OpenSubtitles subscription. Required rather than defaulted because forgetting to export it once silently locked a whole Friends rebuild to 1 and stamped `.whisper-polluted` on episodes that would have salvaged at 3. Indexed downloads land at `_sources/<stem>.opensubtitles-<mode>-<i>.srt`.
-- `BT_PIPELINE_ENABLED` (default 1) — set to 0 to make transcribe a **pure aria2 downloader**: torrents keep downloading and seeding, `.filtered` sentinels are NOT written, nothing is hardlinked into `/artifact`, and whisper / annotation / OS lookup / plot-check are all skipped. For a "just fill up bt/ for a while" period. Manual UI buttons (retry, translate-zh, upgrade-english) deliberately bypass the switch — they express explicit user intent. Set back to 1 and `docker compose up -d` to resume; the scan loop picks up every finished-but-un-filtered wrapper on the next tick.
+- `BT_PIPELINE_ENABLED` (default 1) — set to 0 to make transcribe a **pure aria2 downloader**: torrents keep downloading and seeding, `.filtered` sentinels are NOT written, nothing is hardlinked into `/artifact`, and whisper / annotate / translate / OS lookup / plot-check are all skipped. For a "just fill up bt/ for a while" period. The manual retry button deliberately bypasses the switch — it expresses explicit user intent. Set back to 1 and `docker compose up -d` to resume; the reconciler picks up every finished-but-un-filtered wrapper on the next tick.
 
 All five required vars use compose's `${VAR:?err}` syntax → missing any of them fails the `docker compose up` at parse time with a clear message.
 
@@ -141,9 +142,7 @@ docker compose up -d --build
 | `GET`  | `/api/bt/torrents` | One entry per wrapper folder + its phase (`downloading` / `seeding` / `done` / `orphaned`) |
 | `DELETE` | `/api/bt/torrents/{wrapper}` | Kill the subprocess (if running) + rmtree the wrapper folder |
 | `POST` | `/api/bt/transcribe` | `{path}`: manually trigger whisper on a bt file (background loop already handles this; useful for power/curl override) |
-| `POST` | `/api/bt/retry` | `{path}`: clear the canonical SRT + both failure sidecars (whisper-failed / annotate-failed) so the loop replays the pipeline. Cached `_sources/` candidates are preserved for cheap replay |
-| `POST` | `/api/bt/upgrade-english` | `{wrapper}`: nuke cached OS candidates + canonical SRTs in the wrapper so the next tick re-fetches OS against today's quota. Throws away annotation work in the process |
-| `POST` | `/api/bt/translate-zh` | `{wrapper}`: queue every video in this torrent for Chinese translation via 10-cue Gemini Flash Lite batches. Refuses if torrent still downloading or any video lacks `※ annotated`. Idempotent — clicking again clears `.error` stamps so it doubles as retry |
+| `POST` | `/api/bt/retry` | `{path}`: clear canonical SRT + zh-tw SRT + `.pipeline-failed` sidecar so the reconciler replays the pipeline. Cached `_sources/` candidates are preserved for cheap replay (re-annotate + re-translate only, no GPU re-pass) |
 
 ## Job states
 
@@ -154,9 +153,9 @@ bt manual: PENDING → TRANSCRIBING → ANNOTATING → SUCCESS     (legacy /api/
                                    ↘ FAILED
 ```
 
-Magnet submissions don't enter `jobs.json` at all. The bt-tab UI shows two live views: the aria2c subprocess's torrent list (downloading + seeding state, from `/api/bt/torrents`) and the filesystem scan (annotation + Chinese-sub state, from `/api/bt`). Whisper + annotation per video are dispatched by the background `_bt_reconcile_loop` once files land in `/bt` — a declarative reconciler that each tick compares actual filesystem state to desired state (every canonical video has an annotated SRT or an explicit failure sidecar) and enqueues work to close the gap. Chinese translation is button-triggered, not reconcile-triggered — every click submits the wrapper's videos to the translator executor.
+Magnet submissions don't enter `jobs.json` at all. The bt-tab UI shows two live views: the aria2c subprocess's torrent list (downloading + seeding state, from `/api/bt/torrents`) and the filesystem scan (per-video pipeline state, from `/api/bt`). The whole pipeline — whisper → verify → annotate → translate — runs inline in `process_bt_file`, dispatched by the background `_bt_reconcile_loop` once files land in `/bt`. Desired state per video: both `.srt` and `.zh-tw.srt` exist, OR a `.pipeline-failed` sidecar exists. Each reconcile tick compares actual state to desired and enqueues work to close the gap.
 
-Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` / `ANNOTATING` jobs flip to `FAILED` on startup. For bt jobs the reconciler re-enqueues the pipeline on its next tick, which resumes from whichever stage's output is missing under `_sources/`.
+Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` / `ANNOTATING` jobs flip to `FAILED` on startup. For bt jobs the reconciler re-enqueues the pipeline on its next tick, which resumes from whichever stage's output is missing under `_sources/` (or from `translate` if canonical `.srt` is already cached from a prior partial run).
 
 ## SRT pipeline (bt path)
 
@@ -377,8 +376,6 @@ Each pipeline stage has its own cached output under `_sources/`. Delete just wha
 | Refetch OS candidates from scratch | `_sources/X.opensubtitles-*.srt` + `_sources/X.verified.srt` + canonical (OS quota + downstream) |
 | Re-whisper everything | `rmtree _sources/<path>` + canonical (GPU + full pipeline) |
 
-The `/api/bt/upgrade-english` endpoint automates the "OS refetch" row for an entire torrent wrapper.
-
 ## Annotation
 
 Claude (sonnet) reads the verified SRT and appends short `※`-prefixed 繁體中文 notes inline to cues that reference U.S.-cultural specifics a Taiwanese viewer would miss — athletes, brands, regional places, slang, sports gameplay. Empty-array output is fine (and common — most cues need no annotation). The annotation pass runs inline within `process_bt_file` (no separate executor), so the canonical SRT only ever exists in its fully-annotated form.
@@ -394,9 +391,9 @@ The bt tab and background annotation loop skip:
 
 Video extensions recognized: `.mp4 .mkv .avi .mov .ts .webm`.
 
-## Chinese translation ("translate to 中" button)
+## Chinese translation (pipeline stage 5)
 
-For shows whose English+annotation pass isn't enough (Sopranos, The Wire, anything with thick dialect / mob slang / AAVE), each bt torrent card carries a per-torrent "→ 中" button (visible when every video in the wrapper has a canonical SRT — which under the new pipeline implies the English transcript is verified + annotated). One click queues every video for Chinese translation; results land as `<stem>.zh-tw.srt` sidecars next to the videos. Infuse picks both `<stem>.srt` (English + ✨) and `<stem>.zh-tw.srt` (Chinese) as separate language tracks on the same video.
+Translation runs inline as the final pipeline stage — user can't consume English SRT directly, so a video isn't "done" until `<stem>.zh-tw.srt` exists alongside `<stem>.srt`. Failure at this stage stamps `.pipeline-failed` with kind `translate failed`, same shape as any other stage failure; the reconciler skips until the UI ↻ clears the sidecar (+ canonical SRT + zh SRT), at which point `process_bt_file` resumes: cached `_sources/verified.srt` skips whisper/alass, canonical `.srt` still cached from a translate-only failure means annotate skips too, only translate re-runs (~$0.01, ~1 min). Infuse picks both `<stem>.srt` (English + ✨) and `<stem>.zh-tw.srt` (Chinese) as separate language tracks.
 
 **Gemini Flash Lite, 10-cue batches with sliding-window context — no OpenSubtitles lookup.** The OS step was tried and dropped: Chinese-sub uploads on OpenSubtitles are sparse and frequently mistagged for the releases the user actually watches. Cue timing is inherited verbatim from the English SRT (which was already release-aligned by the bt pipeline) — no ffsubsync needed.
 
@@ -410,20 +407,14 @@ For shows whose English+annotation pass isn't enough (Sopranos, The Wire, anythi
 Each batch call carries 3 cues before + 3 cues after the target batch as REFERENCE (not to translate, only as context) — the batch itself provides 10 cues of internal context, so the additional window can be smaller than per-cue's 5+5.
 
 Per video:
-1. Look up sibling `<stem>.srt` (the English transcript bt produced).
+1. Read sibling `<stem>.srt` (the annotated English transcript this pipeline just wrote).
 2. Identify cues to translate (skip `※`-prefixed sentinels — they pass through verbatim).
-3. Chunk into 10-cue batches; run batches in parallel (10 concurrent Gemini calls per episode), each with sliding-window context + forced-JSON array output keyed by the input cue indices.
+3. Chunk into 10-cue batches; process batches serially, each with sliding-window context + forced-JSON array output keyed by the input cue indices.
 4. Validate per batch: returned cue indices must cover the input batch. On mismatch, retry once before accepting partial coverage (missing cues keep their English line).
 5. Apply translations back in place.
-6. Write `<stem>.zh-tw.srt` next to the video.
+6. Write `<stem>.zh-tw.srt` next to the video + mirror to `data/archive/` for delete_torrent-safe preservation.
 
-Cost: ~$0.02 per movie, ~30-60 s per movie depending on cue count. A 13-episode pack like Sopranos S01 takes ~10 min end-to-end.
-
-`<stem>.zh-tw.srt.error` sentinel files (plain text, holding the failure reason) appear on either-step failures. The button doubles as retry: clicking again clears `.error` stamps before re-queueing, so a failed video gets a fresh attempt.
-
-**Per-torrent button + per-video `zh_in_flight` state**: the backend keeps an in-memory map of `path → Future` for every video currently mid-translation. The bt scan exposes `zh_in_flight: bool` per video so the UI can show a pulsing `中` while translation is in progress AND disable the per-torrent button (with a "Translation in progress…" tooltip) while any of its videos are still in flight. The `finally` clause inside the submission wrapper pops the entry when the worker exits, so the flag is self-cleaning — no useEffect diffing on the client.
-
-Two workers at the episode level (`translator_executor` with `max_workers=2`); inside each, 10 concurrent batch-level calls (`_BATCH_CONCURRENCY` in translator.py). At peak that's 20 Gemini Flash Lite calls in flight — well under any quota and within the sustained-throughput window where Google doesn't throttle.
+Cost: ~$0.01 per video, ~3-4 min per video for ~80 batches at ~2-3 s each. Runs on the pipeline executor's single worker thread — no separate pool, no intra-video parallelism (`process_bt_file` already serializes videos, so batch-level parallelism would give no wrapper-level wall-clock win).
 
 ## Known limitations
 
@@ -431,4 +422,4 @@ Two workers at the episode level (`translator_executor` with `max_workers=2`); i
 - Whisper model is whatever the shared [whisper](../whisper) service is configured with (`large-v3-turbo` at time of writing). Change it there, not here.
 - bt mode handles text-based embedded subtitles across containers (mkv subrip, mp4 mov_text, WebM webvtt, mkv/mp4 ASS/SSA; ffmpeg's `-c:s srt` strips override tags and converts everything to SubRip on extraction), PGS bitmap tracks via OCR (`pgsrip → tesseract`), and VobSub bitmap tracks via OCR (`subtile-ocr → tesseract`). Heavy ASS typesetting (anime karaoke, sign translations) can leave styling residue — the WER gate catches gross cases and the pipeline falls through to the next candidate.
 - OpenSubtitles text-search precision is spotty on generic show titles. `/subtitles?query=Friends&season_number=1&episode_number=7` empirically returns cross-season E7 subs (S5E7, S7E7, S9E7 seen in practice) — the API's title-only match seems to fall through the season filter for common words, or uploader metadata is systemically mislabeled at high rates. The WER gate downstream catches wrong-episode subs but only after burning download quota. **If it starts costing real quota:** the fix is to look up the series' IMDB/TMDB id first via `/features?query=<title>&type=tvshow` and then `/subtitles?parent_imdb_id=<id>&season_number=...&episode_number=...` — hard-binds the filter to the specific series. Not urgent while most rips have usable embedded / PGS / VobSub tracks (which skip OS entirely).
-- The Chinese translation cascade has no whisper fallback (whisper produces English, which would defeat the point). If a batch's API call fails or the validator can't recover from a missing-cue response, the missing cues silently keep their English lines (the rest of the SRT is still useful). If the whole translation raises (e.g. all calls hit a long Gemini outage), the video lands at `中 !` and stays there until the user clicks the torrent's button again to retry.
+- The Chinese translation stage has no whisper fallback (whisper produces English, which would defeat the point). If a batch's API call fails or the validator can't recover from a missing-cue response, the missing cues silently keep their English lines (the rest of the SRT is still useful). If the whole translation raises (e.g. all calls hit a long Gemini outage), `.pipeline-failed` gets stamped with kind `translate failed` and the video shows `!` in the UI — clicking ↻ resumes at the translate stage without re-running whisper or annotate.

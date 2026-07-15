@@ -130,15 +130,23 @@ def _has_any_failure_sidecar(video: Path) -> Optional[tuple[str, str]]:
 
 
 def _group_terminal_state(group_dir: Path) -> Optional[dict]:
-    """{total, succeeded, failed, all_terminal} for an English pipeline
-    group. Returns None if the directory has no video siblings."""
+    """{total, succeeded, failed, all_terminal} for a pipeline group.
+    Returns None if the directory has no video siblings.
+
+    "Succeeded" = both canonical `.srt` and `.zh-tw.srt` exist (translation
+    is the pipeline's final stage — English alone isn't consumable).
+    "Failed" = any `.pipeline-failed` sidecar (whisper / annotate /
+    translate stage, kind captured for the summary).
+    """
     siblings = _group_video_siblings(group_dir)
     if not siblings:
         return None
     succeeded: list[Path] = []
     failed: list[tuple[Path, str, str]] = []
     for video in siblings:
-        if video.with_suffix(".srt").exists():
+        has_srt = video.with_suffix(".srt").exists()
+        has_zh = (video.parent / f"{video.stem}.zh-tw.srt").exists()
+        if has_srt and has_zh:
             succeeded.append(video)
             continue
         f = _has_any_failure_sidecar(video)
@@ -150,41 +158,6 @@ def _group_terminal_state(group_dir: Path) -> Optional[dict]:
         "succeeded": succeeded,
         "failed": failed,
         "all_terminal": len(succeeded) + len(failed) == len(siblings),
-    }
-
-
-def _group_terminal_state_zh(group_dir: Path) -> Optional[dict]:
-    """{total, translated, failed, all_terminal} for zh translation of
-    a group. Denominator = siblings that have an English `.srt` (only
-    translatable ones). Returns None if no translatable siblings."""
-    siblings = _group_video_siblings(group_dir)
-    if not siblings:
-        return None
-    translatable = [v for v in siblings if v.with_suffix(".srt").exists()]
-    if not translatable:
-        return None
-    translated: list[Path] = []
-    failed: list[tuple[Path, str]] = []
-    pending: list[Path] = []
-    for video in translatable:
-        zh = video.parent / f"{video.stem}.zh-tw.srt"
-        err = Path(str(zh) + ".error")
-        if zh.exists():
-            translated.append(video)
-        elif err.exists():
-            try:
-                reason = err.read_text(encoding="utf-8", errors="replace").strip()
-            except OSError:
-                reason = "(error sidecar unreadable)"
-            failed.append((video, reason))
-        else:
-            pending.append(video)
-    return {
-        "total": len(translatable),
-        "translated": translated,
-        "failed": failed,
-        "pending": pending,
-        "all_terminal": not pending,
     }
 
 
@@ -207,23 +180,6 @@ def _fmt_summary(label: str, state: dict) -> str:
     return line1 + "\n" + tail
 
 
-def _fmt_summary_zh(label: str, state: dict) -> str:
-    ok = len(state["translated"])
-    bad = len(state["failed"])
-    total = state["total"]
-    verb = "done" if bad == 0 else "partial"
-    line1 = f"Transcribe zh {verb} | {label} | {ok}/{total} ok"
-    if bad:
-        line1 += f" | {bad}/{total} failed"
-    if bad == 0:
-        return line1
-    failed_bits = [v.name for v, _ in state["failed"][:10]]
-    tail = "Failed: " + ", ".join(failed_bits)
-    if bad > 10:
-        tail += f", …+{bad - 10}"
-    return line1 + "\n" + tail
-
-
 def _fmt_individual_success(video: Path, tier: str) -> str:
     return f"Transcribe done | {video.name} | tier={tier}"
 
@@ -235,57 +191,40 @@ def _fmt_individual_failure(video: Path, kind: str, reason: str) -> str:
 
 # ── public API ─────────────────────────────────────────────────────────
 
-def _maybe_fire_group(video: Path, zh: bool = False) -> bool:
+def _maybe_fire_group(video: Path) -> bool:
     """Locate the video's group, check terminal state, fire if terminal.
-    Returns True if it fired a wrapper summary (caller may need to know
-    to skip individual notification)."""
+    Returns True if the video belongs to a recognized group (caller
+    skips individual notification either way — no wrapper spam)."""
     g = _find_group_for_video(video)
     if g is None:
         return False
     group_dir, label = g
-    if zh:
-        state = _group_terminal_state_zh(group_dir)
-        if state is None or not state["all_terminal"]:
-            return True   # in-group but not terminal — still don't send individual
-        _send(_fmt_summary_zh(label, state))
-    else:
-        state = _group_terminal_state(group_dir)
-        if state is None or not state["all_terminal"]:
-            return True
-        _send(_fmt_summary(label, state))
-    # New canonical / zh files landed → tell Jellyfin to re-index.
+    state = _group_terminal_state(group_dir)
+    if state is None or not state["all_terminal"]:
+        return True   # in-group but not terminal — still no individual send
+    _send(_fmt_summary(label, state))
+    # Wrapper fully done (English + Chinese both landed for every
+    # video, modulo failures) → tell Jellyfin to re-index.
     from jellyfin_client import rescan_library
     rescan_library()
     return True
 
 
 def notify_success(video: Path, tier: str) -> None:
-    """Called by the pipeline when a canonical SRT is produced. Routes
-    to group-level summary if the video is in a recognized canonical
+    """Called by process_bt_file when a video completes ALL pipeline
+    stages (whisper / verify / annotate / translate). Routes to a
+    group-level summary if the video is in a recognized canonical
     layout, otherwise falls back to an individual notification (YT,
     manual drops)."""
-    if not _maybe_fire_group(video, zh=False):
+    if not _maybe_fire_group(video):
         _send(_fmt_individual_success(video, tier))
 
 
 def notify_failure(video: Path, kind: str, reason: str) -> None:
-    """Called by the pipeline when a failure sidecar is stamped. Same
-    routing as `notify_success`."""
-    if not _maybe_fire_group(video, zh=False):
+    """Called by process_bt_file when a stage failure sidecar is stamped.
+    Same routing as `notify_success`."""
+    if not _maybe_fire_group(video):
         _send(_fmt_individual_failure(video, kind, reason))
-
-
-def notify_zh_success(video: Path) -> None:
-    """Called by the translator on successful zh-tw sibling write."""
-    if not _maybe_fire_group(video, zh=True):
-        _send(f"Transcribe zh done | {video.name}")
-
-
-def notify_zh_failure(video: Path, reason: str) -> None:
-    """Called by the translator when translation fails."""
-    if not _maybe_fire_group(video, zh=True):
-        short = reason.replace("\n", " ")[:120]
-        _send(f"Transcribe zh failed | {video.name} | {short}")
 
 
 def notify_filter_failure(wrapper_name: str, reason: str) -> None:

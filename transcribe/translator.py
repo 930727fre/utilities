@@ -29,23 +29,14 @@ through unchanged. A new `※ source: llm-translated` sentinel gets
 appended at the file end with timestamp 00:00:00.
 """
 import os
-import threading
-import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
-from requests.adapters import HTTPAdapter
 
 from annotate import parse_srt, render_srt  # reuse the same parser/renderer
 from gemini_client import generate_json
 
 ZH_SUFFIX = ".zh-tw.srt"
-
-# Two workers — Gemini Flash Lite is fast and Tier 2 limits are generous,
-# but two parallel episodes is plenty given the batch-level concurrency
-# inside each one.
-translator_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="translator-worker")
 
 # How many cues per Gemini call. Larger batches cut API calls + cost but
 # raise alignment risk (Gemini occasionally drops short cues from
@@ -53,11 +44,6 @@ translator_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="tran
 # spot: blast radius of any per-batch failure is bounded to 10 cues, and
 # the count+index validator catches misalignment in time to retry.
 BATCH_SIZE = 10
-
-# Batch-level parallelism inside translate_to_zh. With ~82 batches per
-# episode at ~2-3 s each, running 10 in parallel finishes a season's
-# episode in ~20-30 s wall-clock.
-_BATCH_CONCURRENCY = 10
 
 # Sliding context: N cues before the batch and N after, as REFERENCE
 # only (not translated). The batch itself provides 10 cues of internal
@@ -69,25 +55,13 @@ _CONTEXT_AFTER = 3
 
 _MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-3.1-flash-lite")
 
-# Shared HTTP session with an enlarged connection pool. The default
-# `requests` module-level session caps at 10 connections per host,
-# which throttles high-concurrency translation runs.
-_http_session: requests.Session | None = None
-_http_session_lock = threading.Lock()
+# Module-level session for connection reuse across serial batches within
+# a single translate_to_zh call. Default `requests.Session` pool sizes
+# are ample for serial requests.
+_http_session = requests.Session()
 
 
 def _get_session() -> requests.Session:
-    global _http_session
-    if _http_session is not None:
-        return _http_session
-    with _http_session_lock:
-        if _http_session is None:
-            s = requests.Session()
-            pool_size = _BATCH_CONCURRENCY * 2 * 4  # batch × episode × headroom
-            adapter = HTTPAdapter(pool_connections=pool_size, pool_maxsize=pool_size)
-            s.mount("https://", adapter)
-            s.mount("http://", adapter)
-            _http_session = s
     return _http_session
 
 
@@ -263,18 +237,20 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
     batches = [translate_positions[i:i + BATCH_SIZE]
                for i in range(0, len(translate_positions), BATCH_SIZE)]
 
-    # Parallel-translate batches. Each result is a dict keyed by SRT cue
-    # index → translated lines, merged into one big dict.
+    # Translate batches serially. A ~1-hour episode has ~80 batches at
+    # ~2-3 s each → 3-4 min per video. The pipeline executor already
+    # serializes videos (max_workers=1), so intra-video parallelism
+    # gives no wall-clock win at the wrapper level, and serial keeps
+    # the code + failure model dead simple. Each batch that raises is
+    # swallowed as an empty dict — missing cues keep their English
+    # line, matching partial-coverage semantics elsewhere.
     translations: dict[int, list[str]] = {}
-    with ThreadPoolExecutor(max_workers=_BATCH_CONCURRENCY,
-                             thread_name_prefix="translator-batch") as pool:
-        futures = [pool.submit(_translate_batch, cues, batch) for batch in batches]
-        for fut in as_completed(futures):
-            try:
-                batch_result = fut.result()
-            except Exception:
-                batch_result = {}
-            translations.update(batch_result)
+    for batch in batches:
+        try:
+            batch_result = _translate_batch(cues, batch)
+        except Exception:
+            batch_result = {}
+        translations.update(batch_result)
 
     # Apply translations back. Cues we didn't translate (sentinels) or
     # cues Gemini dropped keep their original English lines — partial
@@ -288,56 +264,41 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
 
 
 def translate_video_zh(video: Path) -> None:
-    """Top-level worker submitted by the bt translate-zh endpoint. Translate
-    the sibling `<stem>.srt` (the English transcript bt left in place) to
-    繁體中文 via 10-cue Gemini Flash Lite batches with sliding-window context.
+    """Translate the sibling `<stem>.srt` to 繁體中文 via 10-cue Gemini
+    Flash Lite batches with sliding-window context, writing
+    `<stem>.zh-tw.srt` next to the video.
+
+    Called inline as the final stage of process_bt_file — English SRT
+    alone isn't consumable for the user, so the pipeline isn't "done"
+    until this succeeds. Failure raises; the caller stamps the standard
+    `.pipeline-failed` sidecar (same shape as any other pipeline-stage
+    failure).
 
     OpenSubtitles is NOT consulted — Chinese-sub uploads on OS are sparse
     and frequently mistagged for releases the user actually watches.
 
-    Output: `<stem>.zh-tw.srt` next to the video on success, or
-    `<stem>.zh-tw.srt.error` with the failure reason if translation fails
-    or the English SRT is missing.
-
-    Idempotent: skips if `<stem>.zh-tw.srt` already exists. The endpoint
-    pre-clears `.error` stamps before submitting, so calling the endpoint
-    again counts as a retry.
+    Idempotent: skips silently if `<stem>.zh-tw.srt` already exists, so
+    a crash-recovered pipeline that already produced the zh SRT won't
+    burn API cost re-translating.
     """
     zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
-    err_path = Path(str(zh_path) + ".error")
-    eng_srt = video.with_suffix(".srt")
-
     if zh_path.exists():
-        return  # already done
+        return  # already done — idempotent skip for crash recovery
 
+    eng_srt = video.with_suffix(".srt")
     if not eng_srt.exists():
-        reason = (
-            "no English SRT to translate from; the sibling <stem>.srt is "
-            "missing. Did the bt pipeline produce one for this video?"
+        # Caller (process_bt_file) writes canonical before calling us,
+        # so this shouldn't happen except in bizarre races. Raise so the
+        # standard pipeline-failure path handles it.
+        raise RuntimeError(
+            f"no English SRT at {eng_srt} to translate from — "
+            "canonical write must have failed silently"
         )
-        try:
-            err_path.write_text(reason, encoding="utf-8")
-        except OSError as e:
-            print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
-        from notifier import notify_zh_failure
-        notify_zh_failure(video, reason)
-        return
 
     print(f"[translate-zh] translating {video.name!r} via Gemini (10-cue batches)", flush=True)
-    try:
-        translate_to_zh(eng_srt, zh_path)
-        print(f"[translate-zh] wrote {zh_path.name!r}", flush=True)
-        # Mirror to data/archive/ so a future delete_torrent + re-download
-        # can reuse the Chinese SRT alongside the English one (see archive.py).
-        from archive import mirror_to_archive
-        mirror_to_archive(zh_path)
-        from notifier import notify_zh_success
-        notify_zh_success(video)
-    except Exception as exc:
-        traceback.print_exc()
-        try:
-            err_path.write_text(f"translation failed: {exc}", encoding="utf-8")
-        except OSError as e:
-            print(f"[translate-zh] stamp .error failed for {video.name!r}: {e}", flush=True)
-        from notifier import notify_zh_failure
-        notify_zh_failure(video, f"translation failed: {exc}")
+    translate_to_zh(eng_srt, zh_path)
+    print(f"[translate-zh] wrote {zh_path.name!r}", flush=True)
+    # Mirror to data/archive/ so a future delete_torrent + re-download
+    # can reuse the Chinese SRT alongside the English one (see archive.py).
+    from archive import mirror_to_archive
+    mirror_to_archive(zh_path)

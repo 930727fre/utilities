@@ -426,9 +426,9 @@ def load_manifest(wrapper_name: str) -> list[Path]:
     """Return the absolute canonical /artifact paths bt_filter produced
     for this bt wrapper, parsed from the sentinel file contents.
 
-    Used by per-torrent UI actions (translate-zh / upgrade-english) so a
-    click on a bt-side torrent name reaches the right canonical-named
-    files even though the canonical names don't carry wrapper info.
+    Used by delete-torrent's preview + delete handlers so a click on a
+    bt-side wrapper name enumerates the right canonical-named files for
+    dry-run display and eventual removal.
 
     Returns an empty list if the sentinel doesn't exist or the wrapper
     produced no canonical outputs (empty tree, LLM error, etc.)."""

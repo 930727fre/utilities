@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { listBt, listTorrents, submitMagnet, deleteTorrent, previewDeleteTorrent, retryBtFile, translateTorrentZh, translateFileZh, upgradeEnglishTorrent } from '../api'
+import { listBt, listTorrents, submitMagnet, deleteTorrent, previewDeleteTorrent, retryBtFile } from '../api'
 
 function formatBytes(n) {
   if (n >= 1e12) return (n / 1e12).toFixed(2) + ' TB'
@@ -160,111 +160,6 @@ export default function Bt() {
     }
   }
 
-  async function handleTranslateFile(path) {
-    try {
-      await translateFileZh(path)
-      await refresh()
-    } catch (err) {
-      alert('Translate failed: ' + err.message)
-    }
-  }
-
-  async function handleUpgradeEnglish(wrapper, count) {
-    const ok = confirm(
-      `Force fresh OpenSubtitles fetch for ${count} video${count === 1 ? '' : 's'} in this torrent?\n\n` +
-      `Cached OS candidates will be deleted so the pipeline retries against ` +
-      `today's quota. Each affected SRT gets re-verified, re-ffsubsync'd, and ` +
-      `a fresh Claude annotation pass runs (~$0.05 each). Cached whisper ` +
-      `output is kept — no GPU re-pass.`
-    )
-    if (!ok) return
-    try {
-      const res = await upgradeEnglishTorrent(wrapper)
-      if (res.cleared === 0) {
-        alert('Nothing was cleared — videos may be in flight or annotated already.')
-      }
-      await refresh()
-    } catch (err) {
-      alert('Upgrade failed: ' + err.message)
-    }
-  }
-
-  async function handleTranslate(wrapper, count) {
-    const ok = confirm(`Translate ${count} video${count === 1 ? '' : 's'} in this torrent to 繁體中文?\n\n` +
-      `Gemini Flash Lite — ~$0.01 and ~1 minute per video.`)
-    if (!ok) return
-    try {
-      const res = await translateTorrentZh(wrapper)
-      if (res.queued === 0) {
-        alert(`Already translated — nothing queued.`)
-      }
-      await refresh()
-    } catch (err) {
-      alert('Translate failed: ' + err.message)
-    }
-  }
-
-  // Group videos under their originating bt wrapper so per-torrent
-  // action buttons (→ 中, → E) know which /artifact items belong to
-  // each torrent card. Backend `_scan_bt` attributes each canonical
-  // video to its bt wrapper via inode match (hardlink identity).
-  // Items whose bt-side has been removed (orphaned canonical) carry
-  // an empty `wrapper` and are excluded from grouping.
-  const itemsByTorrent = new Map()
-  for (const item of items) {
-    if (!item.wrapper) continue
-    if (!itemsByTorrent.has(item.wrapper)) itemsByTorrent.set(item.wrapper, [])
-    itemsByTorrent.get(item.wrapper).push(item)
-  }
-
-  function upgradeEnglishStatus(torrent) {
-    if (torrent.phase === 'downloading') {
-      return { ready: false, count: 0, reason: 'Torrent still downloading' }
-    }
-    const myItems = itemsByTorrent.get(torrent.name) || []
-    const candidates = myItems.filter(it => it.has_srt && !it.in_flight_job_id)
-    if (candidates.length === 0) {
-      return { ready: false, count: 0, reason: 'No annotated videos to refetch English subs for' }
-    }
-    return {
-      ready: true,
-      count: candidates.length,
-      reason: `Force OS refetch for ${candidates.length} video${candidates.length === 1 ? '' : 's'} ` +
-              `(will throw away annotation, re-annotate ~$0.05 each)`,
-    }
-  }
-
-  function translateStatus(torrent) {
-    if (torrent.phase === 'downloading') {
-      return { ready: false, count: 0, reason: 'Torrent still downloading' }
-    }
-    const myItems = itemsByTorrent.get(torrent.name) || []
-    if (myItems.length === 0) {
-      return { ready: false, count: 0, reason: 'No videos found in this torrent yet' }
-    }
-    if (myItems.some(it => it.zh_in_flight)) {
-      return { ready: false, count: 0, reason: 'Translation in progress…' }
-    }
-    // `settled` = has an English SRT OR has a permanent pipeline_error.
-    // Failed files can never be translated (no source SRT), but treating
-    // them as "still working" would block bulk translate forever — so
-    // count them as done for the gate.
-    const settled = myItems.filter(it => it.has_srt || it.pipeline_error).length
-    if (settled < myItems.length) {
-      const working = myItems.length - settled
-      return { ready: false, count: 0, reason: `${working} video${working === 1 ? '' : 's'} still processing — wait for the rest` }
-    }
-    const untranslated = myItems.filter(it => it.has_srt && !it.has_zh_srt).length
-    if (untranslated === 0) {
-      return { ready: false, count: 0, reason: 'All translatable videos already have Chinese subs' }
-    }
-    return {
-      ready: true,
-      count: untranslated,
-      reason: `Translate ${untranslated} video${untranslated === 1 ? '' : 's'} to 繁體中文 via Gemini`,
-    }
-  }
-
   const sortedTorrents = [...torrents].sort((a, b) => a.name.localeCompare(b.name))
 
   // Each torrent lives in its own per-torrent wrapper folder — group by it.
@@ -333,25 +228,13 @@ export default function Bt() {
                     )}
                   </div>
                 </div>
-                {isExpanded && (() => {
-                  const ts = translateStatus(t)
-                  const ues = upgradeEnglishStatus(t)
-                  return (
-                    <div style={styles.actionRow}>
-                      <div style={{ flex: 1 }} />
-                      <button style={{ ...styles.translateBtn, ...(ues.ready ? {} : styles.disabledBtn) }}
-                        title={ues.reason}
-                        disabled={!ues.ready}
-                        onClick={e => { e.stopPropagation(); handleUpgradeEnglish(t.name, ues.count) }}>→ E</button>
-                      <button style={{ ...styles.translateBtn, ...(ts.ready ? {} : styles.disabledBtn) }}
-                        title={ts.reason}
-                        disabled={!ts.ready}
-                        onClick={e => { e.stopPropagation(); handleTranslate(t.name, ts.count) }}>→ 中</button>
-                      <button style={styles.deleteBtn} title="Delete torrent + files"
-                        onClick={e => { e.stopPropagation(); handleDelete(t.name) }}>✕</button>
-                    </div>
-                  )
-                })()}
+                {isExpanded && (
+                  <div style={styles.actionRow}>
+                    <div style={{ flex: 1 }} />
+                    <button style={styles.deleteBtn} title="Delete torrent + files"
+                      onClick={e => { e.stopPropagation(); handleDelete(t.name) }}>✕</button>
+                  </div>
+                )}
               </div>
             )
           })}
@@ -371,8 +254,7 @@ export default function Bt() {
               <RowItem key={`${item.path}-${rowExpanded}`} item={item}
                 isExpanded={rowExpanded}
                 onToggle={() => toggleRowExpand(item.path)}
-                onRetry={handleRetry}
-                onTranslate={handleTranslateFile} />
+                onRetry={handleRetry} />
             )
           })}
         </div>
@@ -381,82 +263,47 @@ export default function Bt() {
   )
 }
 
-function RowItem({ item, isExpanded, onToggle, onRetry, onTranslate }) {
-  const engState = deriveEngState(item)
-  const zhState = deriveZhState(item)
-  const engErrMsg = item.pipeline_error || ''
+function RowItem({ item, isExpanded, onToggle, onRetry }) {
+  const state = deriveState(item)
+  const errMsg = item.pipeline_error || ''
   return (
     <div className="fade-in" style={styles.row} onClick={onToggle}>
       <div style={styles.topRow}>
         <div style={styles.name}>{item.name}</div>
         <div style={styles.slot}>
-          {/* Compact status: ○ working / ✓ done / ! failed. Actions
-              live in the expanded action row below. */}
-          {engState === 'working' && (
+          {/* Compact status: ○ working / ✓ done (English + Chinese
+              both landed) / ! failed. Actions live in the expanded
+              action row below. */}
+          {state === 'working' && (
             <span className="status-pulse" style={styles.glyph} title="Working / queued">○</span>
           )}
-          {engState === 'done' && (
-            <span style={{ ...styles.glyph, color: '#636366' }} title="Annotated">✓</span>
+          {state === 'done' && (
+            <span style={{ ...styles.glyph, color: '#636366' }} title="Annotated + translated">✓</span>
           )}
-          {engState === 'failed' && (
-            <span style={styles.glyph} title={engErrMsg}>!</span>
-          )}
-          {engState === 'done' && zhState !== 'absent' && (
-            <span style={styles.zhDivider}>·</span>
-          )}
-          {engState === 'done' && zhState === 'translating' && (
-            <span className="status-pulse" style={styles.zhGlyph} title="Translating to 繁體中文">中</span>
-          )}
-          {engState === 'done' && zhState === 'done' && (
-            <span style={styles.zhGlyph} title="Chinese sub ready">中</span>
-          )}
-          {engState === 'done' && zhState === 'failed' && (
-            <span style={{ ...styles.zhGlyph, color: '#c79968' }} title={`中: ${item.zh_error}`}>!</span>
+          {state === 'failed' && (
+            <span style={styles.glyph} title={errMsg}>!</span>
           )}
         </div>
       </div>
-      {isExpanded && (
+      {isExpanded && state === 'failed' && (
         <div style={styles.actionRow}>
           <div style={{ flex: 1 }} />
-          {engState === 'done' && (() => {
-            // Keep the 中 button visible in every zh state so the row's
-            // shape doesn't jump around; disable it (with an explanatory
-            // tooltip) when clicking would be a no-op or duplicate work.
-            const zhEnabled = zhState === 'absent'
-            const zhTitle = zhState === 'absent' ? 'Translate this episode to 繁體中文'
-                          : zhState === 'translating' ? 'Currently translating — hold your horses'
-                          : zhState === 'done' ? 'Already translated'
-                          : `Translation failed: ${item.zh_error || 'unknown error'}`
-            return (
-              <button style={{ ...styles.translateBtn, ...(zhEnabled ? {} : styles.disabledBtn) }}
-                disabled={!zhEnabled}
-                title={zhTitle}
-                onClick={e => { e.stopPropagation(); if (zhEnabled) onTranslate(item.path) }}>中</button>
-            )
-          })()}
-          {engState === 'failed' && (
-            <button style={styles.translateBtn}
-              title="Retry (deletes the SRT and re-runs the pipeline)"
-              onClick={e => { e.stopPropagation(); onRetry(item.path) }}>↻</button>
-          )}
+          <button style={styles.actionBtn}
+            title="Retry (deletes canonical SRT + zh SRT + failure sidecar, re-runs from the failing stage)"
+            onClick={e => { e.stopPropagation(); onRetry(item.path) }}>↻</button>
         </div>
       )}
     </div>
   )
 }
 
-function deriveEngState(item) {
-  if (item.in_flight_job_id) return 'working'
-  if (item.has_srt) return 'done'
+// Pipeline is a single track now (translate is the final stage), so
+// state collapses to three: working, done, failed. `done` requires
+// BOTH English `.srt` and `.zh-tw.srt`.
+function deriveState(item) {
   if (item.pipeline_error) return 'failed'
+  if (item.has_srt && item.has_zh_srt) return 'done'
   return 'working'
-}
-
-function deriveZhState(item) {
-  if (item.zh_in_flight) return 'translating'
-  if (item.has_zh_srt) return 'done'
-  if (item.zh_error) return 'failed'
-  return 'absent'
 }
 
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
@@ -502,7 +349,7 @@ const styles = {
     background: 'none', border: 'none', color: '#636366',
     fontSize: 18, padding: 0, cursor: 'pointer', lineHeight: 1,
   },
-  translateBtn: {
+  actionBtn: {
     background: 'none', border: '1px solid #c79968', color: '#c79968',
     fontSize: 12, fontWeight: 600, padding: '4px 10px', borderRadius: 6,
     cursor: 'pointer', lineHeight: 1, fontFamily: MONO,
@@ -537,27 +384,4 @@ const styles = {
     color: '#aeaeb2', fontSize: 18, fontWeight: 700, lineHeight: 1,
     cursor: 'default', fontFamily: MONO,
   },
-  zhDivider: {
-    color: '#3a3a3c', fontSize: 14, lineHeight: 1, cursor: 'default',
-  },
-  zhGlyph: {
-    color: '#aeaeb2', fontSize: 14, fontWeight: 700, lineHeight: 1,
-    cursor: 'default', fontFamily: MONO,
-  },
-  retryBtn: {
-    background: 'none', border: 'none', color: '#c79968',
-    fontSize: 18, fontWeight: 700, lineHeight: 1, padding: 0, cursor: 'pointer',
-    fontFamily: MONO,
-  },
-  playBtn: {
-    background: 'none', border: 'none', color: '#c79968',
-    fontSize: 18, fontWeight: 700, lineHeight: 1, padding: 0, cursor: 'pointer',
-    fontFamily: MONO,
-  },
-  zhBtn: {
-    background: 'none', border: 'none', color: '#c79968',
-    fontSize: 14, fontWeight: 700, lineHeight: 1, padding: 0, cursor: 'pointer',
-    fontFamily: MONO,
-  },
-
 }
