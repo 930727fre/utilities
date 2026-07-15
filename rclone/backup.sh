@@ -17,6 +17,22 @@ set -eu
 
 cd "$(dirname "$0")"
 
+# Fail-fast: docker compose auto-creates empty directories for missing
+# bind-mount sources, which then surface as "is a directory" errors
+# inside the container. Verify the config is a real file before running.
+if [ ! -f config/rclone.conf ]; then
+    if [ -d config/rclone.conf ]; then
+        echo "ERROR: config/rclone.conf exists as a DIRECTORY (docker auto-created)." >&2
+        echo "  Run: rmdir config/rclone.conf" >&2
+        echo "  Then scp your rclone.conf from your laptop into place." >&2
+    else
+        echo "ERROR: config/rclone.conf not found." >&2
+        echo "  Run rclone config on your laptop, then:" >&2
+        echo "    scp ~/.config/rclone/rclone.conf <this host>:$(pwd)/config/rclone.conf" >&2
+    fi
+    exit 1
+fi
+
 if [ $# -ge 1 ]; then
     WRAPPER="$1"
     SRC="/bt/${WRAPPER}"

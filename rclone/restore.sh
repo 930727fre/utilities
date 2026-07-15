@@ -20,6 +20,16 @@ WRAPPER="$1"
 
 cd "$(dirname "$0")"
 
+if [ ! -f config/rclone.conf ]; then
+    if [ -d config/rclone.conf ]; then
+        echo "ERROR: config/rclone.conf exists as a DIRECTORY (docker auto-created)." >&2
+        echo "  Run: rmdir config/rclone.conf" >&2
+    else
+        echo "ERROR: config/rclone.conf not found. See README for setup." >&2
+    fi
+    exit 1
+fi
+
 docker compose run --rm rclone copy \
     "gdrive-crypt:transcribe/${WRAPPER}" \
     "/bt/${WRAPPER}" \
