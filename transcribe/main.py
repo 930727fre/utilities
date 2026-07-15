@@ -21,6 +21,7 @@ from bt_filter import (
     filter_wrapper,
     load_manifest,
 )
+from archive import archive_paths_for
 from gpu_lock import release_all_held
 from srt_source import (
     all_failure_sidecar_paths,
@@ -724,21 +725,44 @@ class BtRetryRequest(BaseModel):
 
 @app.post("/api/bt/retry", status_code=200)
 async def bt_retry(req: BtRetryRequest):
-    """Clear failure state for a video so the reconciler replays its pipeline.
+    """Deep-reset a video so the reconciler replays the whole pipeline
+    from scratch.
 
-    Deletes: the canonical SRT + the Chinese SRT + every failure sidecar
-    (new `.pipeline-failed` plus legacy `.whisper-failed` /
-    `.whisper-polluted` / `.annotate-failed` / `.pipeline-crashed` from
-    earlier releases).
-    Keeps the `_sources/` candidate cache — whisper output and OS hits
-    stick around so the next pipeline run replays cheaply (no GPU re-pass,
-    no OS quota re-burn), only re-annotate (~$0.05) + re-translate
-    (~$0.01). For a hard reset that wipes cached sources too, manual rm
-    under /artifact/_sources/ is the right escape hatch.
+    Nukes:
+      - canonical SRT + Chinese SRT
+      - `.pipeline-failed` sidecar (and legacy variants: `.whisper-failed`,
+        `.whisper-polluted`, `.annotate-failed`, `.pipeline-crashed`)
+      - every `_sources/<stem>.*.srt` cache entry (whisper output, OS
+        candidates, verified, embedded, pgs-ocr, bundled) — forces a
+        fresh whisper pass + fresh OS quota shots on replay
+      - the corresponding archive entries (`data/archive/<title>/…/<stem>.srt`
+        + `.zh-tw.srt`) — otherwise Stage 0's archive attach would just
+        pull the same wrong SRT back on the next pipeline run, defeating
+        the whole point of retrying
+
+    Rationale: most `.pipeline-failed` cases the user encounters (whisper
+    polluted, no viable OS candidate) aren't fixable by cheap re-annotate
+    — the failure is baked into cached `_sources/` outputs and the
+    already-mirrored archive. A shallow retry that keeps either would
+    just re-observe the same failure. Deep reset is the honest recovery
+    path; the ~30 min GPU cost is acceptable since retries are rare.
     """
     path = _validate_bt_path(req.path)
     zh_path = path.parent / f"{path.stem}{ZH_SUFFIX}"
-    for target in (path.with_suffix(".srt"), zh_path, *all_failure_sidecar_paths(path)):
+    targets = [path.with_suffix(".srt"), zh_path, *all_failure_sidecar_paths(path)]
+    # Sweep every _sources/<stem>.*.srt for this video.
+    sources_dir = _sources_path(path, "x").parent   # tag arbitrary; dir same
+    if sources_dir.is_dir():
+        stem_prefix = path.stem + "."
+        for f in sources_dir.iterdir():
+            if f.is_file() and f.name.startswith(stem_prefix) and f.suffix == ".srt":
+                targets.append(f)
+    # Nuke the archive mirror for this video so Stage 0 can't hand back
+    # the same wrong SRT on replay.
+    archived = archive_paths_for(path)
+    if archived is not None:
+        targets.extend(archived)
+    for target in targets:
         if target.exists():
             try:
                 target.unlink()

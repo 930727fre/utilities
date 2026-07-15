@@ -11,7 +11,7 @@ from pathlib import Path
 import yt_dlp
 
 from annotate import annotate_srt
-from archive import mirror_to_archive
+from archive import attach_from_archive, mirror_to_archive
 from bt_filter import _sources_path
 from bundled import pick_bundled_min_wer, pick_bundled_smart_plot
 from container_subs import extract_embedded, extract_pgs_ocr, extract_vobsub_ocr
@@ -22,7 +22,7 @@ from srt_source import (
     stamp_pipeline_failed,
 )
 from subs_finder import _parse_filename
-from translator import translate_video_zh
+from translator import ZH_SUFFIX, translate_video_zh
 from subs_verifier import (
     cue_count_ok,
     find_pollution_windows,
@@ -368,9 +368,11 @@ def _run_transcription(job_id: str, staging_mp4: str):
 #   opensubtitles-text — text-search fallback. Drift-prone (different
 #                        release entirely) and metadata can lie (wrong
 #                        S/E in the file we get back). WER catches those.
-# "archive" is tried first so a previously-canonical SRT that survived a
-# delete_torrent + re-download cycle is reused without paying whisper /
-# Sonnet / Gemini costs again. See archive.py for the mirror + lookup rules.
+# Archive is checked at Stage 0 (before this tier ordering applies) and
+# writes canonical directly, bypassing the whole selection cascade so a
+# previously-canonical SRT that survived a delete_torrent + re-download
+# is reused without paying whisper / Sonnet / Gemini costs again.
+# See archive.py for the mirror + lookup rules.
 #
 # Split by whether the tier needs whisper as reference. Whisper-
 # independent tiers are attempted BEFORE whisper — if any hits, we skip
@@ -424,18 +426,21 @@ def _fetch_candidate(
 
 
 def _try_whisper_independent_tiers(video: Path, verified_src: Path) -> str | None:
-    """Try archive → embedded → pgs-ocr in order. These tiers don't
-    need whisper as a reference (archive is prior-verified past
-    pipeline output; embedded / pgs-ocr are same-source content
-    extracted from the mkv container itself), so calling this before
-    whisper lets a hit skip the 10-30 minute GPU pass entirely.
+    """Try embedded → pgs-ocr → vobsub-ocr in order. These tiers don't
+    need whisper as a reference (same-source content extracted from
+    the mkv container itself), so calling this before whisper lets a
+    hit skip the 10-30 minute GPU pass entirely.
+
+    Archive is handled separately at Stage 0 in process_bt_file — it
+    writes directly to canonical (not verified) since archive content
+    is a prior annotated canonical, not a raw candidate.
 
     Cue-count filter drops broken extractions (partial tracks, OCR
     complete failures) cheaply. Winner is copied verbatim to
-    `verified_src` — no alass (archive was aligned in its prior run,
-    embedded / pgs-ocr share the video's timeline by construction).
+    `verified_src` — no alass (embedded / OCR share the video's
+    timeline by construction).
 
-    Returns winning tag or None if all three miss."""
+    Returns winning tag or None if all miss."""
     for tag in _WHISPER_INDEPENDENT_TAGS:
         cand_dest = _sources_path(video, tag)
         # whisper_src is unused by these fetch paths.
@@ -444,12 +449,7 @@ def _try_whisper_independent_tiers(video: Path, verified_src: Path) -> str | Non
         if cand_path is None:
             continue
 
-        # Archive is prior-verified past canonical, guaranteed to have
-        # been full-dialogue length when it was written; skip the
-        # redundant re-check. Embedded / pgs-ocr can produce short output
-        # (forced subs, OCR bomb) that the check catches.
-        if tag != "archive" and not cue_count_ok(cand_path, cand_path.name,
-                                                 video, tag=tag):
+        if not cue_count_ok(cand_path, cand_path.name, video, tag=tag):
             continue
 
         try:
@@ -474,9 +474,9 @@ def _polluted_fallback_pick_candidate(
     discriminate any candidate. Reach for the whisper-dependent tiers
     with plot-check as the accept signal instead.
 
-    Only called after the whisper-independent tiers (archive / embedded
-    / pgs-ocr) already missed — those are tried before whisper runs at
-    all, so by the time this fires they've been ruled out and we're
+    Only called after the whisper-independent tiers (embedded / pgs-ocr
+    / vobsub-ocr) already missed — those are tried before whisper runs
+    at all, so by the time this fires they've been ruled out and we're
     only reaching for bundled + OS.
 
     - `bundled`: LLM smart-pick narrows the wrapper's srts to one by
@@ -547,12 +547,19 @@ def process_bt_file(job_id: str):
     a two-stage source-selection process, each writing to `_sources/`
     and only the final annotated text landing at the canonical path.
 
+      Stage 0. Archive attach — try `data/archive/<title>/…` for prior
+               canonical `.srt` (already annotated) + `.zh-tw.srt`.
+               Copies whatever exists directly to canonical location.
+               Same code path as bt_filter's wrapper-arrival attach.
+               Downstream stages skip cleanly on canonical / zh presence,
+               so an all-archive hit produces zero LLM cost.
       Stage A. Whisper-independent tiers (fast, no GPU) — try in order:
-                 archive     → /artifact/_sources/.../<stem>.archive.srt
                  embedded    → /artifact/_sources/.../<stem>.embedded.srt
                  pgs-ocr     → /artifact/_sources/.../<stem>.pgs-ocr.srt
+                 vobsub-ocr  → /artifact/_sources/.../<stem>.vobsub-ocr.srt
                Any hit → copy verbatim to verified.srt (no alass — timing
-               is same-source or already-aligned), skip Stage B entirely.
+               is same-source), skip Stage B entirely. Skipped if
+               canonical already exists (Stage 0 already produced it).
       Stage B. Whisper + whisper-dependent tiers (only on Stage A miss):
                  whisper     → <stem>.whisper.srt (GPU 10-30min)
                  bundled     → <stem>.bundled.srt (WER inside pick, or
@@ -564,14 +571,14 @@ def process_bt_file(job_id: str):
                  Winner → alass → verified.srt.
                  All miss + clean whisper → whisper itself promoted to
                  verified.srt. All miss + polluted → `.whisper-polluted`
-                 sidecar, halt.
-      Stage 4. annotate → /artifact/.../<stem>.srt (atomic mv tmp → canonical)
-               Skipped for archive wins — the archive.srt is already an
-               annotated canonical from a prior run.
-      Stage 5. translate → /artifact/.../<stem>.zh-tw.srt (Gemini Flash Lite)
+                 sidecar, halt. Skipped if canonical already exists.
+      Stage 4. annotate → /artifact/.../<stem>.srt (atomic mv tmp → canonical).
+               Skipped when canonical already exists (Stage 0 archive
+               attach, or crash recovery between annotate and translate).
+      Stage 5. translate → /artifact/.../<stem>.zh-tw.srt (Gemini Flash Lite).
                User can't consume English SRT directly, so a video isn't
-               "done" until Chinese exists too. Idempotent skip if
-               .zh-tw.srt already present (crash recovery).
+               "done" until Chinese exists too. Skipped when `.zh-tw.srt`
+               already exists (Stage 0 zh attach, or crash recovery).
 
     State recovery on restart: a pipeline that died mid-run leaves
     whatever it managed to write under `_sources/` (and canonical /
@@ -599,6 +606,7 @@ def process_bt_file(job_id: str):
         return
 
     canonical = video.with_suffix(".srt")
+    zh_path = video.parent / f"{video.stem}{ZH_SUFFIX}"
     whisper_src = _sources_path(video, "whisper")
     verified_src = _sources_path(video, "verified")
 
@@ -606,20 +614,35 @@ def process_bt_file(job_id: str):
     job["updated_at"] = _now()
     upsert_job(job)
 
+    # ── Stage 0. Archive attach ───────────────────────────────────────
+    # The single entry point for archive lookup. Writes canonical + zh
+    # whichever archive has that we don't; downstream stages see the
+    # files exist and skip cleanly. Handles all three scenarios
+    # uniformly: first-time download (miss → falls through to whisper),
+    # re-download of previously-archived content (hit → attach + skip
+    # everything), deep-↻ retry (retry endpoint nuked archive too, so
+    # no chance of pulling back the same wrong SRT).
+    if not canonical.exists() or not zh_path.exists():
+        attach_from_archive(video)
+
     winner_tag: str | None = None
 
     # ── Stage A. Whisper-independent tiers ────────────────────────────
-    # archive / embedded / pgs-ocr don't need whisper as a reference
-    # (prior-verified content or same-source extraction). Try them
-    # first — a hit lets us skip the 10-30 min GPU pass entirely.
-    if not verified_src.exists():
+    # embedded / pgs-ocr / vobsub-ocr don't need whisper as a reference
+    # (same-source extraction from the mkv container). Try them first —
+    # a hit lets us skip the 10-30 min GPU pass entirely. Archive is
+    # handled at Stage 0 above (writes canonical directly, not verified).
+    if not verified_src.exists() and not canonical.exists():
         winner_tag = _try_whisper_independent_tiers(video, verified_src)
 
     if _is_job_deleted(job_id):
         return
 
     # ── Stage B. Whisper + whisper-dependent tiers ────────────────────
-    if winner_tag is None and not verified_src.exists():
+    # Skip entirely when canonical already exists (Stage 0 archive
+    # attach handled it) — annotate is a no-op, and translate reads
+    # canonical directly, not verified.srt.
+    if winner_tag is None and not verified_src.exists() and not canonical.exists():
         if not whisper_src.exists():
             try:
                 run_whisper(video, whisper_src,

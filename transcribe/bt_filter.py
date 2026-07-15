@@ -746,33 +746,12 @@ def filter_wrapper(wrapper: Path) -> None:
         return
 
     # ── 3. Sentinel + manifest ────────────────────────────────────────
-    # Written BEFORE archive attach so that per-file notify_success calls
-    # inside attach can look up the wrapper via sentinel scan. If a crash
-    # lands between sentinel write and attach completion, the wrapper is
-    # marked filtered — remaining un-attached files fall through to the
-    # normal pipeline (whisper + annotate) via _scan_bt's has_srt check.
+    # bt_filter's job ends here: classify + hardlink + sentinel. It does
+    # NOT touch SRTs — archive attach is handled by process_bt_file's
+    # Stage 0 for every video uniformly, so this module stays focused on
+    # "wrapper → /artifact layout" and nothing else.
     # No delete pass — /bt/ is read-only to us. Bonus content (videos
     # not hardlinked) simply doesn't get hardlinked; it stays in /bt for
     # aria2 to keep seeding and the user can remove the bt-side wrapper
     # when they're done with the torrent.
     _write_sentinel(wrapper.name, canonical_videos)
-
-    # ── 4. Archive attach ────────────────────────────────────────────
-    # For each canonical, if `/archive/<canonical_show>/` exists (direct
-    # string match on the folder name — canonical title is TMDb-pinned so
-    # cross-run drift is negligible), copy the matching SRT next to the
-    # canonical. Downstream `_scan_bt` sees `has_srt=True` and skips
-    # whisper + annotate for the video. Each successful attach fires
-    # notify_success via the notifier, which checks wrapper-terminal
-    # state — the last attach in an all-archive wrapper naturally fires
-    # the wrapper summary, no separate trigger needed. Lazy import
-    # avoids circular: archive.py imports ARTIFACT_ROOT from this module.
-    from archive import attach_wrapper_from_archive
-    try:
-        attach_wrapper_from_archive(canonical_videos)
-    except Exception:
-        # Never let archive-attach failure block sentinel + pipeline —
-        # a missed attach just means the video gets full-pipeline
-        # treatment, which is the safe fallback.
-        import traceback
-        traceback.print_exc()

@@ -289,7 +289,7 @@ function RowItem({ item, isExpanded, onToggle, onRetry }) {
         <div style={styles.actionRow}>
           <div style={{ flex: 1 }} />
           <button style={styles.actionBtn}
-            title="Retry (deletes canonical SRT + zh SRT + failure sidecar, re-runs from the failing stage)"
+            title="Deep retry — nukes canonical + zh + failure sidecar + all _sources/ cache + archive mirror. Re-runs pipeline from scratch. ~30 min GPU per video."
             onClick={e => { e.stopPropagation(); onRetry(item.path) }}>↻</button>
         </div>
       )}

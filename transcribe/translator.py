@@ -29,9 +29,11 @@ through unchanged. A new `※ source: llm-translated` sentinel gets
 appended at the file end with timestamp 00:00:00.
 """
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from annotate import parse_srt, render_srt  # reuse the same parser/renderer
 from gemini_client import generate_json
@@ -45,6 +47,13 @@ ZH_SUFFIX = ".zh-tw.srt"
 # the count+index validator catches misalignment in time to retry.
 BATCH_SIZE = 10
 
+# Batch-level parallelism inside translate_to_zh. A ~1-hour episode has
+# ~80 batches at ~2-3 s each; 10 concurrent brings wall-clock from
+# 3-4 min to 20-30 s per episode. Not an "annotate-style single call"
+# situation — annotate is 1 call/episode, translate is 80 calls/episode
+# and must fan-out to be usable at wrapper scale.
+_BATCH_CONCURRENCY = 10
+
 # Sliding context: N cues before the batch and N after, as REFERENCE
 # only (not translated). The batch itself provides 10 cues of internal
 # context, so we keep the additional window small to control prompt
@@ -55,10 +64,16 @@ _CONTEXT_AFTER = 3
 
 _MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-3.1-flash-lite")
 
-# Module-level session for connection reuse across serial batches within
-# a single translate_to_zh call. Default `requests.Session` pool sizes
-# are ample for serial requests.
+# Module-level session for connection reuse across the concurrent
+# batches within a translate_to_zh call. Default `requests.Session`
+# caps the per-host pool at 10 — matches _BATCH_CONCURRENCY so no
+# in-flight batch has to wait for a socket, but explicit sizing keeps
+# the contract obvious if _BATCH_CONCURRENCY ever changes.
 _http_session = requests.Session()
+_adapter = HTTPAdapter(pool_connections=_BATCH_CONCURRENCY,
+                       pool_maxsize=_BATCH_CONCURRENCY)
+_http_session.mount("https://", _adapter)
+_http_session.mount("http://", _adapter)
 
 
 def _get_session() -> requests.Session:
@@ -237,20 +252,22 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
     batches = [translate_positions[i:i + BATCH_SIZE]
                for i in range(0, len(translate_positions), BATCH_SIZE)]
 
-    # Translate batches serially. A ~1-hour episode has ~80 batches at
-    # ~2-3 s each → 3-4 min per video. The pipeline executor already
-    # serializes videos (max_workers=1), so intra-video parallelism
-    # gives no wall-clock win at the wrapper level, and serial keeps
-    # the code + failure model dead simple. Each batch that raises is
-    # swallowed as an empty dict — missing cues keep their English
-    # line, matching partial-coverage semantics elsewhere.
+    # Fan out batches — they're independent (each carries its own
+    # sliding-window context), so pool concurrency gives roughly linear
+    # speedup up to the Gemini quota / per-host connection pool.
+    # Per-batch exceptions are swallowed as empty dict: missing cues
+    # keep their English line, matching partial-coverage semantics
+    # elsewhere.
     translations: dict[int, list[str]] = {}
-    for batch in batches:
-        try:
-            batch_result = _translate_batch(cues, batch)
-        except Exception:
-            batch_result = {}
-        translations.update(batch_result)
+    with ThreadPoolExecutor(max_workers=_BATCH_CONCURRENCY,
+                             thread_name_prefix="translator-batch") as pool:
+        futures = [pool.submit(_translate_batch, cues, batch) for batch in batches]
+        for fut in as_completed(futures):
+            try:
+                batch_result = fut.result()
+            except Exception:
+                batch_result = {}
+            translations.update(batch_result)
 
     # Apply translations back. Cues we didn't translate (sentinels) or
     # cues Gemini dropped keep their original English lines — partial

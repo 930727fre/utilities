@@ -142,7 +142,7 @@ docker compose up -d --build
 | `GET`  | `/api/bt/torrents` | One entry per wrapper folder + its phase (`downloading` / `seeding` / `done` / `orphaned`) |
 | `DELETE` | `/api/bt/torrents/{wrapper}` | Kill the subprocess (if running) + rmtree the wrapper folder |
 | `POST` | `/api/bt/transcribe` | `{path}`: manually trigger whisper on a bt file (background loop already handles this; useful for power/curl override) |
-| `POST` | `/api/bt/retry` | `{path}`: clear canonical SRT + zh-tw SRT + `.pipeline-failed` sidecar so the reconciler replays the pipeline. Cached `_sources/` candidates are preserved for cheap replay (re-annotate + re-translate only, no GPU re-pass) |
+| `POST` | `/api/bt/retry` | `{path}`: deep reset — nukes canonical + zh-tw + `.pipeline-failed` + every `_sources/<stem>.*.srt` cache entry + archive mirror for this video, so the reconciler replays the pipeline from scratch (fresh whisper + fresh OS quota shots + fresh annotate + fresh translate). Archive nuke is required — otherwise Stage 0's archive attach would just pull the same wrong SRT back. Rare action; cheap-replay path via `_sources/` cache is intentionally not exposed |
 
 ## Job states
 
@@ -159,7 +159,7 @@ Crashed `PENDING` / `DOWNLOADING` / `TRANSCRIBING` / `ANNOTATING` jobs flip to `
 
 ## SRT pipeline (bt path)
 
-Two-stage source selection. **Stage A** tries three trust tiers (archive / embedded / pgs-ocr) that don't need a whisper reference — prior canonical or same-source content is verifiable by construction. **Stage B** runs whisper only when Stage A misses, then uses it both as WER reference for the release-external tiers (bundled / OS) and as pollution-loop detector. Most torrents that ship embedded English text or PGS never reach Stage B, saving 10-30 min of GPU per video. Each stage's output is cached under `/artifact/_sources/`, so any partial progress survives crashes / restarts — the pipeline picks up at the first stage whose output is missing.
+Three-tier source selection. **Stage 0** checks `data/archive/` for a prior canonical + zh at the exact matching path — if hit, files land directly at canonical and the rest of the pipeline short-circuits at the "skip when file exists" checks. **Stage A** tries three trust tiers (embedded / pgs-ocr / vobsub-ocr) that don't need a whisper reference — same-source content is verifiable by construction. **Stage B** runs whisper only when Stage A misses, then uses it both as WER reference for the release-external tiers (bundled / OS) and as pollution-loop detector. Most torrents that ship embedded English text or PGS never reach Stage B, saving 10-30 min of GPU per video. Each stage's output is cached under `/artifact/_sources/` (or archive, for Stage 0), so any partial progress survives crashes / restarts — the pipeline picks up at the first stage whose output is missing.
 
 ```
 1. bt_filter (Opus + web_search, one call per wrapper, at torrent-finish time)
@@ -179,24 +179,26 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
      → hardlinks main-feature videos into Movies/ or TV/
      (subtitles NOT touched here — discovered at step 3)
 
-2. Stage A — Whisper-independent tiers (fast, no GPU)
+2. Stage 0 — Archive attach (no LLM, no GPU)
+     Look up `data/archive/<title>/<same rel path>/<stem>.srt`
+     (and `.zh-tw.srt` sibling) by direct path match — archive is
+     populated by `mirror_to_archive` on every canonical write, so
+     stems align exactly for re-downloads. If found, copy directly
+     to canonical + zh sibling. Downstream stages check "does file
+     already exist?" and skip cleanly, so an all-archive hit means
+     Stage A / B / 4 / 5 all no-op. Zero LLM cost, zero GPU cost.
+     Miss (fresh title, or user deleted archive entry via deep ↻)
+     falls through to Stage A.
+
+3. Stage A — Whisper-independent tiers (fast, no GPU)
      Tries three tiers in order; ANY hit copies verbatim to
      _sources/<stem>.verified.srt and skips Stage B entirely.
      No WER, no alass — content trust is a construction guarantee
-     (prior canonical, or same-source with the video). Cue-count
-     prefilter (≥ 100 cues) catches broken extractions.
+     (same-source with the video). Cue-count prefilter (≥ 100
+     cues) catches broken extractions. Skipped entirely when
+     Stage 0 already wrote canonical.
 
-   2a. archive → _sources/<stem>.archive.srt
-       Look up prior-verified canonical in data/archive/. Gemini
-       Flash Lite does fuzzy title match against archive folder
-       names (handles LLM canonical drift, translations, format
-       rewrites). Strict SxxExx regex picks the episode file inside
-       the matched folder. ~$0.0005/call. If found, copy directly
-       to verified.srt AND skip annotation at the final stage —
-       archive SRTs are pre-annotated from their earlier canonical
-       lifetime.
-
-   2b. embedded → _sources/<stem>.embedded.srt
+   3a. embedded → _sources/<stem>.embedded.srt
        ffprobe enumerates subtitle streams; the first English (or
        und-fallback) text-codec stream (subrip, mov_text, webvtt,
        ass) gets ffmpeg-extracted with `-c:s srt` so any text
@@ -204,7 +206,7 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
        group authored both), so trust is warranted without a
        content check.
 
-   2c. pgs-ocr → _sources/<stem>.pgs-ocr.srt
+   3b. pgs-ocr → _sources/<stem>.pgs-ocr.srt
        If no text subtitle stream exists but a PGS (bitmap) stream
        does, ffmpeg copies the PGS bitstream to a tempfile (raw
        .sup) and feeds it through `pgsrip → tesseract` (English
@@ -212,7 +214,7 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
        rendering; OCR errors on italics + music glyphs but readable
        enough that Sonnet annotation is unaffected.
 
-   2d. vobsub-ocr → _sources/<stem>.vobsub-ocr.srt
+   3c. vobsub-ocr → _sources/<stem>.vobsub-ocr.srt
        Last-resort same-source lane for older Blu-ray rips that
        preserved the original DVD-era VobSub track instead of
        stripping it or re-OCRing to PGS. mkvextract demuxes the
@@ -224,7 +226,7 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
        far better than whisper ASR for content match. Common on
        Friends x265 Silence and other older sitcom/drama rips.
 
-3. whisper (only reached when Stage A misses)
+4. whisper (only reached when Stage A misses)
      HTTP to shared service, GPU-gated (10-30 min per video).
      → _sources/<stem>.whisper.srt
 
@@ -233,7 +235,7 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
      Torrents that ship embedded English text or PGS (most
      BluRay/WEB-DL rips) never see this stage.
 
-4. Pollution window detection
+5. Pollution window detection
      `find_pollution_windows` scans whisper for hallucination loops
      (≥10 consecutive identical short cues, the classic "No.×N" /
      "Thank you.×N" signature). Empty result = clean whisper, WER
@@ -252,13 +254,13 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
      movie can have 20% of its runtime eaten by "Hey." loops in
      silent scenes and still test "under threshold" on time
      coverage while the transcript is 80% pollution. WER is
-     disabled; Stage B falls back to the plot-check loop (step 6).
+     disabled; Stage B falls back to the plot-check loop (step 7).
 
-5. Whisper-dependent tiers (normal — WER path)
+6. Whisper-dependent tiers (normal — WER path)
      Runs when pollution stays under 50%. Tries bundled → OS hash →
      OS text, each with WER as the accept signal inside its fetch:
 
-   5a. bundled → _sources/<stem>.bundled.srt
+   6a. bundled → _sources/<stem>.bundled.srt
        Scans the bt-side wrapper for every `.srt`, `.ass`, `.ssa`.
        No filename heuristics — content-based selection. ASS/SSA
        get ffmpeg-converted to SRT (override tags stripped) in a
@@ -272,17 +274,17 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
        before the correct one is iterated to; picking the lowest score
        removes the ordering dependency.
 
-   5b. opensubtitles-hash → _sources/<stem>.opensubtitles-hash-N.srt
+   6b. opensubtitles-hash → _sources/<stem>.opensubtitles-hash-N.srt
        Exact video-hash match on OpenSubtitles. k-try: download
        slot 1, WER pass = done; else slot 2, etc. Bound by
        `OS_MAX_TRIES`. No metadata prefilter — WER is the trust
        gate, and uploaders have been observed spoofing OS metadata
        (`release` / S+E fields) to game any metadata check anyway.
 
-   5c. opensubtitles-text → _sources/<stem>.opensubtitles-text-N.srt
+   6c. opensubtitles-text → _sources/<stem>.opensubtitles-text-N.srt
        Text-search fallback. Same k-try semantics as hash.
 
-     Winner from any of 5a-5c goes through alass to align against
+     Winner from any of 6a-6c goes through alass to align against
      the video's audio → _sources/<stem>.verified.srt.
 
      All three miss + clean whisper → cp whisper.srt → verified.srt.
@@ -290,9 +292,9 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
      bail, so scrub was attempted but WER couldn't salvage) →
      `<stem>.whisper-polluted` sidecar, halt. See State model.
 
-6. Whisper-dependent tiers (polluted — plot-check path)
-     Runs only when pollution > 50% (WER disabled at step 4).
-     Same tiers as step 5 but different accept callback:
+7. Whisper-dependent tiers (polluted — plot-check path)
+     Runs only when pollution > 50% (WER disabled at step 5).
+     Same tiers as step 6 but different accept callback:
      `verify_by_plot` (Sonnet 4.6 + web_search, ~$0.02/call). Reads
      the candidate's full dialogue (timestamps stripped, ~10-15K
      tokens for a TV episode) and decides whether it matches the
@@ -313,21 +315,22 @@ Two-stage source selection. **Stage A** tries three trust tiers (archive / embed
 
      All three miss → `<stem>.whisper-polluted` sidecar, halt.
 
-7. Annotation (Sonnet) — reads _sources/<stem>.verified.srt, returns
+8. Annotation (Sonnet) — reads _sources/<stem>.verified.srt, returns
    annotated SRT text. NO marker cue inserted.
      → atomic write to /artifact/.../<stem>.srt (canonical)
-     SKIPPED when Stage A archive tier won: verified.srt is already
-     an annotated SRT from a previous run, so we copy it straight to
-     canonical + promote sibling zh-tw if the archive has one. Skips
-     the Sonnet annotate + Gemini translate calls (~$0.05-0.10 per
-     episode). Archive tier itself spends one tiny Gemini call for
-     title matching (~$0.0005). See `archive.py`.
+     SKIPPED when canonical already exists (Stage 0 archive attach
+     put it there, or crash recovery between annotate and translate).
+     No LLM double-run — archive SRTs are pre-annotated from their
+     earlier canonical lifetime; we trust that.
 
-8. Mirror to data/archive/ (only when a non-archive tier wrote canonical)
-     → data/archive/<title>/<season>/<stem>.srt
-     Auto-preserves every English + Chinese canonical SRT the pipeline
-     ever produces, so a future delete_torrent + re-download hits the
-     archive tier at Stage A and short-circuits.
+9. Chinese translation (Gemini Flash Lite) — reads canonical `.srt`,
+   writes `<stem>.zh-tw.srt`. SKIPPED when zh-tw already exists.
+
+10. Mirror to data/archive/ — happens INSIDE step 8 (English write)
+    and step 9 (zh write), not as a separate step. Auto-preserves
+    every English + Chinese canonical the pipeline ever produces, so
+    a future delete_torrent + re-download hits Stage 0 archive attach
+    and short-circuits the whole pipeline.
 ```
 
 Canonical SRT existence IS the "fully done" signal — no marker reads anywhere. Atomic write (tmp file + rename) means any downstream reader (Jellyfin scan, Infuse browse) sees either the prior file or the new fully-annotated file, never a half-written intermediate.
@@ -358,9 +361,11 @@ canonical /artifact/.../<stem>.srt exists       → done; skip
                                                    _sources/ stage
 ```
 
-Failure sidecars are extension-less plain-text files holding the error reason — Jellyfin / Infuse never load them as subtitles, but `cat <stem>.whisper-failed` (or `.whisper-polluted`, `.annotate-failed`) shows you what broke. The UI ↻ button clears canonical + every sidecar; cached `_sources/` files are preserved so replay only re-does the missing stages.
+Failure sidecars are extension-less plain-text files — Jellyfin / Infuse never load them as subtitles, but `cat <stem>.pipeline-failed` shows the `<kind>: <reason>` body inside. The UI ↻ button is a **deep reset**: nukes canonical + zh + sidecar + every `_sources/<stem>.*.srt` cache entry, forcing the pipeline to re-run from whisper. Rare action; the cheap-replay path (preserve `_sources/`, only re-do missing stages) is intentionally not exposed via UI — most `.pipeline-failed` cases in practice are whisper-polluted or no-viable-OS-candidate, both of which need `_sources/` invalidation to have any chance of a different outcome.
 
-Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch them. Drop your srt anywhere inside `/bt/<wrapper>/` if you want the bundled tier to pick it up on the next scan (and to get the automatic annotation pass) — filename doesn't need to match the video; WER content-match will find it.
+Manual SRT drops at the canonical path are trusted as final — pipeline doesn't touch English. If you found a good SRT online and want to skip whisper entirely, `cp` it directly to `/artifact/Movies/<title>/<title>.srt` (or the TV equivalent). Reconciler next tick sees `has_srt=True + has_zh_srt=False` → dispatches → Stage 0 archive attach is a no-op → Stage A/B/4 skip → Stage 5 translates → done. If you drop both `.srt` and `.zh-tw.srt`, reconciler sees both, skips everything. Archive doesn't need touching — the next canonical write mirrors your dropped SRT there automatically for future re-downloads.
+
+Drop your srt anywhere inside `/bt/<wrapper>/` if you want the bundled tier to pick it up during a normal pipeline run (and to get the automatic annotation pass) — filename doesn't need to match the video; WER content-match will find it.
 
 ## Rollback granularity
 
@@ -409,12 +414,12 @@ Each batch call carries 3 cues before + 3 cues after the target batch as REFEREN
 Per video:
 1. Read sibling `<stem>.srt` (the annotated English transcript this pipeline just wrote).
 2. Identify cues to translate (skip `※`-prefixed sentinels — they pass through verbatim).
-3. Chunk into 10-cue batches; process batches serially, each with sliding-window context + forced-JSON array output keyed by the input cue indices.
+3. Chunk into 10-cue batches; fan out via `ThreadPoolExecutor(max_workers=10)` — batches are independent (each carries its own sliding-window context), so ~80 batches per episode finish in ~20-30 s wall-clock instead of ~3-4 min serial. Each batch: sliding-window context + forced-JSON array output keyed by the input cue indices.
 4. Validate per batch: returned cue indices must cover the input batch. On mismatch, retry once before accepting partial coverage (missing cues keep their English line).
 5. Apply translations back in place.
 6. Write `<stem>.zh-tw.srt` next to the video + mirror to `data/archive/` for delete_torrent-safe preservation.
 
-Cost: ~$0.01 per video, ~3-4 min per video for ~80 batches at ~2-3 s each. Runs on the pipeline executor's single worker thread — no separate pool, no intra-video parallelism (`process_bt_file` already serializes videos, so batch-level parallelism would give no wrapper-level wall-clock win).
+Cost: ~$0.01 per video, ~20-30 s wall-clock. Batch-level fan-out is the only meaningful speedup lever here — annotate uses a 800-cue chunk size so it's naturally 1 API call per episode, but translate is dense (every cue must return a translation, with strict index alignment) so BATCH_SIZE has to stay small.
 
 ## Known limitations
 
