@@ -1039,13 +1039,20 @@ def _run_pending_filter():
             filter_wrapper(wrapper)
         except Exception as exc:
             traceback.print_exc()
-            # filter_wrapper's own known-failure paths all fire
-            # notify_filter_failure + write empty sentinel before
-            # returning. This outer catch handles unexpected exceptions
-            # (bug, OOM, disk full) that escaped those — surface them
-            # via Telegram so the user knows the wrapper is stuck.
+            # filter_wrapper's own known-failure paths all write an empty
+            # sentinel + fire notify_filter_failure before returning.
+            # An unexpected exception here (bug, OOM, disk full) escaped
+            # those, leaving no sentinel — without one, the next scan
+            # tick would re-run filter_wrapper, hit the same exception,
+            # notify again, forever. Symmetric to _catch_unhandled in
+            # tasks.py: mark + notify.
+            from bt_filter import _write_sentinel
+            from notifier import notify_filter_failure
             try:
-                from notifier import notify_filter_failure
+                _write_sentinel(wrapper.name, [])
+            except Exception:
+                pass
+            try:
                 notify_filter_failure(wrapper.name, f"unexpected exception: {exc}")
             except Exception:
                 pass
