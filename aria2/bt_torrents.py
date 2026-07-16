@@ -351,18 +351,22 @@ def _torrent_info(data: bytes) -> dict:
 def probe(magnet: str, timeout_sec: int = PROBE_TIMEOUT_SEC) -> dict:
     """Fetch the magnet's `.torrent` metadata WITHOUT downloading the
     payload files. Returns `{size_bytes, name}` on success. Raises
-    `TimeoutError` if metadata doesn't arrive within timeout_sec.
+    `TimeoutError` (misleadingly-named for any "no .torrent produced"
+    outcome) with a stderr tail from aria2c so the caller can see why.
 
     Under the hood: spawn an aria2c with `--bt-metadata-only=true
     --bt-save-metadata=true --seed-time=0` into a scratch dir, poll
     for the `.torrent` file, then kill + cleanup regardless of outcome.
-    Metadata typically lands in 5-30 s from a healthy DHT / trackers;
-    90 s is generous.
+    Metadata typically lands in 5-30 s from a healthy DHT / trackers.
     """
     # Scratch dir lives OUTSIDE BT_LIBRARY so the shared /data/bt mount
     # never gets a transient probe folder that transcribe's reconciler
     # could see. /tmp is container-local and gets cleaned automatically.
     scratch = Path(tempfile.mkdtemp(prefix="probe-", dir="/tmp"))
+    # Buffer stderr in a background thread — aria2c can wedge on a full
+    # pipe if we never drain it, and we want the tail available for the
+    # error message when things go wrong.
+    stderr_chunks: list[str] = []
     try:
         cmd = [
             "aria2c",
@@ -381,16 +385,30 @@ def probe(magnet: str, timeout_sec: int = PROBE_TIMEOUT_SEC) -> dict:
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
         )
+
+        def _drain() -> None:
+            assert proc.stderr is not None
+            for raw in proc.stderr:
+                text = raw.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    stderr_chunks.append(text)
+                    print(f"[aria2c probe] {text}", flush=True)
+
+        threading.Thread(target=_drain, daemon=True).start()
+
         deadline = time.time() + timeout_sec
         torrent_file: Path | None = None
         try:
             while time.time() < deadline:
                 time.sleep(0.5)
-                found = next(iter(scratch.glob("*.torrent")), None)
+                # Some aria2c builds tuck the .torrent into a subdir
+                # (e.g. via download-file-side metadata); rglob covers
+                # both direct and nested placement.
+                found = next(iter(scratch.rglob("*.torrent")), None)
                 if found is not None and found.stat().st_size > 0:
                     torrent_file = found
                     break
-                # If aria2c has already exited without producing a .torrent,
+                # If aria2c already exited without producing a .torrent,
                 # no point waiting further.
                 if proc.poll() is not None and torrent_file is None:
                     break
@@ -403,9 +421,12 @@ def probe(magnet: str, timeout_sec: int = PROBE_TIMEOUT_SEC) -> dict:
                     proc.kill()
 
         if torrent_file is None:
+            # Include stderr tail so the caller (and Telegram) sees the
+            # actual reason instead of a generic "timeout" line.
+            tail = " | ".join(stderr_chunks[-5:]) if stderr_chunks else "(no stderr)"
             raise TimeoutError(
-                f"magnet metadata not received within {timeout_sec}s "
-                "(dead trackers / no DHT peers / bad magnet)"
+                f"no .torrent produced within {timeout_sec}s; "
+                f"aria2c rc={proc.returncode}; stderr tail: {tail}"
             )
         return _torrent_info(torrent_file.read_bytes())
     finally:
