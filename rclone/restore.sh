@@ -11,13 +11,6 @@
 # can be resumed by re-running.
 set -eu
 
-if [ $# -ne 1 ]; then
-    echo "usage: $0 <wrapper_name>" >&2
-    echo "       (see wrapper list with: docker compose run --rm rclone lsd gdrive-crypt:transcribe/)" >&2
-    exit 1
-fi
-WRAPPER="$1"
-
 cd "$(dirname "$0")"
 
 if [ ! -f config/rclone.conf ]; then
@@ -29,6 +22,24 @@ if [ ! -f config/rclone.conf ]; then
     fi
     exit 1
 fi
+
+# No args → list available wrappers on the remote so the user can pick.
+# Restore is per-wrapper by design (see header comment), so we don't
+# accept a bulk-restore mode — but listing is the natural first step
+# when you don't remember the wrapper name.
+if [ $# -eq 0 ]; then
+    echo "Available wrappers on gdrive-crypt:transcribe/ :"
+    docker compose run --rm rclone lsd gdrive-crypt:transcribe/
+    echo ""
+    echo "usage: $0 <wrapper_name>"
+    exit 0
+fi
+
+if [ $# -ne 1 ]; then
+    echo "usage: $0 <wrapper_name>" >&2
+    exit 1
+fi
+WRAPPER="$1"
 
 docker compose run --rm rclone copy \
     "gdrive-crypt:transcribe/${WRAPPER}" \
