@@ -215,7 +215,13 @@ def annotate_srt(
         already = ", ".join(sorted(seen_entities)) if seen_entities else "(none yet)"
         prompt = PROMPT_TEMPLATE % (already, chunk_text)
         result = generate_json(prompt, ANNOTATION_SCHEMA, temperature=0.2,
-                               caller="annotate", target=srt_path.stem)
+                               caller="annotate",
+                               # Strip both `.srt` AND `.verified` so this
+                               # target string matches translate's target
+                               # (which reads the canonical .srt next to
+                               # the video). Enables clean per-episode
+                               # aggregation in the LLM-usage log.
+                               target=srt_path.with_suffix("").stem)
         for entry in result:
             try:
                 cue_idx = int(entry["cue"])
