@@ -83,9 +83,12 @@ PROCESSED_DIR = ARTIFACT_ROOT / "_processed"
 # re-running whisper. See `_sources_path` for the per-video layout.
 SOURCES_DIR = ARTIFACT_ROOT / "_sources"
 
-# Filesystem-unsafe characters that need stripping from LLM-returned
-# titles before they become path segments.
-_INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# Linux-only stack (ext4 → Jellyfin server → API-mediated clients),
+# so only the two truly path-breaking chars need guarding: `/` (path
+# separator) and `\x00` (null byte). Everything else — colons, quotes,
+# question marks, brackets, etc. — is legal on ext4 and round-trips
+# safely through every stage (pathlib, subprocess with argv lists,
+# aria2, rclone crypt-encoded upload). See `_safe_title`.
 
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".ts", ".webm"}
 SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".sup"}
@@ -341,12 +344,16 @@ def _summarize_dir(subdir: Path, wrapper: Path, lines: list[str], depth: int) ->
 
 
 def _safe_title(title: str) -> str:
-    """Strip filesystem-unsafe characters from an LLM-returned title.
-    Colons / slashes / etc. get dropped; whitespace collapses. Returns a
-    fallback 'Untitled' if the result is empty so callers always have a
-    usable path segment."""
-    s = _INVALID_FS_CHARS.sub("", title).strip()
-    s = re.sub(r"\s+", " ", s)
+    """Sanitize an LLM-returned title for use as a path segment.
+
+    Guards only what actually breaks Linux ext4: `/` (path separator)
+    and `\\x00` (null byte). Everything else the LLM returns —
+    including TMDb-canonical colons like "Spider-Man: Into the
+    Spider-Verse" — lands verbatim, which is what Jellyfin's
+    metadata match wants anyway. Empty result falls back to
+    "Untitled" so callers always have a usable segment."""
+    s = title.replace("/", "_").replace("\x00", "")
+    s = re.sub(r"\s+", " ", s).strip()
     return s or "Untitled"
 
 
@@ -416,9 +423,10 @@ def _sources_path(canonical_video: Path, source_tag: str) -> Path:
 
 def _sentinel_for(wrapper_name: str) -> Path:
     """Sentinel file path for a bt wrapper, in /artifact/_processed/.
-    Wrapper-name sanitisation matches _safe_title's so different wrapper
-    names can't collide (rare in practice, defence in depth)."""
-    safe = _INVALID_FS_CHARS.sub("_", wrapper_name)[:180] or "wrapper"
+    Same Linux-minimal sanitisation as _safe_title; 180-byte length cap
+    stays inside ext4's 255-byte filename limit even after the
+    ".filtered" suffix."""
+    safe = wrapper_name.replace("/", "_").replace("\x00", "")[:180] or "wrapper"
     return PROCESSED_DIR / f"{safe}.filtered"
 
 
