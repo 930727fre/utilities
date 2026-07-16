@@ -90,6 +90,51 @@ while [ "$i" -le "$END" ]; do
 done
 echo ""
 
+# ── Disk headroom preflight ────────────────────────────────────────────
+# Sum the selected wrappers' remote size (same --include list `rclone
+# copy` will use below), compare against local /bt/ headroom. Reject
+# if the download would push the mount past 90% used. Mirrors the
+# transcribe /api/bt/magnet policy — restore is another vector for
+# filling the disk.
+echo "Checking disk headroom..."
+size_json=$(docker compose run --rm rclone size --json \
+    gdrive-crypt:transcribe "$@" 2>/dev/null)
+size_bytes=$(printf '%s' "$size_json" | \
+    grep -oE '"bytes"[[:space:]]*:[[:space:]]*[0-9]+' | \
+    grep -oE '[0-9]+' | head -1)
+
+if [ -z "$size_bytes" ] || [ "$size_bytes" -eq 0 ]; then
+    echo "ERROR: could not determine remote size for selected wrappers" >&2
+    echo "  raw output: $size_json" >&2
+    exit 1
+fi
+
+bt_host=$(realpath ../transcribe/data/bt 2>/dev/null)
+if [ -z "$bt_host" ] || [ ! -d "$bt_host" ]; then
+    echo "ERROR: local /bt path not found at ../transcribe/data/bt" >&2
+    exit 1
+fi
+
+df_line=$(df -B1 --output=used,size "$bt_host" | tail -1)
+used=$(echo "$df_line" | awk '{print $1}')
+total=$(echo "$df_line" | awk '{print $2}')
+threshold=90
+
+if [ $(( (used + size_bytes) * 100 )) -gt $((total * threshold)) ]; then
+    awk -v u="$used" -v s="$size_bytes" -v t="$total" -v th="$threshold" \
+        'BEGIN {
+            proj = (u + s) / t * 100
+            curr = u / t * 100
+            gb = s / 1e9
+            printf "\nREJECTED: selected wrappers total %.1f GB.\n", gb
+            printf "  Would push /bt to %.1f%% (limit %d%%). Currently %.1f%%.\n", proj, th, curr
+            print "  Delete some torrents first, or narrow the range."
+        }' >&2
+    exit 1
+fi
+
+echo ""
+
 docker compose run --rm rclone copy \
     gdrive-crypt:transcribe /bt \
     "$@" \
