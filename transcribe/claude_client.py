@@ -57,7 +57,8 @@ def generate_json(prompt: str, response_schema: dict, *,
                   max_tokens: int = DEFAULT_MAX_TOKENS,
                   timeout: tuple = (10, 180),
                   web_search: bool = False,
-                  web_search_max_uses: int = 3) -> Any:
+                  web_search_max_uses: int = 3,
+                  caller: str = "", target: str = "") -> Any:
     import requests
 
     model = model or os.environ.get("ANTHROPIC_MODEL", DEFAULT_MODEL)
@@ -128,9 +129,23 @@ def generate_json(prompt: str, response_schema: dict, *,
             raise RuntimeError(f"Anthropic {r.status_code}: {r.text[:1000]}")
 
         try:
-            tool_input = _extract_tool_input(r.json())
+            resp_data = r.json()
+            tool_input = _extract_tool_input(resp_data)
         except (RuntimeError, ValueError) as e:
             raise RuntimeError(f"Anthropic response parse failed: {e}; body={r.text[:1000]}")
+        if caller:
+            # Optional per-project accounting hook. Any failure here
+            # (missing usage field, module not present in other repos
+            # that share this client) is swallowed — never break the
+            # actual call.
+            try:
+                from llm_usage import record
+                usage = resp_data.get("usage") or {}
+                record(model=model, caller=caller, target=target,
+                       input_tokens=int(usage.get("input_tokens") or 0),
+                       output_tokens=int(usage.get("output_tokens") or 0))
+            except Exception:
+                pass
         return tool_input["result"] if unwrap else tool_input
 
     raise RuntimeError(f"Anthropic call failed after {MAX_RETRIES} attempts: {last_exc}")

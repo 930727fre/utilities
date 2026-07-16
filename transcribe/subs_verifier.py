@@ -597,6 +597,7 @@ def smart_pick_bundled(
             model=_PICK_MODEL,
             temperature=0.0,
             timeout=(10, 60),
+            caller="bundled_pick", target=str(video_rel),
         )
     except Exception as e:
         print(f"[bundled smart-pick] API error: {e}", flush=True)
@@ -665,6 +666,7 @@ def verify_by_plot(
             web_search=True,
             web_search_max_uses=_PLOT_WEB_SEARCH_MAX_USES,
             timeout=(10, 180),
+            caller="plot_check", target=candidate_srt.stem,
         )
     except Exception as e:
         return False, f"plot-check API error: {e}"

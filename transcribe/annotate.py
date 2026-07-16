@@ -214,7 +214,8 @@ def annotate_srt(
         chunk_text = render_chunk_for_prompt(chunk)
         already = ", ".join(sorted(seen_entities)) if seen_entities else "(none yet)"
         prompt = PROMPT_TEMPLATE % (already, chunk_text)
-        result = generate_json(prompt, ANNOTATION_SCHEMA, temperature=0.2)
+        result = generate_json(prompt, ANNOTATION_SCHEMA, temperature=0.2,
+                               caller="annotate", target=srt_path.stem)
         for entry in result:
             try:
                 cue_idx = int(entry["cue"])

@@ -164,7 +164,8 @@ def _render_cues_block(label: str, cues: list[dict]) -> str:
     return f"{label}:\n{body}"
 
 
-def _translate_batch(cues: list[dict], batch_positions: list[int]) -> dict[int, list[str]]:
+def _translate_batch(cues: list[dict], batch_positions: list[int],
+                     target: str = "") -> dict[int, list[str]]:
     """Translate the cues at `batch_positions` within `cues`. Returns a
     map from cue index (the SRT cue number, not the list position) to
     the translated lines. Missing entries (Gemini dropped them across
@@ -197,7 +198,8 @@ def _translate_batch(cues: list[dict], batch_positions: list[int]) -> dict[int, 
     for attempt in range(2):
         try:
             result = generate_json(prompt, _SCHEMA, temperature=0.0, model=_MODEL,
-                                   session=_get_session())
+                                   session=_get_session(),
+                                   caller="translate", target=target)
         except Exception as e:
             print(f"[translator] batch cues {first}-{last} attempt {attempt+1}/2 "
                   f"raised: {e}", flush=True)
@@ -224,6 +226,7 @@ def _translate_batch(cues: list[dict], batch_positions: list[int]) -> dict[int, 
 
 
 def translate_to_zh(src_srt: Path, out_path: Path) -> None:
+    _target = src_srt.stem
     """Read `src_srt`, translate each cue's dialogue to 繁體中文 in
     batches of `BATCH_SIZE`, write the result to `out_path`. Raises on
     parser / write failure; per-batch API failures silently fall back
@@ -261,7 +264,7 @@ def translate_to_zh(src_srt: Path, out_path: Path) -> None:
     translations: dict[int, list[str]] = {}
     with ThreadPoolExecutor(max_workers=_BATCH_CONCURRENCY,
                              thread_name_prefix="translator-batch") as pool:
-        futures = [pool.submit(_translate_batch, cues, batch) for batch in batches]
+        futures = [pool.submit(_translate_batch, cues, batch, _target) for batch in batches]
         for fut in as_completed(futures):
             try:
                 batch_result = fut.result()

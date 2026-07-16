@@ -54,10 +54,16 @@ def _extract_text(resp_json: dict) -> str:
 
 def generate(prompt: str, *, response_schema: Optional[dict] = None,
              temperature: float = 0.2, model: Optional[str] = None,
-             timeout: tuple = (10, 60), session: Optional[Any] = None) -> str:
+             timeout: tuple = (10, 60), session: Optional[Any] = None,
+             caller: str = "", target: str = "") -> str:
     """Send a single Gemini request. Returns the raw text (JSON string if schema set).
 
     `session` lets callers reuse a connection across many calls (xyt batching).
+
+    `caller` / `target` are optional per-project accounting hints. When
+    both are supplied, the call reports its token usage to `llm_usage`
+    (transcribe-specific; ImportError silently skipped in projects that
+    don't ship that module).
     """
     import requests  # lazy: async-only callers (keyboard) don't need requests installed
 
@@ -75,7 +81,18 @@ def generate(prompt: str, *, response_schema: Optional[dict] = None,
                 time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])
                 continue
             r.raise_for_status()
-            return _extract_text(r.json())
+            resp_data = r.json()
+            text = _extract_text(resp_data)
+            if caller:
+                try:
+                    from llm_usage import record
+                    usage = resp_data.get("usageMetadata") or {}
+                    record(model=model, caller=caller, target=target,
+                           input_tokens=int(usage.get("promptTokenCount") or 0),
+                           output_tokens=int(usage.get("candidatesTokenCount") or 0))
+                except Exception:
+                    pass
+            return text
         except requests.RequestException as e:
             last_exc = e
             time.sleep(RETRY_BACKOFF_SEC[min(attempt, len(RETRY_BACKOFF_SEC) - 1)])

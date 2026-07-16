@@ -955,9 +955,19 @@ async def _bt_reconcile_loop():
               "downloads still active. Set to 1 and restart to resume.", flush=True)
     while True:
         try:
+            # Daily LLM-usage digest (fires once/day past 4am TPE) runs
+            # independent of BT_PIPELINE_ENABLED — we want the summary
+            # even during a "download-only" period so accumulated tokens
+            # from before the switch still get reported.
+            await asyncio.to_thread(_llm_daily_report)
             await asyncio.to_thread(_reconcile_bt_state)
         except Exception:
             traceback.print_exc()
         await asyncio.sleep(BT_SCAN_INTERVAL)
+
+
+def _llm_daily_report() -> None:
+    from llm_usage import maybe_fire_daily_report
+    maybe_fire_daily_report()
 
 

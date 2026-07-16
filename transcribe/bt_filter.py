@@ -692,6 +692,7 @@ def filter_wrapper(wrapper: Path) -> None:
             temperature=0.0,
             web_search=True,
             web_search_max_uses=_WEB_SEARCH_MAX_USES,
+            caller="bt_filter", target=wrapper.name,
         )
     except Exception as e:
         print(f"[filter {short}] LLM call failed ({e}); writing empty sentinel", flush=True)
