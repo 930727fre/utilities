@@ -48,11 +48,19 @@ ZH_SUFFIX = ".zh-tw.srt"
 BATCH_SIZE = 10
 
 # Batch-level parallelism inside translate_to_zh. A ~1-hour episode has
-# ~80 batches at ~2-3 s each; 10 concurrent brings wall-clock from
-# 3-4 min to 20-30 s per episode. Not an "annotate-style single call"
+# ~80 batches at ~2-3 s each; at 40 concurrent the whole thing lands in
+# 2 rounds ≈ 4-6 s wall-clock. Not an "annotate-style single call"
 # situation — annotate is 1 call/episode, translate is 80 calls/episode
 # and must fan-out to be usable at wrapper scale.
-_BATCH_CONCURRENCY = 10
+#
+# Sizing check: on our Gemini paid tier (4000 RPM, 4M TPM, 150K RPD),
+# 40 concurrent × ~2 s/call ≈ 20 RPS ≈ 1200 RPM ≈ 30% of the RPM cap.
+# Comfortable margin against tail-latency spikes and against other
+# pipelines (bt_filter Opus, annotate Sonnet — different vendors, but
+# a shared "budget headroom" mental model). Pushing beyond 40 hits
+# diminishing returns fast (80 batches / 40 concurrent = 2 rounds
+# already, so doubling gives 2 s not 5x).
+_BATCH_CONCURRENCY = 40
 
 # Sliding context: N cues before the batch and N after, as REFERENCE
 # only (not translated). The batch itself provides 10 cues of internal
@@ -65,10 +73,10 @@ _CONTEXT_AFTER = 3
 _MODEL = os.environ.get("TRANSLATE_MODEL", "gemini-3.1-flash-lite")
 
 # Module-level session for connection reuse across the concurrent
-# batches within a translate_to_zh call. Default `requests.Session`
-# caps the per-host pool at 10 — matches _BATCH_CONCURRENCY so no
-# in-flight batch has to wait for a socket, but explicit sizing keeps
-# the contract obvious if _BATCH_CONCURRENCY ever changes.
+# batches within a translate_to_zh call. Pool sized to _BATCH_CONCURRENCY
+# so every in-flight batch has a socket (default requests.Session caps
+# at 10; we routinely exceed that). Explicit sizing keeps the contract
+# obvious if _BATCH_CONCURRENCY ever changes.
 _http_session = requests.Session()
 _adapter = HTTPAdapter(pool_connections=_BATCH_CONCURRENCY,
                        pool_maxsize=_BATCH_CONCURRENCY)
