@@ -10,7 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from bt_filter import (
@@ -464,24 +464,70 @@ def _record_magnet(magnet: str, wrapper: str) -> None:
         print(f"[magnet-history] append failed: {exc}", flush=True)
 
 
-@app.post("/api/bt/magnet", status_code=201)
-async def submit_magnet(req: BtMagnetRequest):
-    """Proxy to the aria2 sidecar's POST /torrents so BT traffic exits
-    through gluetun's VPN tunnel. Response body is passed through
-    verbatim (currently `{"wrapper": "..."}`). Also appends a record
-    of the submission to MAGNET_HISTORY_FILE."""
+DISK_USAGE_MAX_PCT = 90.0
+
+
+@app.post("/api/bt/magnet", status_code=202)
+async def submit_magnet(req: BtMagnetRequest, bg: BackgroundTasks):
+    """Fire-and-forget submit. Returns 202 immediately; the actual
+    probe → disk-check → aria2-submit flow runs in the background and
+    reports rejections / errors to Telegram. On success, the torrent
+    just appears in the UI's next poll of /api/bt/torrents (5-30 s
+    after the probe lands its metadata).
+
+    UX rationale: the probe adds 5-30 s of latency for metadata
+    retrieval; freezing the input field for that long feels broken.
+    User pastes and moves on; Telegram is the escape hatch for the
+    "why didn't it show up?" case."""
     if not req.magnet.startswith("magnet:"):
         raise HTTPException(status_code=400, detail="must be a magnet: URI")
+    bg.add_task(_process_magnet, req.magnet)
+    return {"accepted": True}
+
+
+def _process_magnet(magnet: str) -> None:
+    """Background worker: probe metadata → disk-headroom check → submit
+    to aria2 sidecar, OR Telegram-report the rejection. Never raises
+    (BackgroundTasks would just swallow it into stderr)."""
+    from notifier import _send
+
     try:
-        r = _aria2_client.post("/torrents", json={"magnet": req.magnet})
+        pr = _aria2_client.post("/probe", json={"magnet": magnet}, timeout=120.0)
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"aria2 sidecar unreachable: {exc}")
+        _send(f"Magnet probe failed | aria2 unreachable: {exc}")
+        return
+    if pr.status_code >= 400:
+        detail = _extract_detail(pr) or f"aria2 probe returned {pr.status_code}"
+        _send(f"Magnet probe failed | {detail}")
+        return
+
+    probe_data = pr.json()
+    size_bytes = int(probe_data.get("size_bytes") or 0)
+    name = probe_data.get("name") or "(unknown)"
+
+    du = shutil.disk_usage(BT_ROOT)
+    projected_pct = (du.used + size_bytes) / du.total * 100
+    if projected_pct > DISK_USAGE_MAX_PCT:
+        _send(
+            f"Magnet rejected | {name} | "
+            f"{size_bytes / 1e9:.1f} GB would push /bt to "
+            f"{projected_pct:.1f}% (limit {DISK_USAGE_MAX_PCT:.0f}%, "
+            f"currently {du.used / du.total * 100:.1f}%). "
+            f"Delete some torrents first."
+        )
+        return
+
+    try:
+        r = _aria2_client.post("/torrents", json={"magnet": magnet})
+    except httpx.HTTPError as exc:
+        _send(f"Magnet submit failed | {name} | aria2 unreachable: {exc}")
+        return
     if r.status_code >= 400:
         detail = _extract_detail(r) or f"aria2 sidecar returned {r.status_code}"
-        raise HTTPException(status_code=r.status_code, detail=detail)
+        _send(f"Magnet submit failed | {name} | {detail}")
+        return
     body = r.json()
-    _record_magnet(req.magnet, body.get("wrapper", ""))
-    return body
+    _record_magnet(magnet, body.get("wrapper", ""))
 
 
 @app.get("/api/bt/torrents")

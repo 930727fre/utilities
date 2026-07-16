@@ -27,9 +27,12 @@ the moment all pieces are verified. That's a clean filesystem-level
 "download done" signal we can read directly — no callback plumbing.
 """
 import re
+import shutil
 import struct
 import subprocess
+import tempfile
 import threading
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -295,6 +298,118 @@ def delete(wrapper_name: str) -> None:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+PROBE_TIMEOUT_SEC = 90
+
+
+def _bdecode(data: bytes, pos: int = 0):
+    """Minimal bencode decoder returning (value, next_pos). Enough to
+    parse a .torrent's `info` block for name + size — not a general
+    bencode library. Keys stay as bytes; caller uses b"info", b"length",
+    etc."""
+    c = data[pos:pos + 1]
+    if c == b"d":
+        result: dict = {}
+        pos += 1
+        while data[pos:pos + 1] != b"e":
+            key, pos = _bdecode(data, pos)
+            value, pos = _bdecode(data, pos)
+            result[key] = value
+        return result, pos + 1
+    if c == b"l":
+        arr: list = []
+        pos += 1
+        while data[pos:pos + 1] != b"e":
+            value, pos = _bdecode(data, pos)
+            arr.append(value)
+        return arr, pos + 1
+    if c == b"i":
+        end = data.index(b"e", pos)
+        return int(data[pos + 1:end]), end + 1
+    # length-prefixed byte string:  "<n>:<bytes>"
+    colon = data.index(b":", pos)
+    length = int(data[pos:colon])
+    start = colon + 1
+    return data[start:start + length], start + length
+
+
+def _torrent_info(data: bytes) -> dict:
+    """Extract total size + display name from a .torrent's bencoded bytes."""
+    d, _ = _bdecode(data)
+    info = d.get(b"info") or {}
+    name = info.get(b"name", b"").decode("utf-8", errors="replace")
+    # Single-file torrent has info.length; multi-file has info.files[].length.
+    length = info.get(b"length")
+    if length is not None:
+        return {"size_bytes": int(length), "name": name}
+    files = info.get(b"files") or []
+    total = sum(int((f or {}).get(b"length") or 0) for f in files)
+    return {"size_bytes": total, "name": name}
+
+
+def probe(magnet: str, timeout_sec: int = PROBE_TIMEOUT_SEC) -> dict:
+    """Fetch the magnet's `.torrent` metadata WITHOUT downloading the
+    payload files. Returns `{size_bytes, name}` on success. Raises
+    `TimeoutError` if metadata doesn't arrive within timeout_sec.
+
+    Under the hood: spawn an aria2c with `--bt-metadata-only=true
+    --bt-save-metadata=true --seed-time=0` into a scratch dir, poll
+    for the `.torrent` file, then kill + cleanup regardless of outcome.
+    Metadata typically lands in 5-30 s from a healthy DHT / trackers;
+    90 s is generous.
+    """
+    # Scratch dir lives OUTSIDE BT_LIBRARY so the shared /data/bt mount
+    # never gets a transient probe folder that transcribe's reconciler
+    # could see. /tmp is container-local and gets cleaned automatically.
+    scratch = Path(tempfile.mkdtemp(prefix="probe-", dir="/tmp"))
+    try:
+        cmd = [
+            "aria2c",
+            "--bt-metadata-only=true",
+            "--bt-save-metadata=true",
+            "--seed-time=0",
+            f"--dir={scratch}",
+            "--enable-color=false",
+            "--console-log-level=warn",
+            "--summary-interval=0",
+            magnet,
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+        deadline = time.time() + timeout_sec
+        torrent_file: Path | None = None
+        try:
+            while time.time() < deadline:
+                time.sleep(0.5)
+                found = next(iter(scratch.glob("*.torrent")), None)
+                if found is not None and found.stat().st_size > 0:
+                    torrent_file = found
+                    break
+                # If aria2c has already exited without producing a .torrent,
+                # no point waiting further.
+                if proc.poll() is not None and torrent_file is None:
+                    break
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+        if torrent_file is None:
+            raise TimeoutError(
+                f"magnet metadata not received within {timeout_sec}s "
+                "(dead trackers / no DHT peers / bad magnet)"
+            )
+        return _torrent_info(torrent_file.read_bytes())
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def shutdown() -> None:

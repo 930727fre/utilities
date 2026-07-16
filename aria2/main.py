@@ -2,6 +2,7 @@
 
 Endpoints
     POST   /torrents          {"magnet": "magnet:?..."}         → {"wrapper": "..."}
+    POST   /probe             {"magnet": "magnet:?..."}         → {"size_bytes": N, "name": "..."}
     GET    /torrents                                             → [{name, phase, progress?}, ...]
     DELETE /torrents/{wrapper}                                   → 204
     GET    /health                                               → {"ok": true}
@@ -57,6 +58,21 @@ async def submit(req: MagnetRequest):
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"aria2c launch failed: {exc}")
     return {"wrapper": wrapper}
+
+
+@app.post("/probe")
+async def probe(req: MagnetRequest):
+    """Fetch a magnet's .torrent metadata (size + name) without
+    downloading the payload. Used by transcribe for a disk-headroom
+    preflight before committing to the full download."""
+    if not req.magnet.startswith("magnet:"):
+        raise HTTPException(status_code=400, detail="must be a magnet: URI")
+    try:
+        return bt_torrents.probe(req.magnet)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"aria2c probe failed: {exc}")
 
 
 @app.get("/torrents")
