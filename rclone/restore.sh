@@ -1,14 +1,12 @@
 #!/bin/sh
-# Pull one bt wrapper down from Google Drive (decrypted on the fly).
+# Interactive restore of bt wrappers from Google Drive (decrypted on
+# the fly). Run it, pick from the numbered list, done.
 #
-# Usage: ./restore.sh "<wrapper_name>"
-#
-# Restore is per-wrapper by design — you rarely want to restore
-# everything at once (defeats the "offload for disk space" purpose).
-#
-# Uses `rclone copy` (matches backup.sh) — skips any files already
-# present locally with matching size + mtime, so an interrupted restore
-# can be resumed by re-running.
+# Uses `rclone copy` — skips files already present locally with matching
+# size + mtime, so an interrupted restore can be resumed by re-running.
+# Ranges (`1-5`) fold into a single rclone invocation via `--include`,
+# so 20 wrappers = 1 container start + 1 shared connection pool + 1
+# unified progress bar, not N of each.
 set -eu
 
 cd "$(dirname "$0")"
@@ -23,26 +21,77 @@ if [ ! -f config/rclone.conf ]; then
     exit 1
 fi
 
-# No args → list available wrappers on the remote so the user can pick.
-# Restore is per-wrapper by design (see header comment), so we don't
-# accept a bulk-restore mode — but listing is the natural first step
-# when you don't remember the wrapper name.
-if [ $# -eq 0 ]; then
-    echo "Available wrappers on gdrive-crypt:transcribe/ :"
-    docker compose run --rm rclone lsd gdrive-crypt:transcribe/
-    echo ""
-    echo "usage: $0 <wrapper_name>"
+# --dirs-only + sort gives a stable, one-name-per-line index source.
+# Trailing slash from lsf is stripped so the name matches what
+# `rclone copy --include` expects.
+TMP=$(mktemp)
+trap 'rm -f "$TMP"' EXIT
+docker compose run --rm rclone lsf --dirs-only gdrive-crypt:transcribe/ \
+    2>/dev/null | sed 's|/$||' | sort > "$TMP"
+TOTAL=$(wc -l < "$TMP")
+if [ "$TOTAL" -eq 0 ]; then
+    echo "No wrappers on remote."
     exit 0
 fi
 
-if [ $# -ne 1 ]; then
-    echo "usage: $0 <wrapper_name>" >&2
+echo "Available wrappers on gdrive-crypt:transcribe/ :"
+echo ""
+awk '{printf "  %3d  %s\n", NR, $0}' "$TMP"
+echo ""
+printf "Restore which? (index like 3, or range like 1-5; Enter to cancel): "
+
+if ! IFS= read -r ANSWER; then
+    echo ""
+    echo "Cancelled."
+    exit 0
+fi
+
+if [ -z "$ANSWER" ]; then
+    echo "Cancelled."
+    exit 0
+fi
+
+# Parse: either N or N-M.
+if echo "$ANSWER" | grep -qE '^[0-9]+-[0-9]+$'; then
+    START=$(echo "$ANSWER" | cut -d- -f1)
+    END=$(echo "$ANSWER" | cut -d- -f2)
+elif echo "$ANSWER" | grep -qE '^[0-9]+$'; then
+    START="$ANSWER"
+    END="$ANSWER"
+else
+    echo "ERROR: expected index (e.g. 3) or range (e.g. 1-5), got: $ANSWER" >&2
     exit 1
 fi
-WRAPPER="$1"
+
+if [ "$START" -lt 1 ] || [ "$END" -gt "$TOTAL" ] || [ "$START" -gt "$END" ]; then
+    echo "ERROR: bad range $START-$END (available: 1-$TOTAL)" >&2
+    exit 1
+fi
+
+# Build the rclone arg list: one --include per selected wrapper, so a
+# single rclone process handles the whole batch. `set --` builds the
+# positional args in a way that survives wrapper names with spaces /
+# colons / other legal-Linux chars.
+#
+# Wrapper names commonly contain rclone-glob metachars: `[1080p]`,
+# `[YTS.BZ]`, occasional `*` or `?`. Escape them with a leading `\`
+# so rclone matches them literally, otherwise `--include "[1080p]/**"`
+# is read as a character class and matches nothing.
+echo ""
+echo "Restoring:"
+set --
+i=$START
+while [ "$i" -le "$END" ]; do
+    wrapper=$(sed -n "${i}p" "$TMP")
+    echo "  → $wrapper"
+    escaped=$(printf '%s' "$wrapper" | sed 's/[][*?{}]/\\&/g')
+    set -- "$@" --include "${escaped}/**"
+    i=$((i + 1))
+done
+echo ""
 
 docker compose run --rm rclone copy \
-    "gdrive-crypt:transcribe/${WRAPPER}" \
-    "/bt/${WRAPPER}" \
+    gdrive-crypt:transcribe /bt \
+    "$@" \
     --progress \
     --stats-one-line
