@@ -230,6 +230,14 @@ def _resync(video: Path, candidate_srt: Path, output_srt: Path) -> bool:
     alass aligns each piece independently instead of forcing a single
     uniform offset (which is what made ffsubsync misalign on releases
     with different opening structures). 5-minute timeout is plenty.
+
+    ONLY called for candidates whose timing is NOT authoritative for
+    this mp4 — i.e. opensubtitles-text (release-independent search).
+    Same-source tags (bundled from same wrapper, opensubtitles-hash
+    matched by file hash) skip alass entirely: their SRT was authored
+    for this exact file, and alass's VAD can misfire on early-film
+    audio (music with vocals, ambient noise) and produce large spurious
+    shifts. See `_SAME_SOURCE_TAGS` and the "Man from Earth" case study.
     """
     output_srt.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -388,6 +396,16 @@ def _run_transcription(job_id: str, staging_mp4: str):
 _WHISPER_INDEPENDENT_TAGS = ("embedded", "pgs-ocr", "vobsub-ocr")
 _WHISPER_DEPENDENT_TAGS = ("bundled", "opensubtitles-hash", "opensubtitles-text")
 
+# Tags whose SRTs are authored for THIS mp4 (bundled: shipped by the
+# release group in the same wrapper as the video; opensubtitles-hash:
+# OpenSubtitles matched by the video's exact file hash, so the uploader
+# had this same file). Timing is by construction correct — alass is
+# unnecessary and empirically harmful (VAD false-positives on early-
+# film audio can shift correctly-timed cues by tens of seconds). Only
+# opensubtitles-text (release-independent text search) genuinely needs
+# alass, since the uploader may have had a differently-timed rip.
+_SAME_SOURCE_TAGS = ("bundled", "opensubtitles-hash")
+
 def _fetch_candidate(
     tag: str,
     video: Path,
@@ -516,10 +534,17 @@ def _polluted_fallback_pick_candidate(
             cand_path = pick_bundled_smart_plot(video, cand_dest, _plot_accept_bundled)
             if cand_path is None:
                 continue
-            if _resync(video, cand_path, verified_src):
+            # Same-source: skip alass (see _SAME_SOURCE_TAGS docstring).
+            try:
+                verified_src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(cand_path), str(verified_src))
+                print(f"[pipeline] {video.name!r}: polluted-mode bundled → verified.srt "
+                      f"(same-source, alass skipped)", flush=True)
                 return tag
-            print(f"[pipeline] {video.name!r}: polluted-mode bundled alass failed", flush=True)
-            continue
+            except OSError as exc:
+                print(f"[pipeline] {video.name!r}: polluted-mode bundled copy failed: {exc}",
+                      flush=True)
+                continue
 
         # OS tiers: k-try with plot-check
         mode = "hash" if tag == "opensubtitles-hash" else "text"
@@ -534,6 +559,22 @@ def _polluted_fallback_pick_candidate(
         if winner is None:
             continue
 
+        if tag in _SAME_SOURCE_TAGS:
+            # opensubtitles-hash: sub authored for THIS file's hash,
+            # timing correct by construction. Skip alass.
+            try:
+                verified_src.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(winner), str(verified_src))
+                print(f"[pipeline] {video.name!r}: polluted-mode {tag} → verified.srt "
+                      f"(same-source, alass skipped)", flush=True)
+                return tag
+            except OSError as exc:
+                print(f"[pipeline] {video.name!r}: polluted-mode {tag} copy failed: {exc}",
+                      flush=True)
+                continue
+
+        # opensubtitles-text: uploader may have had a different rip,
+        # alass genuinely useful here.
         if _resync(video, winner, verified_src):
             return tag
         print(f"[pipeline] {video.name!r}: polluted-mode {tag} alass failed", flush=True)
@@ -562,13 +603,17 @@ def process_bt_file(job_id: str):
                canonical already exists (Stage 0 already produced it).
       Stage B. Whisper + whisper-dependent tiers (only on Stage A miss):
                  whisper     → <stem>.whisper.srt (GPU 10-30min)
-                 bundled     → <stem>.bundled.srt (WER inside pick, or
-                               polluted-mode smart-pick + plot-check)
+                 bundled     → <stem>.bundled.srt (WER selects among
+                               wrapper's subs, or polluted-mode smart-
+                               pick + plot-check)
                  os-hash     → <stem>.opensubtitles-hash-N.srt
                  os-text     → <stem>.opensubtitles-text-N.srt
                  (bundled + os need whisper as WER reference / pollution
                  dispatch signal — hence Stage B ordering)
-                 Winner → alass → verified.srt.
+                 Winner routing:
+                 - bundled / os-hash (same-source, authored for this mp4)
+                   → copy verbatim to verified.srt, alass SKIPPED
+                 - os-text (release-independent search) → alass → verified
                  All miss + clean whisper → whisper itself promoted to
                  verified.srt. All miss + polluted → `.whisper-polluted`
                  sidecar, halt. Skipped if canonical already exists.
@@ -713,6 +758,26 @@ def process_bt_file(job_id: str):
                 # passed — no outer re-verify needed.
                 print(f"[pipeline] {video.name!r}: {tag} ACCEPT "
                       f"(verified inside fetch)", flush=True)
+
+                if tag in _SAME_SOURCE_TAGS:
+                    # bundled + os-hash are authored for THIS mp4 (bundled
+                    # by release group, os-hash via file-hash match on OS).
+                    # Alass is designed to sync cross-release SRTs, and
+                    # empirically its VAD false-positives on early-film
+                    # audio (music/ambient) shift correct timings by tens
+                    # of seconds. Skip alass; copy candidate as-is.
+                    # See "The Man from Earth (2007)" case study.
+                    try:
+                        verified_src.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(cand_path), str(verified_src))
+                        winner_tag = tag
+                        print(f"[pipeline] {video.name!r}: {tag} → verified.srt "
+                              f"(same-source, alass skipped)", flush=True)
+                        break
+                    except OSError as exc:
+                        print(f"[pipeline] {video.name!r}: {tag} → verified copy failed: {exc}",
+                              flush=True)
+                        continue
 
                 if _resync(video, cand_path, verified_src):
                     winner_tag = tag
