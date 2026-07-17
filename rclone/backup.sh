@@ -44,6 +44,50 @@ else
     echo "Backing up all wrappers in /bt/ (skipping any already uploaded)"
 fi
 
+# In-flight write check: any file with mtime < 1 minute means aria2c is
+# still pumping pieces (or someone/something else is writing). Uploading
+# that snapshot would ship half-empty / half-written bytes — no
+# corruption, but wasted bandwidth (we'd re-upload the whole file next
+# run once mtimes settle). Warn + prompt rather than silent-skip so the
+# user knows what they're deciding.
+BT_HOST=$(realpath ../transcribe/data/bt 2>/dev/null || echo "")
+if [ -n "$BT_HOST" ] && [ -d "$BT_HOST" ]; then
+    if [ $# -ge 1 ]; then
+        scan_root="$BT_HOST/$WRAPPER"
+    else
+        scan_root="$BT_HOST"
+    fi
+    if [ -d "$scan_root" ]; then
+        # For bulk, group by top-level wrapper name (relative to /bt).
+        # For single, we already know the wrapper — just check "any hit".
+        if [ $# -ge 1 ]; then
+            hit=$(find "$scan_root" -mmin -1 -type f -print -quit 2>/dev/null)
+            recent="$WRAPPER"
+            [ -z "$hit" ] && recent=""
+        else
+            recent=$(find "$scan_root" -maxdepth 20 -mmin -1 -type f \
+                -printf '%P\n' 2>/dev/null | cut -d/ -f1 | sort -u)
+        fi
+        if [ -n "$recent" ]; then
+            echo ""
+            echo "WARNING: files modified in the last minute — likely still downloading:"
+            printf '%s\n' "$recent" | sed 's/^/  → /'
+            echo ""
+            echo "Uploading now would ship half-written bytes (wasted bandwidth, no corruption)."
+            printf "Continue anyway? (y/N): "
+            if ! IFS= read -r ANSWER; then
+                echo ""
+                echo "Cancelled."
+                exit 0
+            fi
+            case "$ANSWER" in
+                [yY]|[yY][eE][sS]) echo "Proceeding..." ;;
+                *) echo "Cancelled."; exit 0 ;;
+            esac
+        fi
+    fi
+fi
+
 docker compose run --rm rclone copy \
     "$SRC" \
     "$DST" \
