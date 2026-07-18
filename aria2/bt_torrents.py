@@ -26,7 +26,6 @@ Why no `.sh` on-bt-download-complete hook: aria2c writes a
 the moment all pieces are verified. That's a clean filesystem-level
 "download done" signal we can read directly — no callback plumbing.
 """
-import os
 import re
 import shutil
 import struct
@@ -46,13 +45,15 @@ SEED_RATIO = 1.0
 # Per-aria2c-process upload cap. We run one aria2c subprocess per torrent
 # (not a shared daemon), so this is effectively a per-torrent cap — the
 # global ceiling is SEED_UPLOAD_LIMIT × concurrent_seeders, not a true
-# hard cap. Set conservatively (500K = ~4 Mbps) so 10 simultaneous
-# seeders top out around 40 Mbps and leave uplink headroom for Jellyfin
-# traffic sharing the same host NIC. Tune via env var; a real hard cap
-# would need tc-based shaping on gluetun's tun interface, which we
-# explicitly chose against for robustness (tunnel restarts wipe tc
-# rules, interface names aren't API-stable).
-SEED_UPLOAD_LIMIT = os.environ.get("SEED_UPLOAD_LIMIT", "500K")
+# hard cap. 2500K ≈ 20 Mbps per torrent, sized against the user's
+# 300 Mbps uplink policy of "give aria2 at most ~200 Mbps in aggregate"
+# assuming ~10 typical concurrent seeders (200 / 10 = 20 Mbps). Spike
+# cases (many popular torrents seeding at once) can exceed the 200 Mbps
+# aggregate target — accepted trade-off for the robustness of a plain
+# aria2c flag over tc-based tunnel shaping. A real hard cap would need
+# tc on gluetun's tun interface, ruled out for fragility (tunnel
+# restarts wipe tc rules, interface names aren't API-stable).
+SEED_UPLOAD_LIMIT = "2500K"
 
 _UNSAFE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
