@@ -38,34 +38,35 @@ DOWNLOADS_DIR = Path("/app/data/downloads")
 DOWNLOAD_TIMEOUT = 60 * 60         # 1 hour
 RESYNC_TIMEOUT = 5 * 60            # alass on a long movie tops out well under this
 
-# If more than this fraction of whisper's cues fall inside hallucination
-# windows, whisper is too degraded to serve as a WER reference — any
-# full-length candidate scores noise-dominated. Bail straight to the
-# plot-check fallback loop (LLM decides content match directly); if that
-# fails too, stamp `.whisper-polluted` for user intervention.
+# Single threshold gating two roles for whisper:
+#
+#   ≤ threshold:  whisper is trustworthy — serves as WER reference for
+#                 picking among external candidates AND acts as the
+#                 promoted verified.srt if the WER candidate loop finds
+#                 no viable external. Any pollution windows are stripped
+#                 before promotion so hallucinated stretches never reach
+#                 canonical.
+#
+#   > threshold:  whisper is too polluted to score candidates — WER is
+#                 noise-dominated (Toy Story 5 2026: 47% pollution made
+#                 all 3 OS candidates score equally bad, hiding a legit
+#                 sub). Skip WER entirely, dispatch to LLM plot-check
+#                 fallback (bundled smart-pick + OS k-try + plot-check
+#                 accept). If that fails too, stamp `.whisper-polluted`
+#                 for user intervention.
+#
+# Historically split into two thresholds (50% route + 5% promote) which
+# left a dead-zone in 5-50%: WER path ran on unreliable reference AND
+# whisper couldn't be promoted as fallback → guaranteed fail. Toy Story 5
+# was the wake-up case. Single threshold eliminates the zone.
 #
 # Cue-based rather than time-based: a movie can have 20% of its runtime
-# eaten by "Hey." loops in silent scenes and still test "under
-# threshold" on a time-coverage metric, while the whisper transcript is
-# 80% pollution and effectively useless as a WER reference. The
-# Victoria (2015) case-in-point: 27% time coverage, 78% polluted-cue
-# ratio — the cue ratio catches it, time coverage lets it slip.
-_POLLUTION_CUE_RATIO_BAIL = 0.5
-
-# When the WER candidate loop finishes with no winner AND whisper has any
-# pollution windows, we normally refuse to promote whisper to verified
-# (because promoting a hallucinated transcript to canonical is worse than
-# stamping `.whisper-polluted` for user intervention). But at very low
-# pollution — say a single degenerate "ha ha ha" laughing scene in an
-# otherwise-clean 400-cue transcript — the pipeline was too strict: OS
-# happens to return wrong-movie candidates (all WER fail) and a ~1%
-# hallucination sinks an otherwise fine whisper. This threshold lets us
-# strip the polluted cues and promote the rest as verified.
-#
-# Kept below _POLLUTION_CUE_RATIO_BAIL by a wide margin — the two thresholds
-# operate on different code paths and shouldn't be confused. This one is
-# "accept trace pollution as noise"; that one is "reroute to plot-check".
-_WHISPER_ACCEPT_MAX_POLLUTION = 0.05
+# eaten by "Hey." loops in silent scenes and still test "under threshold"
+# on a time-coverage metric, while the whisper transcript is 80%
+# pollution and effectively useless. Victoria (2015): 27% time coverage,
+# 78% polluted-cue ratio — cue ratio catches it, time coverage lets it
+# slip.
+_POLLUTION_CUE_RATIO_BAIL = 0.10
 
 # Single worker — pipeline (whisper + verify + alass + annotation) runs
 # end-to-end on one thread so per-job state mutations stay serial and the
@@ -788,37 +789,19 @@ def process_bt_file(job_id: str):
                 print(f"[pipeline] {video.name!r}: {tag} alass failed; trying next", flush=True)
 
             if winner_tag is None:
-                # No candidate passed WER + alass. Decide whether whisper
-                # itself is trustworthy enough to promote as verified.
-                ratio = pollution_cue_ratio(whisper_src, windows) if windows else 0.0
-                if ratio > _WHISPER_ACCEPT_MAX_POLLUTION:
-                    # Significant pollution — refuse to promote a
-                    # partially-hallucinated whisper to canonical. Stamp
-                    # the sidecar so the scan loop stops retrying and
-                    # the UI surfaces the state for user intervention
-                    # (drop a bundled SRT, refetch OS once quota recovers,
-                    # etc.).
-                    polluted_reason = (
-                        f"{len(windows)} polluted window(s), {ratio:.0%} of "
-                        f"whisper cues affected, no candidate salvaged"
-                    )
-                    try:
-                        stamp_pipeline_failed(video, "whisper polluted", polluted_reason)
-                    except OSError:
-                        pass
-                    notify_failure(video, "whisper polluted", polluted_reason)
-                    _fail(job_id, f"whisper polluted, no usable candidate ({polluted_reason})")
-                    return
-                # Whisper is clean (no windows) or nearly-clean (windows
-                # below _WHISPER_ACCEPT_MAX_POLLUTION). Promote it. For
-                # the nearly-clean case, strip the polluted cues first so
-                # the hallucinated stretch doesn't reach canonical.
+                # WER path found no external candidate. We're only here if
+                # pollution ≤ _POLLUTION_CUE_RATIO_BAIL (else Gate A above
+                # would have routed to plot-check), so whisper is
+                # trustworthy enough to promote as a fallback. For files
+                # with pollution windows, strip them before promoting so
+                # the hallucinated stretch never reaches canonical.
                 try:
                     verified_src.parent.mkdir(parents=True, exist_ok=True)
                     if windows:
+                        ratio = pollution_cue_ratio(whisper_src, windows)
                         kept = write_srt_without_windows(whisper_src, windows, verified_src)
-                        print(f"[pipeline] {video.name!r}: {ratio:.1%} pollution ≤ "
-                              f"{_WHISPER_ACCEPT_MAX_POLLUTION:.0%} — stripped "
+                        print(f"[pipeline] {video.name!r}: {ratio:.1%} pollution "
+                              f"(≤ {_POLLUTION_CUE_RATIO_BAIL:.0%}) — stripped "
                               f"{len(windows)} window(s), promoted {kept} cues as verified",
                               flush=True)
                     else:
