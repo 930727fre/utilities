@@ -11,6 +11,10 @@ set -eu
 cd "$(dirname "$0")"
 
 # ── helper: numeric-index prompt with bounds check ───────────────────
+# Result goes in the global `PICKED` so calls aren't wrapped in `$()`
+# (a subshell would swallow both the prompt output AND any `exit` for
+# cancellation, leaving the parent with an empty capture).
+PICKED=""
 pick_index() {
     prompt="$1"
     max="$2"
@@ -25,7 +29,7 @@ pick_index() {
     if [ "$a" -lt 1 ] || [ "$a" -gt "$max" ]; then
         echo "ERROR: index $a out of range (1-$max)" >&2; exit 1;
     fi
-    printf '%s' "$a"
+    PICKED="$a"
 }
 
 # ── 1. Which tool ────────────────────────────────────────────────────
@@ -48,8 +52,8 @@ printf '%s\n' "$TOOLS" | awk '{
 echo ""
 
 TOTAL=$(printf '%s\n' "$TOOLS" | wc -l)
-IDX=$(pick_index "Which tool? (index; Enter to cancel): " "$TOTAL")
-TOOL=$(printf '%s\n' "$TOOLS" | sed -n "${IDX}p")
+pick_index "Which tool? (index; Enter to cancel): " "$TOTAL"
+TOOL=$(printf '%s\n' "$TOOLS" | sed -n "${PICKED}p")
 
 # ── 2. Which snapshot ────────────────────────────────────────────────
 echo ""
@@ -67,8 +71,8 @@ printf '%s\n' "$DATES" | awk '{printf "  %3d  %s\n", NR, $0}'
 echo ""
 
 TOTAL=$(printf '%s\n' "$DATES" | wc -l)
-IDX=$(pick_index "Which snapshot? (index; Enter to cancel): " "$TOTAL")
-DATE=$(printf '%s\n' "$DATES" | sed -n "${IDX}p")
+pick_index "Which snapshot? (index; Enter to cancel): " "$TOTAL"
+DATE=$(printf '%s\n' "$DATES" | sed -n "${PICKED}p")
 
 # ── 3. Download the tarball to a host-visible temp dir ───────────────
 TMP=$(mktemp -d)
@@ -95,8 +99,8 @@ if [ "$TOOL" = "transcribe-archive" ]; then
     awk '{printf "  %3d  %s\n", NR, $0}' "$TMP/titles.txt"
     echo ""
 
-    IDX=$(pick_index "Which title? (index; Enter to cancel): " "$TOTAL")
-    TITLE=$(sed -n "${IDX}p" "$TMP/titles.txt")
+    pick_index "Which title? (index; Enter to cancel): " "$TOTAL"
+    TITLE=$(sed -n "${PICKED}p" "$TMP/titles.txt")
 
     ARCHIVE_ROOT=$(realpath ../transcribe/data/archive 2>/dev/null || echo "")
     [ -z "$ARCHIVE_ROOT" ] || [ ! -d "$ARCHIVE_ROOT" ] && \
