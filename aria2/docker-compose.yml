@@ -72,6 +72,14 @@ services:
       # Relative path assumes utilities/aria2 and utilities/transcribe
       # are siblings, which matches the standard layout.
       - ../transcribe/data/bt:/data/bt
+    environment:
+      # Per-torrent aria2c upload cap (`aria2c --max-overall-upload-limit`).
+      # Since each magnet spawns its own subprocess, global upload is
+      # (this × concurrent_seeders). Default 500K ≈ 4 Mbps/torrent so
+      # 10 simultaneous seeders top out around 40 Mbps and leave uplink
+      # headroom for Jellyfin streaming. Bump if your uplink is fat
+      # (e.g. 1M for 300 Mbps+ uplinks), drop for slower connections.
+      - SEED_UPLOAD_LIMIT=${SEED_UPLOAD_LIMIT:-500K}
     command: uvicorn main:app --host 0.0.0.0 --port 8080
     restart: unless-stopped
 

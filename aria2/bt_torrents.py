@@ -26,6 +26,7 @@ Why no `.sh` on-bt-download-complete hook: aria2c writes a
 the moment all pieces are verified. That's a clean filesystem-level
 "download done" signal we can read directly — no callback plumbing.
 """
+import os
 import re
 import shutil
 import struct
@@ -41,6 +42,17 @@ BT_LIBRARY = Path("/data/bt")
 # Seed limits applied to every torrent. aria2c exits when either limit is hit.
 SEED_TIME_MIN = 1440
 SEED_RATIO = 1.0
+
+# Per-aria2c-process upload cap. We run one aria2c subprocess per torrent
+# (not a shared daemon), so this is effectively a per-torrent cap — the
+# global ceiling is SEED_UPLOAD_LIMIT × concurrent_seeders, not a true
+# hard cap. Set conservatively (500K = ~4 Mbps) so 10 simultaneous
+# seeders top out around 40 Mbps and leave uplink headroom for Jellyfin
+# traffic sharing the same host NIC. Tune via env var; a real hard cap
+# would need tc-based shaping on gluetun's tun interface, which we
+# explicitly chose against for robustness (tunnel restarts wipe tc
+# rules, interface names aren't API-stable).
+SEED_UPLOAD_LIMIT = os.environ.get("SEED_UPLOAD_LIMIT", "500K")
 
 _UNSAFE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -101,6 +113,7 @@ def _spawn(wrapper: Path, source: str) -> None:
         f"--dir={wrapper}",
         f"--seed-time={SEED_TIME_MIN}",
         f"--seed-ratio={SEED_RATIO}",
+        f"--max-overall-upload-limit={SEED_UPLOAD_LIMIT}",
         "--bt-save-metadata=true",
         "--enable-color=false",
         "--console-log-level=warn",
