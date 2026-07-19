@@ -34,6 +34,26 @@ LOG_PATH = DATA_ROOT / "llm_calls.log"
 STATE_PATH = DATA_ROOT / "llm_report_state.json"
 REPORT_HOUR = 4   # fire at first tick past 4am TPE
 
+# USD per 1M tokens (input, output). Snapshot as of 2026-07; update when
+# vendor rates change. Unknown models default to (0, 0) so a new model
+# spending unnoticed doesn't crash the digest, but its cost silently
+# shows $0.00 — a "why is annotate $0?" moment is the signal to add it
+# here. Cached input is billed lower by Anthropic but we don't use
+# prompt caching, so the plain input rate is what applies.
+_PRICING = {
+    "claude-opus-4-7":       (15.00, 75.00),
+    "claude-sonnet-4-6":     ( 3.00, 15.00),
+    "claude-haiku-4-5":      ( 1.00,  5.00),
+    "gemini-3.1-flash-lite": ( 0.25,  1.50),
+    "gemini-3.1-flash":      ( 0.30,  2.50),
+    "gemini-3.1-pro":        ( 1.25, 10.00),
+}
+
+
+def _cost_usd(model: str, in_tok: int, out_tok: int) -> float:
+    in_price, out_price = _PRICING.get(model, (0.0, 0.0))
+    return (in_tok * in_price + out_tok * out_price) / 1_000_000
+
 _lock = threading.Lock()
 
 
@@ -102,7 +122,11 @@ def _fire_report(day: str) -> None:
     with _lock:
         LOG_PATH.rename(rotated)
 
-    counts: dict[str, dict] = {}   # caller → {model, calls, in, out}
+    # Aggregate by (caller, model). A single caller can span models —
+    # annotate falls back Sonnet → Gemini on content refusal, so we need
+    # separate rows to price each correctly and to make the fallback
+    # frequency visible in the digest.
+    counts: dict[tuple[str, str], dict] = {}
     try:
         text = rotated.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -112,7 +136,7 @@ def _fire_report(day: str) -> None:
         if len(parts) != 6:
             continue
         _, model, caller, _target, in_tok, out_tok = parts
-        entry = counts.setdefault(caller, {"model": model, "calls": 0, "in": 0, "out": 0})
+        entry = counts.setdefault((caller, model), {"calls": 0, "in": 0, "out": 0})
         entry["calls"] += 1
         try:
             entry["in"] += int(in_tok)
@@ -132,18 +156,23 @@ def _send_digest(day: str, counts: dict) -> None:
     if not counts:
         lines.append("(no calls)")
     else:
-        sorted_callers = sorted(
-            counts.items(),
-            key=lambda kv: kv[1]["in"] + kv[1]["out"],
-            reverse=True,
-        )
-        for caller, s in sorted_callers:
-            in_k = s["in"] / 1000
-            out_k = s["out"] / 1000
+        # Sort by USD descending — expensive callers surface first.
+        rows = []
+        total_usd = 0.0
+        for (caller, model), s in counts.items():
+            usd = _cost_usd(model, s["in"], s["out"])
+            rows.append((caller, model, s["calls"], s["in"], s["out"], usd))
+            total_usd += usd
+        rows.sort(key=lambda r: r[5], reverse=True)
+        for caller, model, calls, in_tok, out_tok, usd in rows:
+            in_k = in_tok / 1000
+            out_k = out_tok / 1000
             lines.append(
-                f"{caller} ({s['model']}): {s['calls']} calls, "
-                f"{in_k:.1f}k in / {out_k:.1f}k out"
+                f"{caller} ({model}): {calls} calls, "
+                f"{in_k:.1f}k in / {out_k:.1f}k out, ${usd:.2f}"
             )
+        lines.append("")
+        lines.append(f"Total: ${total_usd:.2f}")
     msg = "\n".join(lines)
     try:
         from notifier import _send
