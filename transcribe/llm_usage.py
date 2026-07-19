@@ -41,7 +41,7 @@ REPORT_HOUR = 4   # fire at first tick past 4am TPE
 # here (rather than crash). Cached input is billed lower by Anthropic
 # but we don't use prompt caching, so the plain input rate applies.
 _PRICING = {
-    "claude-opus-4-7":       (15.00, 75.00),   # bt_filter
+    "claude-opus-4-7":       ( 5.00, 25.00),   # bt_filter
     "claude-sonnet-4-6":     ( 3.00, 15.00),   # annotate, plot_check
     "gemini-3.1-flash-lite": ( 0.25,  1.50),   # translate, annotate fallback
 }
