@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Trackpad</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    background: #0a0a0a;
+    color: #666;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #status {
+    position: fixed;
+    top: env(safe-area-inset-top);
+    left: 0; right: 0;
+    padding: 10px;
+    text-align: center;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.04);
+    letter-spacing: 0.05em;
+  }
+  #hint {
+    position: fixed;
+    bottom: env(safe-area-inset-bottom);
+    left: 0; right: 0;
+    padding: 14px;
+    text-align: center;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #444;
+  }
+</style>
+</head>
+<body>
+<div id="status">connecting…</div>
+<div id="hint">
+  1 finger drag → move · tap → click<br>
+  2 finger tap → right-click · 2 finger drag → scroll
+</div>
+<script>
+(() => {
+  const status = document.getElementById('status');
+  const wsURL = (location.protocol === 'https:' ? 'wss://' : 'ws://')
+                + location.host + '/ws';
+  let ws = null;
+
+  function connect() {
+    ws = new WebSocket(wsURL);
+    ws.onopen  = () => status.textContent = 'connected';
+    ws.onclose = () => { status.textContent = 'reconnecting…'; setTimeout(connect, 1000); };
+    ws.onerror = () => ws.close();
+  }
+  connect();
+
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+    }
+  }
+
+  // Motion / touch below TAP_MOVE_PX (across the whole gesture) counts
+  // as a stationary tap when all fingers lift.
+  const TAP_MOVE_PX = 8;
+
+  // Per-finger state (id → {startX, startY, x, y, prev}); peakFingers
+  // captures the most fingers ever seen simultaneously in this gesture
+  // (needed to distinguish 1-finger tap from 2-finger tap after all
+  // fingers lift). didMove flips permanently once any pointer travel
+  // exceeds the tap threshold — that way a 2-finger scroll that ends
+  // with fingers back near the start still isn't misread as a tap.
+  const touches = new Map();
+  let peakFingers = 0;
+  let didMove = false;
+  let scrollLast = null;
+
+  function centroid() {
+    let sx = 0, sy = 0, n = 0;
+    for (const s of touches.values()) { sx += s.x; sy += s.y; n++; }
+    return n ? { x: sx / n, y: sy / n } : null;
+  }
+
+  document.addEventListener('touchstart', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      touches.set(t.identifier, {
+        startX: t.clientX, startY: t.clientY,
+        x: t.clientX, y: t.clientY,
+      });
+    }
+    peakFingers = Math.max(peakFingers, touches.size);
+    if (touches.size >= 2) scrollLast = centroid();
+  }, { passive: false });
+
+  document.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const s = touches.get(t.identifier);
+      if (!s) continue;
+      s.x = t.clientX;
+      s.y = t.clientY;
+    }
+    if (touches.size === 1 && peakFingers < 2) {
+      // Only produce cursor moves for a genuine 1-finger gesture. If
+      // peakFingers already hit 2 in this gesture (mid-scroll one
+      // finger lifted first), the leftover finger's position has been
+      // drifting during scroll without per-finger prev tracking, and
+      // any 1-finger delta we'd compute now would dump the entire
+      // scroll excursion as a single cursor jump. Simpler and more
+      // reliable to just gate the whole 1-finger branch on
+      // peakFingers — user has to lift all fingers before the next
+      // 1-finger cursor move can start.
+      const s = [...touches.values()][0];
+      const prev = s.prev || { x: s.startX, y: s.startY };
+      const rdx = s.x - prev.x;
+      const rdy = s.y - prev.y;
+      s.prev = { x: s.x, y: s.y };
+      const tdx = s.x - s.startX, tdy = s.y - s.startY;
+      if (tdx * tdx + tdy * tdy > TAP_MOVE_PX * TAP_MOVE_PX) didMove = true;
+      if (rdx || rdy) send({ t: 'move', dx: rdx, dy: rdy });
+    } else if (touches.size >= 2 && scrollLast) {
+      const c = centroid();
+      const rdx = c.x - scrollLast.x, rdy = c.y - scrollLast.y;
+      scrollLast = c;
+      if (rdx * rdx + rdy * rdy > 4) didMove = true;
+      if (rdx || rdy) send({ t: 'scroll', dy: rdy, dx: rdx });
+    }
+  }, { passive: false });
+
+  document.addEventListener('touchend', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) touches.delete(t.identifier);
+    if (touches.size === 0) {
+      if (!didMove) {
+        send({ t: 'click', b: peakFingers >= 2 ? 'right' : 'left' });
+      }
+      didMove = false;
+      peakFingers = 0;
+      scrollLast = null;
+    } else if (touches.size < 2) {
+      // Dropped out of 2-finger scroll but 1 finger still down. No
+      // reset needed for the leftover finger — the peakFingers gate
+      // in touchmove already blocks it from producing cursor moves
+      // until all fingers lift.
+      scrollLast = null;
+    }
+  }, { passive: false });
+
+  document.addEventListener('touchcancel', e => {
+    for (const t of e.changedTouches) touches.delete(t.identifier);
+    if (touches.size === 0) {
+      didMove = false;
+      peakFingers = 0;
+      scrollLast = null;
+    }
+  }, { passive: false });
+
+  // Kill Safari's two-finger pinch-zoom on the pad.
+  document.addEventListener('gesturestart', e => e.preventDefault());
+})();
+</script>
+</body>
+</html>
