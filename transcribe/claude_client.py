@@ -146,6 +146,23 @@ def generate_json(prompt: str, response_schema: dict, *,
                        output_tokens=int(usage.get("output_tokens") or 0))
             except Exception:
                 pass
-        return tool_input["result"] if unwrap else tool_input
+        if unwrap:
+            # Sonnet occasionally returns a tool_use block with empty/missing
+            # `input` — usually a soft-decline on borderline content (spy
+            # dramas, procedurals with violence, etc). The old code did
+            # `tool_input["result"]` and surfaced only `KeyError: 'result'`,
+            # which was useless for diagnosis. Include stop_reason + the
+            # raw response body so the sidecar shows what Anthropic actually
+            # returned (refusal text, empty content, whatever).
+            if "result" not in tool_input:
+                stop_reason = resp_data.get("stop_reason")
+                raise RuntimeError(
+                    f"Anthropic tool_use missing 'result' key "
+                    f"(stop_reason={stop_reason!r}, tool_input={tool_input!r}) — "
+                    f"likely content refusal. Full response: "
+                    f"{json.dumps(resp_data)[:2000]}"
+                )
+            return tool_input["result"]
+        return tool_input
 
     raise RuntimeError(f"Anthropic call failed after {MAX_RETRIES} attempts: {last_exc}")

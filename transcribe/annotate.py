@@ -15,6 +15,7 @@ from typing import Callable, Optional
 from pathlib import Path
 
 from claude_client import generate_json
+import gemini_client
 
 # Cap per-call cue count so output JSON stays well under the model's
 # output limit.
@@ -168,6 +169,45 @@ def _is_sentinel_cue(cue: dict) -> bool:
     return bool(visible) and all(ln.startswith("※") for ln in visible)
 
 
+def _annotate_chunk(prompt: str, target: str) -> list:
+    """Run one annotate LLM call with fallback chain:
+    Sonnet → Gemini Flash Lite → empty.
+
+    Sonnet 4.6 hard-declines certain content categories (bio, chem, cyber)
+    even in obviously fictional media contexts — The Americans (2013) S04
+    triggered bio-refusal on episodes with 'glanders' / 'bioweapons lab'
+    dialogue. Gemini's safety threshold is looser for fictional media, so
+    a second try there usually gets through.
+
+    If Gemini also fails (any exception — refusal, network, parse), we
+    return `[]`. The chunk gets no ※ notes but the pipeline continues:
+    canonical.srt is still produced from verified.srt, translation runs,
+    the episode ends up "done" minus annotation for the refused chunk.
+    Better than stamping .pipeline-failed and blocking the whole episode
+    on a limitation neither we nor the user can fix.
+    """
+    try:
+        return generate_json(prompt, ANNOTATION_SCHEMA, temperature=0.2,
+                             caller="annotate", target=target)
+    except RuntimeError as exc:
+        # claude_client raises with `stop_reason='refusal'` in the message
+        # when Anthropic returns an empty tool_use — see claude_client.py.
+        if "stop_reason='refusal'" not in str(exc):
+            raise
+        print(f"[annotate] Sonnet refused chunk (target={target!r}); "
+              f"falling back to Gemini", flush=True)
+
+    try:
+        return gemini_client.generate_json(prompt, ANNOTATION_SCHEMA,
+                                           temperature=0.2,
+                                           caller="annotate", target=target)
+    except Exception as exc:
+        print(f"[annotate] Gemini fallback failed for chunk "
+              f"(target={target!r}): {exc} — chunk will have no notes",
+              flush=True)
+        return []
+
+
 # ── Annotation entry point ────────────────────────────────────────────────
 
 def annotate_srt(
@@ -214,14 +254,12 @@ def annotate_srt(
         chunk_text = render_chunk_for_prompt(chunk)
         already = ", ".join(sorted(seen_entities)) if seen_entities else "(none yet)"
         prompt = PROMPT_TEMPLATE % (already, chunk_text)
-        result = generate_json(prompt, ANNOTATION_SCHEMA, temperature=0.2,
-                               caller="annotate",
-                               # Strip both `.srt` AND `.verified` so this
-                               # target string matches translate's target
-                               # (which reads the canonical .srt next to
-                               # the video). Enables clean per-episode
-                               # aggregation in the LLM-usage log.
-                               target=srt_path.with_suffix("").stem)
+        # Strip both `.srt` AND `.verified` so this target string matches
+        # translate's target (which reads the canonical .srt next to the
+        # video). Enables clean per-episode aggregation in the LLM-usage
+        # log.
+        target = srt_path.with_suffix("").stem
+        result = _annotate_chunk(prompt, target)
         for entry in result:
             try:
                 cue_idx = int(entry["cue"])
