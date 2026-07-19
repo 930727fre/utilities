@@ -57,9 +57,13 @@ services:
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID must be exported before docker compose up}
       # Jellyfin rescan: fired at each wrapper-summary event so the
       # library picks up newly-produced canonical / .zh-tw.srt files.
-      # URL uses the container name on my_network (not host:port).
+      # URL is hardcoded — Jellyfin's container name on my_network is
+      # deterministic, no secret. Earlier this was env-required but
+      # users kept exporting `jellyfin:8096` without the scheme prefix,
+      # which silently broke rescans (httpx: "URL is missing an
+      # 'http://' or 'https://' protocol"). Hardcode ends the footgun.
       # API key: Jellyfin dashboard → API Keys → new.
-      - JELLYFIN_URL=${JELLYFIN_URL:?JELLYFIN_URL must be exported (e.g. http://jellyfin:8096)}
+      - JELLYFIN_URL=http://jellyfin:8096
       - JELLYFIN_API_KEY=${JELLYFIN_API_KEY:?JELLYFIN_API_KEY must be exported before docker compose up}
     restart: unless-stopped
     networks:

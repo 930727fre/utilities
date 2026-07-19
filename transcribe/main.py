@@ -940,7 +940,16 @@ def _reconcile_bt_state():
     if not BT_PIPELINE_ENABLED:
         return
     _reconcile_bt_filter()
-    items = _scan_bt()
+    # Read jobs BEFORE scanning filesystem. process_bt_file's end-of-run
+    # sequence is: write zh-tw → update status to SUCCESS. If we scanned
+    # FS first and read jobs second, a tick landing between those two
+    # writes would see stale FS (no zh-tw yet) + fresh jobs (SUCCESS, not
+    # in in_flight_paths) → dispatch a ghost job for an already-done
+    # video. Reading jobs first + FS second guarantees FS state is at
+    # least as fresh as job state, so any SUCCESS we see is backed by
+    # zh-tw already on disk. (Justified S03E02, 2026-07-18 04:18 TPE:
+    # ghost Job B created 124ms after Job A's SUCCESS write, sat in
+    # queue for 20min, ran cache-hit-only + fired duplicate summary.)
     jobs = read_jobs()
     in_flight_paths = set()
     for j in jobs:
@@ -948,6 +957,7 @@ def _reconcile_bt_state():
             continue
         if j["status"] in ("PENDING", "DOWNLOADING", "TRANSCRIBING", "ANNOTATING"):
             in_flight_paths.add(j.get("source_path"))
+    items = _scan_bt()
 
     for item in items:
         if item["path"] in in_flight_paths:
