@@ -25,7 +25,7 @@ function useBackendHealth() {
 
 export default function App() {
   const backendDown = useBackendHealth()
-  const [tab, setTab] = useState('yt')
+  const [tab, setTab] = useState('bt')
 
   return (
     <>
