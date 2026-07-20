@@ -82,32 +82,15 @@ docker compose run --rm backup rclone ls r2:${R2_BUCKET}
 
 ## Restore
 
-Pull a snapshot from R2 directly into a tool's live `data/` directory. **Stop all dependent services for that tool first** — the script writes to the live path.
-
-List available snapshots for a tool:
+Interactive script on the host — pick a tool + snapshot from numbered menus. **Stop dependent services for the tool first** — the script writes to the live path.
 
 ```bash
-docker compose run --rm backup rclone lsd r2:${R2_BUCKET}/flashcard/
+./restore.sh
 ```
 
-Before pulling, the tool's `data/` directory **must be empty**. Move existing contents aside (rollback insurance) or delete:
+Two modes depending on which tool you pick:
 
-```bash
-cd flashcard/data
-mv flashcard.db ../flashcard.db.bak
-# or for multi-file data dirs: move/delete everything inside
-```
+- `flashcard` / `free2speak` → **wipe & replace** the tool's whole `data/` directory
+- `transcribe-archive` → **pick one title** and restore just that title into `transcribe/data/archive/`
 
-Pull a specific snapshot:
-
-```bash
-docker compose run --rm backup /pull.sh flashcard 2026-05-21
-```
-
-The script will:
-
-1. Refuse if `/tools/<tool>/data/` is not empty.
-2. Download `r2:${R2_BUCKET}/<tool>/<DATE>/data.tar.gz` and extract into `/tools/<tool>/data/`.
-3. Run `PRAGMA integrity_check` on every `*.db` file in the extracted tree.
-
-Restored files are owned by root (the backup container runs as root). If the consuming service runs as a non-root user, `chown -R <uid>:<gid> <tool>/data/` afterward. Restart your services after the pull completes.
+Restored files are owned by root (rclone runs in a container as root). If the consuming service runs as a non-root user, `chown -R <uid>:<gid> <tool>/data/` afterward. Restart your services after the restore completes.
