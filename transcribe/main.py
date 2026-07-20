@@ -864,6 +864,17 @@ def _reconcile_bt_filter():
         # In-flight aria2 — wait until every piece has verified.
         if any(wrapper.rglob("*.aria2")):
             continue
+        # In-flight rclone (e.g. restore.sh pulling wrappers back from
+        # gdrive). rclone writes to `<name>.XXXXXX.partial` then atomic-
+        # renames on completion. Mtime grace alone doesn't catch this
+        # because rclone preserves the ORIGINAL file mtimes from the
+        # remote — a wrapper freshly restored from a months-old backup
+        # has mtimes weeks in the past, so `now - newest` blows past the
+        # 60s threshold even while rclone is still writing files. Fargo
+        # S01/S02/S03/S05 sentinels came out empty for exactly this
+        # reason. Checking for any .partial descendant closes the hole.
+        if any(wrapper.rglob("*.partial")):
+            continue
         if bt_filter_sentinel_for(wrapper.name).exists():
             continue
         # Race: aria2 creates the wrapper dir + saves .torrent as soon as
