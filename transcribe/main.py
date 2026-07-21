@@ -852,12 +852,27 @@ async def transcribe_bt_file(req: BtTranscribeRequest):
 
 # ── Background annotation loop ────────────────────────────────────────────
 
+def _aria2_downloading_wrappers() -> set[str] | None:
+    """Set of wrapper names aria2's daemon currently reports as actively
+    downloading (phase=='downloading'). None if the sidecar is
+    unreachable — caller falls back to filesystem-based `.aria2`
+    detection so a sidecar outage doesn't halt the reconciler.
+    """
+    try:
+        r = _aria2_client.get("/torrents", timeout=5.0)
+        r.raise_for_status()
+        return {t["name"] for t in r.json() if t.get("phase") == "downloading"}
+    except Exception:
+        return None
+
+
 def _reconcile_bt_filter():
     """Reconcile filter state: every finished wrapper should have a
     filter sentinel. Enqueue filter_wrapper for wrappers that don't.
 
     Desired state per wrapper:
-      - no `.aria2` control files (aria2 finished)
+      - aria2 daemon reports phase != 'downloading' (or has never heard
+        of the wrapper — includes dormant old torrents)
       - sentinel exists at /artifact/_processed/<wrapper>.filtered
 
     Sentinel lives at /artifact/_processed/<wrapper>.filtered (not in
@@ -871,12 +886,28 @@ def _reconcile_bt_filter():
     if not BT_ROOT.exists():
         return
     now = time.time()
+    # Authoritative source: ask aria2 which wrappers are actively
+    # downloading. Post-daemon-refactor the .aria2 control file lingers
+    # even after a torrent moves into seeding (daemon keeps it for
+    # future resume), so a bare "does .aria2 exist" check would
+    # permanently skip every completed torrent. Sidecar-down → returns
+    # None → fall through to the legacy filesystem check as a safety
+    # net (works correctly for the common in-progress-download case
+    # even if it over-skips seeding wrappers during the outage).
+    downloading = _aria2_downloading_wrappers()
     for wrapper in BT_ROOT.iterdir():
         if not wrapper.is_dir():
             continue
-        # In-flight aria2 — wait until every piece has verified.
-        if any(wrapper.rglob("*.aria2")):
-            continue
+        if downloading is not None:
+            if wrapper.name in downloading:
+                continue
+        else:
+            # Sidecar down — fall back to filesystem marker. Correct
+            # for real in-flight downloads; over-skips seeding wrappers
+            # until sidecar recovers, which is fine since a sidecar
+            # outage is rare and self-recovering.
+            if any(wrapper.rglob("*.aria2")):
+                continue
         # In-flight rclone (e.g. restore.sh pulling wrappers back from
         # gdrive). rclone writes to `<name>.XXXXXX.partial` then atomic-
         # renames on completion. Mtime grace alone doesn't catch this
