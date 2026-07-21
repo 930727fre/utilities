@@ -541,25 +541,38 @@ async def list_torrents():
         it's up, else a filesystem-only fallback listing off the
         shared /bt bind-mount with every entry marked
         `phase=orphaned`. Wrapper names are truthfully known locally;
-        only live phase / progress lives in the sidecar's in-memory
-        subprocess registry, and `orphaned` is the existing phase for
-        "wrapper exists but no subprocess", so the frontend renders
-        this uniformly with a genuinely orphaned wrapper."""
+        only live phase / progress lives inside the aria2 daemon, and
+        `orphaned` is the existing phase for "wrapper exists but
+        aria2 doesn't know about it" (dormant old torrents, or
+        anything aria2 was never asked to track), so the frontend
+        renders sidecar-down and genuinely-orphaned wrappers
+        uniformly."""
     try:
         r = _aria2_client.get("/torrents")
         r.raise_for_status()
-        return {"aria2_up": True, "torrents": r.json()}
+        torrents = r.json()
+        # Stats is a nice-to-have (bandwidth header) — don't fail the
+        # whole poll if aria2 chokes on getGlobalStat but tellActive
+        # worked. Frontend hides the header when stats is null.
+        stats = None
+        try:
+            s = _aria2_client.get("/stats")
+            if s.status_code == 200:
+                stats = s.json()
+        except httpx.HTTPError:
+            pass
+        return {"aria2_up": True, "torrents": torrents, "stats": stats}
     except httpx.HTTPError as exc:
         print(f"[list_torrents] aria2 sidecar unreachable ({exc}); "
               f"falling back to local /bt listing", flush=True)
-        return {"aria2_up": False, "torrents": _fallback_list_torrents()}
+        return {"aria2_up": False, "torrents": _fallback_list_torrents(), "stats": None}
 
 
 def _fallback_list_torrents() -> list[dict]:
     """Local /bt walk used when the aria2 sidecar is unreachable.
     Wrappers get phase=orphaned uniformly — we can't tell downloading
-    from seeding without aria2's Popen dict, and both are meaningless
-    without a live subprocess anyway."""
+    from seeding without asking the aria2 daemon, and both states are
+    meaningless while the daemon is unreachable anyway."""
     if not BT_ROOT.exists():
         return []
     return [

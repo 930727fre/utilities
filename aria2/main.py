@@ -85,6 +85,15 @@ async def list_torrents():
     return bt_torrents.list_torrents()
 
 
+@app.get("/stats")
+async def stats():
+    """Global bandwidth + cumulative transfer for the BT-tab header."""
+    try:
+        return bt_torrents.global_stats()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"aria2 stats failed: {exc}")
+
+
 @app.delete("/torrents/{wrapper}", status_code=204)
 async def delete_torrent(wrapper: str):
     bt_torrents.delete(wrapper)

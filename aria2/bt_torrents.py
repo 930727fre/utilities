@@ -297,6 +297,31 @@ def _find_gids_for_wrapper(wrapper_name: str) -> list[str]:
     ]
 
 
+def global_stats() -> dict:
+    """Live bandwidth + cumulative transfer for the BT-tab header.
+
+    download_speed / upload_speed come from aria2.getGlobalStat (bytes
+    per second, current). total_downloaded / total_uploaded / ratio are
+    summed across every torrent aria2 knows about (active + waiting +
+    stopped) — cumulative since each torrent was first added and
+    surviving daemon restarts via --force-save. Ratio semantics match
+    what qBittorrent labels "all-time ratio": total_uploaded /
+    total_downloaded, treating the whole library as one big torrent."""
+    gs = _rpc("aria2.getGlobalStat") or {}
+    downloads = _all_downloads()
+    total_down = sum(int(d.get("completedLength") or 0) for d in downloads)
+    total_up = sum(int(d.get("uploadLength") or 0) for d in downloads)
+    ratio = (total_up / total_down) if total_down > 0 else 0.0
+    return {
+        "download_speed": int(gs.get("downloadSpeed") or 0),
+        "upload_speed": int(gs.get("uploadSpeed") or 0),
+        "total_downloaded": total_down,
+        "total_uploaded": total_up,
+        "ratio": round(ratio, 3),
+        "active_count": int(gs.get("numActive") or 0),
+    }
+
+
 # ── Public API used by main.py ────────────────────────────────────────────
 
 def submit(magnet: str) -> str:

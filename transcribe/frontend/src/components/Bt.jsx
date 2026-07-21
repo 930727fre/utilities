@@ -58,8 +58,8 @@ const PHASE_LABEL = {
 const PHASE_TITLE = {
   downloading: 'Downloading',
   seeding:     'Seeding',
-  done:        'Seed limit reached',
-  orphaned:    'Subprocess gone (container was restarted); files on disk are still usable',
+  done:        'Removed from aria2 or errored — no longer seeding',
+  orphaned:    'Not tracked by aria2 (dormant / old completed torrent); files on disk are still usable',
 }
 
 export default function Bt() {
@@ -68,6 +68,7 @@ export default function Bt() {
   // Optimistic default — until the first poll tells us otherwise we
   // assume aria2 is up, so the initial paint doesn't flash "disabled".
   const [aria2Up, setAria2Up] = useState(true)
+  const [stats, setStats] = useState(null)
   const [magnet, setMagnet] = useState('')
   const [expanded, setExpanded] = useState(() => new Set())
   const [expandedRows, setExpandedRows] = useState(() => new Set())
@@ -81,9 +82,10 @@ export default function Bt() {
     if (libRes.status === 'fulfilled') setItems(libRes.value)
     else console.error('listBt failed:', libRes.reason)
     if (tRes.status === 'fulfilled') {
-      // Envelope: {aria2_up, torrents}
+      // Envelope: {aria2_up, torrents, stats}
       setTorrents(tRes.value.torrents)
       setAria2Up(tRes.value.aria2_up)
+      setStats(tRes.value.stats)
     } else {
       console.error('listTorrents failed:', tRes.reason)
     }
@@ -205,6 +207,17 @@ export default function Bt() {
         </button>
       </div>
 
+      {stats && (
+        <div style={styles.statsBar}>
+          <span>ratio {stats.ratio.toFixed(2)}</span>
+          <span title={`total ↓ ${formatBytes(stats.total_downloaded)}   total ↑ ${formatBytes(stats.total_uploaded)}`}>
+            {stats.active_count} active
+          </span>
+          <span>↓ {formatBytes(stats.download_speed)}/s</span>
+          <span>↑ {formatBytes(stats.upload_speed)}/s</span>
+        </div>
+      )}
+
       {sortedTorrents.length > 0 && (
         <div style={styles.torrentsGrid}>
           {sortedTorrents.map(t => {
@@ -321,6 +334,12 @@ const styles = {
     background: '#c79968', color: '#1c1c1e', border: 'none',
     borderRadius: 8, padding: '6px 20px', cursor: 'pointer', fontSize: 22, fontWeight: 700,
     lineHeight: 1,
+  },
+
+  statsBar: {
+    display: 'flex', gap: 20, alignItems: 'center',
+    fontSize: 13, color: '#8e8e93', padding: '10px 4px', marginBottom: 6,
+    fontVariantNumeric: 'tabular-nums',
   },
 
   torrentsGrid: { display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 24 },
