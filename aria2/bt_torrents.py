@@ -1,31 +1,29 @@
-"""One-shot aria2c subprocess per magnet.
+"""aria2c daemon + JSON-RPC client.
 
 Design contract:
-  * No daemon, no RPC, no shared session state. Every magnet submission
-    is a fresh `aria2c` subprocess that lives just long enough to download
-    + seed under our limits, then exits.
-  * State is read from two places only — the filesystem under `/data/bt`
-    (the per-torrent wrapper folders + aria2c's `.aria2` control file)
-    and an in-memory dict of running subprocesses. Container restart
-    clears the in-memory dict and kills the subprocesses; users notice
-    via UI rather than state corruption.
-  * Each torrent lands in its own per-torrent wrapper folder under
-    `/data/bt` regardless of single- vs multi-file, derived from the
-    magnet's `dn=` parameter. DELETE always rmtree's the wrapper.
-  * Aria2c binds an ephemeral port in its default range (6881-6999).
-    Since Surfshark doesn't offer port forwarding, incoming peer
-    connections can't reach us; seeding relies on peers we handshaked
-    with during download. Ratio rarely hits SEED_RATIO=1.0, so
-    subprocesses typically terminate at SEED_TIME_MIN=1440 (24h)
-    instead. Switching to a PF-supporting VPN (PIA / Proton / AirVPN)
-    would need a `--listen-port=<forwarded_port>` here and a way to
-    surface gluetun's forwarded_port file to this container.
+  * ONE persistent aria2c daemon in this container, RPC on 127.0.0.1:6800.
+    All torrents share that daemon — global `--max-overall-upload-limit`
+    is a real hard cap across every seed, not the per-process soft cap
+    the old spawn-per-magnet layout gave us.
+  * Sidecar (FastAPI) is a thin translator: HTTP → aria2 RPC. State
+    lives in the daemon + on disk under `/data/bt`, never in this
+    module beyond in-flight caches.
+  * Each torrent still lands in its own per-torrent wrapper folder
+    under `/data/bt` — we derive the folder from the magnet's `dn=`
+    up front and pass it to aria2 as the `dir` option. That keeps
+    the transcribe pipeline (which watches wrappers, not raw file
+    paths) unchanged.
+  * Startup recovery: sidecar scans `/data/bt/**/*.torrent` and
+    re-adds any torrent the daemon doesn't already know about. aria2
+    finds the existing `.aria2` control file, skips already-verified
+    pieces, resumes downloading / seeding seamlessly.
 
-Why no `.sh` on-bt-download-complete hook: aria2c writes a
-`<file>.aria2` control file while a download is in flight and deletes it
-the moment all pieces are verified. That's a clean filesystem-level
-"download done" signal we can read directly — no callback plumbing.
+RPC secret comes from ARIA2_RPC_TOKEN env — required, no fallback
+(exposed RPC without auth is a remote-code-exec vector).
 """
+import base64
+import hashlib
+import os
 import re
 import shutil
 import struct
@@ -34,41 +32,195 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+
+import requests
 
 BT_LIBRARY = Path("/data/bt")
 
-# Seed limits applied to every torrent. aria2c exits when either limit is hit.
-SEED_TIME_MIN = 1440
-SEED_RATIO = 1.0
+# Session file — aria2 persists its active+waiting queue here every
+# --save-session-interval seconds AND on graceful shutdown, then loads
+# it via --input-file on the next start. Lives inside /data/bt so it
+# survives container recreate.
+SESSION_FILE = BT_LIBRARY / ".aria2-session"
 
-# Per-aria2c-process upload cap. We run one aria2c subprocess per torrent
-# (not a shared daemon), so this is effectively a per-torrent cap — the
-# global ceiling is SEED_UPLOAD_LIMIT × concurrent_seeders, not a true
-# hard cap. 2500K ≈ 20 Mbps per torrent, sized against the user's
-# 300 Mbps uplink policy of "give aria2 at most ~200 Mbps in aggregate"
-# assuming ~10 typical concurrent seeders (200 / 10 = 20 Mbps). Spike
-# cases (many popular torrents seeding at once) can exceed the 200 Mbps
-# aggregate target — accepted trade-off for the robustness of a plain
-# aria2c flag over tc-based tunnel shaping. A real hard cap would need
-# tc on gluetun's tun interface, ruled out for fragility (tunnel
-# restarts wipe tc rules, interface names aren't API-stable).
-SEED_UPLOAD_LIMIT = "2500K"
+# Seed limits.
+#
+# SEED_TIME_MIN: minutes to seed after download completes. Set to 0
+# meaning "no time limit" in OUR code — aria2 itself treats
+# --seed-time=0 as "don't seed at all" (opposite of what we want), so
+# _daemon_cmd() omits the flag entirely when this is 0.
+#
+# SEED_RATIO: seed until this share ratio is reached. 0.0 in aria2's
+# native language means "no ratio limit — seed forever" (yes, 0 means
+# unlimited here, not zero).
+#
+# Both at "no limit" = seed indefinitely subject to the global upload
+# cap. Community-friendly, protected against runaway by
+# GLOBAL_UPLOAD_LIMIT.
+SEED_TIME_MIN = 0
+SEED_RATIO = 0.0
+
+# GLOBAL upload cap across ALL torrents this daemon manages. 25M = 25
+# MB/s ≈ 200 Mbps, sized against the user's 300 Mbps uplink policy of
+# "leave ~100 Mbps headroom for jellyfin / SSH / backup / anything
+# else on the host". Unlike the old per-process cap × concurrent
+# torrents (which spiked past aggregate target when many popular
+# torrents seeded at once), this is a real hard ceiling regardless
+# of how many torrents are active.
+GLOBAL_UPLOAD_LIMIT = "25M"
+
+_RPC_URL = "http://127.0.0.1:6800/jsonrpc"
+_RPC_TOKEN = os.environ.get("ARIA2_RPC_TOKEN", "").strip()
+_RPC_TIMEOUT = 10.0
 
 _UNSAFE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
-# wrapper folder name → live Popen handle. Used by `list_torrents` to know
-# which wrappers still have a running aria2c, and by `delete_torrent` to
-# kill it. Restart wipes this map (and kills the subprocesses with the
-# parent container, since they're our children).
-_procs: dict[str, subprocess.Popen] = {}
-_procs_lock = threading.Lock()
+# Daemon subprocess handle — set by start_daemon(), read by shutdown().
+_daemon: subprocess.Popen | None = None
 
 
-# ── Wrapper folder naming ──────────────────────────────────────────────────
+# ── Daemon lifecycle ──────────────────────────────────────────────────────
+
+def _daemon_cmd() -> list[str]:
+    if not _RPC_TOKEN:
+        raise RuntimeError(
+            "ARIA2_RPC_TOKEN env var is empty — required for daemon auth "
+            "(unauthenticated RPC on 6800 is a remote code execution risk)"
+        )
+    BT_LIBRARY.mkdir(parents=True, exist_ok=True)
+    session_arg: list[str] = [f"--save-session={SESSION_FILE}",
+                              "--save-session-interval=60"]
+    # Only pass --input-file if the session actually exists. aria2c
+    # aborts with "unrecognized URI or option" if we point it at a
+    # non-existent input-file on first boot.
+    if SESSION_FILE.exists():
+        session_arg.append(f"--input-file={SESSION_FILE}")
+    cmd = [
+        "aria2c",
+        "--enable-rpc=true",
+        "--rpc-listen-all=false",
+        "--rpc-listen-port=6800",
+        f"--rpc-secret={_RPC_TOKEN}",
+        f"--dir={BT_LIBRARY}",
+        f"--seed-ratio={SEED_RATIO}",
+        f"--max-overall-upload-limit={GLOBAL_UPLOAD_LIMIT}",
+        "--bt-save-metadata=true",
+        # Save completed / seeding torrents to session too — default
+        # --save-session only stores unfinished downloads, so a
+        # rebuild would silently drop every completed torrent from
+        # the seed queue. With --force-save=true they survive across
+        # daemon restarts (and rebuilds).
+        "--force-save=true",
+        "--continue=true",
+        "--auto-file-renaming=false",
+        "--enable-color=false",
+        "--console-log-level=warn",
+        "--summary-interval=0",
+        "--daemon=false",
+        *session_arg,
+    ]
+    # Skip --seed-time entirely when SEED_TIME_MIN == 0: aria2 reads
+    # --seed-time=0 as "disable seeding" (opposite of our meaning).
+    # Omitting the flag lets --seed-ratio be the only cap.
+    if SEED_TIME_MIN > 0:
+        cmd.append(f"--seed-time={SEED_TIME_MIN}")
+    return cmd
+
+
+def _wait_for_rpc(deadline_sec: float = 15.0) -> None:
+    deadline = time.time() + deadline_sec
+    last_exc: Exception | None = None
+    while time.time() < deadline:
+        try:
+            # getVersion is the cheapest call that also validates auth.
+            _rpc("aria2.getVersion")
+            return
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(0.2)
+    raise RuntimeError(f"aria2c RPC not ready after {deadline_sec}s: {last_exc}")
+
+
+def start_daemon() -> None:
+    """Launch aria2c as a foreground subprocess, then block until its
+    RPC endpoint accepts requests. Idempotent — noop if already up."""
+    global _daemon
+    if _daemon is not None and _daemon.poll() is None:
+        return
+    cmd = _daemon_cmd()
+    seed_time_desc = f"{SEED_TIME_MIN}m" if SEED_TIME_MIN > 0 else "∞"
+    ratio_desc = f"{SEED_RATIO}" if SEED_RATIO > 0 else "∞"
+    print(f"[aria2c] starting daemon: cap={GLOBAL_UPLOAD_LIMIT} "
+          f"seed_time={seed_time_desc} ratio={ratio_desc}", flush=True)
+    _daemon = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+    )
+
+    def _drain_stderr() -> None:
+        assert _daemon is not None and _daemon.stderr is not None
+        for raw in _daemon.stderr:
+            text = raw.decode("utf-8", errors="replace").rstrip()
+            if text:
+                print(f"[aria2c] {text}", flush=True)
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    _wait_for_rpc()
+    print("[aria2c] RPC ready", flush=True)
+
+
+def stop_daemon() -> None:
+    """Ask aria2c to shut down gracefully (flushes session, closes
+    peer connections). Falls back to SIGTERM/SIGKILL if RPC is dead."""
+    global _daemon
+    if _daemon is None:
+        return
+    try:
+        # aria2.shutdown returns before shutdown completes; the process
+        # exits shortly after. Bounded wait below prevents indefinite
+        # hang if aria2c is stuck.
+        _rpc("aria2.shutdown")
+    except Exception as exc:
+        print(f"[aria2c] graceful shutdown RPC failed ({exc}); "
+              "falling back to SIGTERM", flush=True)
+        _daemon.terminate()
+    try:
+        _daemon.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        _daemon.kill()
+        _daemon.wait(timeout=5)
+    _daemon = None
+    print("[aria2c] daemon exited", flush=True)
+
+
+# ── RPC client ────────────────────────────────────────────────────────────
+
+def _rpc(method: str, *params: Any) -> Any:
+    """One JSON-RPC call. Prepends the secret token to params (aria2
+    convention: first param is `"token:<secret>"`). Raises RuntimeError
+    on transport / protocol error, or if aria2 returns an error object."""
+    body = {
+        "jsonrpc": "2.0",
+        "id": "1",
+        "method": method,
+        "params": [f"token:{_RPC_TOKEN}", *params],
+    }
+    r = requests.post(_RPC_URL, json=body, timeout=_RPC_TIMEOUT)
+    r.raise_for_status()
+    resp = r.json()
+    if "error" in resp:
+        err = resp["error"]
+        raise RuntimeError(f"aria2 RPC error [{err.get('code')}]: {err.get('message')}")
+    return resp.get("result")
+
+
+# ── Wrapper folder naming (unchanged from spawn-per-magnet era) ───────────
 
 def _magnet_display_name(magnet: str) -> str | None:
-    """Pull the `dn=` parameter from a magnet URI, URL-decoded."""
     try:
         u = urlparse(magnet)
         dn = parse_qs(u.query).get("dn", [None])[0]
@@ -85,14 +237,8 @@ def _safe_folder(name: str) -> str:
 
 
 def _pick_wrapper_dir(magnet: str) -> Path:
-    """Pick a free per-torrent wrapper folder under /data/bt for this magnet.
-
-    Always puts the download inside its own folder so single-file torrents
-    don't dump their .mkv + sidecar SRT loose at /data/bt root. Disambiguates
-    against an existing folder with the same dn= by appending ` (2)`,
-    ` (3)`, ... in case the user re-submits the same magnet or two
-    different torrents share a dn=.
-    """
+    """Reserve a unique per-torrent wrapper dir under /data/bt. Suffix
+    with ` (2)`, ` (3)`, ... if the display name collides."""
     base = _safe_folder(_magnet_display_name(magnet) or "torrent")
     candidate = BT_LIBRARY / base
     i = 2
@@ -103,122 +249,192 @@ def _pick_wrapper_dir(magnet: str) -> Path:
     return candidate
 
 
-# ── Submit / list / delete ─────────────────────────────────────────────────
+# ── Torrent listing / discovery from aria2 state ──────────────────────────
 
-def _spawn(wrapper: Path, source: str) -> None:
-    """Spawn an aria2c subprocess into `wrapper` for `source` (a magnet URI
-    or a path to a .torrent file). Shared by submit (magnet) and
-    resume_all (saved .torrent)."""
-    cmd = [
-        "aria2c",
-        f"--dir={wrapper}",
-        f"--seed-time={SEED_TIME_MIN}",
-        f"--seed-ratio={SEED_RATIO}",
-        f"--max-overall-upload-limit={SEED_UPLOAD_LIMIT}",
-        "--bt-save-metadata=true",
-        "--enable-color=false",
-        "--console-log-level=warn",
-        "--summary-interval=0",
-        source,
+def _all_downloads() -> list[dict]:
+    """Every download aria2 currently knows about (active + waiting +
+    stopped). tellStopped needs a page; 1000 is far more than we'd
+    ever accumulate."""
+    active = _rpc("aria2.tellActive") or []
+    waiting = _rpc("aria2.tellWaiting", 0, 1000) or []
+    stopped = _rpc("aria2.tellStopped", 0, 1000) or []
+    return [*active, *waiting, *stopped]
+
+
+def _known_infohashes() -> set[str]:
+    """Infohashes aria2 currently knows about. Used by resume_all to
+    avoid double-adding a .torrent that's already in the queue."""
+    out: set[str] = set()
+    for d in _all_downloads():
+        ih = (d.get("infoHash") or "").lower()
+        if ih:
+            out.add(ih)
+    return out
+
+
+def _wrapper_from_download(d: dict) -> str | None:
+    """Extract wrapper folder name from a download's `dir` field.
+    Returns None if the dir isn't under BT_LIBRARY (shouldn't happen
+    with our layout, but defensive)."""
+    dir_str = d.get("dir")
+    if not dir_str:
+        return None
+    try:
+        rel = Path(dir_str).resolve().relative_to(BT_LIBRARY.resolve())
+    except ValueError:
+        return None
+    parts = rel.parts
+    return parts[0] if parts else None
+
+
+def _find_gids_for_wrapper(wrapper_name: str) -> list[str]:
+    """Every GID whose `dir` sits inside the wrapper folder. Usually
+    one, but a defensive list — deletes touch all of them."""
+    return [
+        d["gid"]
+        for d in _all_downloads()
+        if _wrapper_from_download(d) == wrapper_name and d.get("gid")
     ]
 
-    proc = subprocess.Popen(
-        cmd,
-        # stdout: aria2c's progress spam isn't worth surfacing in our logs.
-        stdout=subprocess.DEVNULL,
-        # stderr: aria2c writes real errors (dead trackers, hash mismatches,
-        # "no peers" complaints) here. Pipe through a drain thread into
-        # aria2-app's own log so a stuck / failed torrent is at least
-        # visible to `docker logs`.
-        stderr=subprocess.PIPE,
-        # Detach from our stdin so a SIGHUP / pipe-close to the parent
-        # doesn't propagate. Children still die on container SIGTERM
-        # (default).
-        stdin=subprocess.DEVNULL,
-    )
-    with _procs_lock:
-        _procs[wrapper.name] = proc
 
-    short = wrapper.name[:30]
-
-    def _drain_stderr() -> None:
-        assert proc.stderr is not None
-        for raw in proc.stderr:
-            text = raw.decode("utf-8", errors="replace").rstrip()
-            if text:
-                print(f"[aria2c {short}] {text}", flush=True)
-
-    threading.Thread(target=_drain_stderr, daemon=True).start()
-
+# ── Public API used by main.py ────────────────────────────────────────────
 
 def submit(magnet: str) -> str:
-    """Spawn an aria2c subprocess for this magnet. Returns wrapper name."""
+    """Reserve a wrapper dir and hand the magnet to aria2 with that
+    dir pinned as the download destination. Returns wrapper name."""
     wrapper = _pick_wrapper_dir(magnet)
-    print(f"[aria2c] launching for {wrapper.name}", flush=True)
-    _spawn(wrapper, magnet)
+    print(f"[aria2c] adding magnet → {wrapper.name}", flush=True)
+    _rpc("aria2.addUri", [magnet], {"dir": str(wrapper)})
     return wrapper.name
 
 
+def list_torrents() -> list[dict]:
+    """One entry per wrapper folder under /data/bt, phase + progress
+    derived from aria2's view."""
+    if not BT_LIBRARY.exists():
+        return []
+
+    # Fetch once, index by wrapper name.
+    by_wrapper: dict[str, dict] = {}
+    for d in _all_downloads():
+        name = _wrapper_from_download(d)
+        if name:
+            by_wrapper[name] = d
+
+    out: list[dict] = []
+    for wrapper in sorted(BT_LIBRARY.iterdir()):
+        if not wrapper.is_dir():
+            continue
+        # Skip our own session file — it's a file, not a dir, but iterdir
+        # returns both; the is_dir() above already filters. Belt-and-
+        # suspenders: also skip hidden entries.
+        if wrapper.name.startswith("."):
+            continue
+        d = by_wrapper.get(wrapper.name)
+        phase = _phase(wrapper, d)
+        row = {"name": wrapper.name, "phase": phase}
+        if phase == "downloading" and d:
+            try:
+                completed = int(d.get("completedLength") or 0)
+                total = int(d.get("totalLength") or 0)
+                if total > 0:
+                    row["progress"] = {"completed": completed, "total": total}
+            except (ValueError, TypeError):
+                pass
+        out.append(row)
+    return out
+
+
+def _phase(wrapper: Path, d: dict | None) -> str:
+    """downloading / seeding / done / orphaned."""
+    if d is None:
+        # aria2 doesn't know about this wrapper — user manually dropped
+        # files, or startup scan hasn't reached it yet.
+        return "orphaned"
+    status = d.get("status")  # active / waiting / paused / error / complete / removed
+    if status == "active":
+        # active means aria2 is working on it — download or seed. Use
+        # completedLength vs totalLength to distinguish.
+        completed = int(d.get("completedLength") or 0)
+        total = int(d.get("totalLength") or 0)
+        if total > 0 and completed >= total:
+            return "seeding"
+        return "downloading"
+    if status in ("complete", "removed"):
+        return "done"
+    if status == "paused":
+        return "downloading"
+    return "orphaned"
+
+
+def delete(wrapper_name: str) -> None:
+    """Remove all aria2 downloads targeting this wrapper.
+
+    Two-step removal: forceRemove ends the download+seed session,
+    removeDownloadResult wipes it from tellStopped so a subsequent
+    resume_all won't re-add it. Missing GID is a noop — the caller
+    is responsible for rmtree'ing the wrapper folder itself."""
+    for gid in _find_gids_for_wrapper(wrapper_name):
+        try:
+            _rpc("aria2.forceRemove", gid)
+        except RuntimeError as exc:
+            # "GID not found" if it's already stopped; that's fine.
+            print(f"[aria2c] forceRemove {gid[:12]} skipped: {exc}", flush=True)
+        try:
+            _rpc("aria2.removeDownloadResult", gid)
+        except RuntimeError:
+            pass
+
+
 def resume_all() -> None:
-    """Restart aria2c for every wrapper that has an in-flight `.aria2`
-    control file but no live subprocess.
+    """Scan wrapper folders for `.torrent` files, add any not already
+    known to aria2. Handles first boot after refactor (session file
+    missing) AND recovery from unclean shutdown (session file stale).
 
-    Called during aria2-app's startup lifespan. Container restart
-    killed the previous subprocesses (PID 1 of the container died, kernel
-    cleaned up the namespace), but aria2c left two things behind: the
-    partial output files + `<file>.aria2` control file (its own resume
-    metadata) and a `<infohash>.torrent` from --bt-save-metadata=true.
-    Together those let aria2c pick up exactly where it left off when we
-    re-spawn it with the saved .torrent.
-
-    Best-effort: a wrapper whose .torrent never finished writing (rare —
-    metadata fetch is one of the first things aria2c does) is logged as
-    skipped, no further action.
+    Only resumes wrappers with a live `.aria2` control file — i.e.
+    downloads aria2 was still working on when we last stopped. A
+    wrapper with just a `.torrent` file (no `.aria2`) is either a
+    completed old download whose seed session ended long ago, or a
+    wrapper the user manually cleaned files out of. Re-adding either
+    would kick off a hash-check and potentially a re-download of
+    missing pieces — surprising the user with old torrents suddenly
+    active again. Matches the spawn-per-magnet era behavior.
     """
     if not BT_LIBRARY.exists():
         return
+    known = _known_infohashes()
     for wrapper in BT_LIBRARY.iterdir():
         if not wrapper.is_dir():
             continue
         if not any(wrapper.rglob("*.aria2")):
-            continue  # nothing in flight in this wrapper
-        with _procs_lock:
-            if wrapper.name in _procs and _procs[wrapper.name].poll() is None:
-                continue  # already have a live subprocess (shouldn't happen at boot)
-        torrent_file = next(wrapper.glob("*.torrent"), None)
+            continue  # completed or dormant — don't wake it up
+        torrent_file = next(iter(wrapper.glob("*.torrent")), None)
         if torrent_file is None:
-            print(f"[aria2c] cannot resume {wrapper.name}: no .torrent metadata on disk", flush=True)
             continue
-        print(f"[aria2c] resuming {wrapper.name} from {torrent_file.name}", flush=True)
-        _spawn(wrapper, str(torrent_file))
+        try:
+            data = torrent_file.read_bytes()
+            info_hash = _infohash_from_torrent(data)
+        except Exception as exc:
+            print(f"[aria2c] resume: skipping {wrapper.name} — "
+                  f"cannot read .torrent: {exc}", flush=True)
+            continue
+        if info_hash in known:
+            continue
+        # aria2.addTorrent wants the raw bencoded bytes, base64-encoded.
+        b64 = base64.b64encode(data).decode("ascii")
+        try:
+            _rpc("aria2.addTorrent", b64, [], {"dir": str(wrapper)})
+            print(f"[aria2c] resumed {wrapper.name}", flush=True)
+        except Exception as exc:
+            print(f"[aria2c] resume {wrapper.name} failed: {exc}", flush=True)
 
+
+# ── Progress + control-file parsing (unchanged from old module) ───────────
 
 def read_progress(wrapper: Path) -> tuple[int, int] | None:
-    """Parse the `.aria2` control file to return `(downloaded_bytes,
-    total_bytes)`. Returns None if no control file exists (torrent is not
-    downloading — either done, seeding, or never started) or the file is
-    unreadable / has an unexpected format.
-
-    Reading .aria2 is the only accurate progress signal — aria2's default
-    `--file-allocation=prealloc` reserves full target size upfront, so
-    `du`/`ls` show 100% before the first byte is downloaded.
-
-    Control file format (aria2 v1, stable since v1.36):
-        2  version (big-endian uint16, currently always 1)
-        4  extension flags
-        4  infohash length N
-        N  infohash bytes
-        4  piece length (bytes per piece)
-        8  total length (uint64 big-endian)
-        8  upload length
-        4  bitfield length M
-        M  bitfield (1 bit per piece — set = piece verified complete)
-        ...
-
-    downloaded = popcount(bitfield) * piece_length, clamped to total_length
-    (the last piece may be smaller than piece_length, and it's simpler to
-    saturate at 100% than special-case the tail piece).
-    """
+    """Legacy fallback — aria2 RPC tellStatus is the primary progress
+    source now. This function is only useful if aria2 doesn't know
+    about the wrapper (orphaned state)."""
     ctl = next(iter(wrapper.rglob("*.aria2")), None)
     if ctl is None:
         return None
@@ -226,12 +442,12 @@ def read_progress(wrapper: Path) -> tuple[int, int] | None:
         data = ctl.read_bytes()
         off = 0
         _version = struct.unpack_from(">H", data, off)[0]; off += 2
-        off += 4  # extension
+        off += 4
         ihash_len = struct.unpack_from(">I", data, off)[0]; off += 4
         off += ihash_len
         piece_len = struct.unpack_from(">I", data, off)[0]; off += 4
         total_len = struct.unpack_from(">Q", data, off)[0]; off += 8
-        off += 8  # upload
+        off += 8
         bf_len = struct.unpack_from(">I", data, off)[0]; off += 4
         bitfield = data[off:off + bf_len]
     except (struct.error, OSError, IndexError):
@@ -241,87 +457,12 @@ def read_progress(wrapper: Path) -> tuple[int, int] | None:
     return (downloaded, total_len)
 
 
-def _phase(wrapper: Path, proc: subprocess.Popen | None) -> str:
-    """Derive `downloading` / `seeding` / `done` / `orphaned` from disk + proc state.
-
-    The `.aria2` control file is aria2c's own download-in-progress marker,
-    written next to each output file and deleted when all pieces verify.
-    So its presence/absence is the canonical "are we still downloading"
-    signal — no hook script or RPC needed to read it.
-    """
-    if proc is None:
-        # No subprocess registered (post-restart, or never had one).
-        # The torrent's files are still on disk but nobody's seeding.
-        return "orphaned"
-    if proc.poll() is not None:
-        # aria2c exited — seed limit met, or download failed early.
-        return "done"
-    if any(wrapper.rglob("*.aria2")):
-        return "downloading"
-    return "seeding"
-
-
-def list_torrents() -> list[dict]:
-    """One entry per wrapper folder under /data/bt."""
-    out = []
-    if not BT_LIBRARY.exists():
-        return out
-    with _procs_lock:
-        procs_snapshot = dict(_procs)
-        # Drop entries whose subprocess has exited AND whose wrapper no
-        # longer exists — keeps the dict from growing forever.
-        for name, proc in list(_procs.items()):
-            if proc.poll() is not None and not (BT_LIBRARY / name).exists():
-                _procs.pop(name, None)
-
-    for wrapper in sorted(BT_LIBRARY.iterdir()):
-        if not wrapper.is_dir():
-            continue
-        proc = procs_snapshot.get(wrapper.name)
-        phase = _phase(wrapper, proc)
-        row = {
-            "name": wrapper.name,
-            "phase": phase,
-        }
-        if phase == "downloading":
-            progress = read_progress(wrapper)
-            if progress is not None:
-                row["progress"] = {
-                    "completed": progress[0],
-                    "total": progress[1],
-                }
-        out.append(row)
-    return out
-
-
-def delete(wrapper_name: str) -> None:
-    """Kill the aria2c subprocess for this wrapper (if running).
-
-    The wrapper folder rmtree is deliberately NOT done here — the
-    caller (transcribe over the shared /data/bt bind mount, or the
-    user via `rm -rf`) is responsible for that. Splitting kill from
-    rmtree lets transcribe orchestrate cleanup atomically alongside
-    its own canonical / _sources / sentinel unlink work, and means an
-    aria2 outage doesn't leave orphaned wrapper dirs on disk that a
-    healthy transcribe could have removed."""
-    with _procs_lock:
-        proc = _procs.pop(wrapper_name, None)
-    if proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
+# ── Probe (metadata-only fetch, unchanged bencode parsing) ────────────────
 
 PROBE_TIMEOUT_SEC = 90
 
 
 def _bdecode(data: bytes, pos: int = 0):
-    """Minimal bencode decoder returning (value, next_pos). Enough to
-    parse a .torrent's `info` block for name + size — not a general
-    bencode library. Keys stay as bytes; caller uses b"info", b"length",
-    etc."""
     c = data[pos:pos + 1]
     if c == b"d":
         result: dict = {}
@@ -341,19 +482,46 @@ def _bdecode(data: bytes, pos: int = 0):
     if c == b"i":
         end = data.index(b"e", pos)
         return int(data[pos + 1:end]), end + 1
-    # length-prefixed byte string:  "<n>:<bytes>"
     colon = data.index(b":", pos)
     length = int(data[pos:colon])
     start = colon + 1
     return data[start:start + length], start + length
 
 
+def _bencode(value: Any) -> bytes:
+    """Minimal bencoder — just enough to re-encode a `.torrent`'s
+    `info` dict for infohash computation. Keys are bytes (from _bdecode),
+    values are dict / list / int / bytes."""
+    if isinstance(value, dict):
+        out = b"d"
+        for k in sorted(value.keys()):
+            out += _bencode(k) + _bencode(value[k])
+        return out + b"e"
+    if isinstance(value, list):
+        out = b"l"
+        for v in value:
+            out += _bencode(v)
+        return out + b"e"
+    if isinstance(value, int):
+        return b"i" + str(value).encode("ascii") + b"e"
+    if isinstance(value, bytes):
+        return str(len(value)).encode("ascii") + b":" + value
+    raise TypeError(f"unbencodable type: {type(value).__name__}")
+
+
+def _infohash_from_torrent(data: bytes) -> str:
+    """SHA-1 hex of bencode(info) — the canonical BT infohash."""
+    top, _ = _bdecode(data)
+    info = top.get(b"info")
+    if info is None:
+        raise ValueError(".torrent has no info dict")
+    return hashlib.sha1(_bencode(info)).hexdigest()
+
+
 def _torrent_info(data: bytes) -> dict:
-    """Extract total size + display name from a .torrent's bencoded bytes."""
     d, _ = _bdecode(data)
     info = d.get(b"info") or {}
     name = info.get(b"name", b"").decode("utf-8", errors="replace")
-    # Single-file torrent has info.length; multi-file has info.files[].length.
     length = info.get(b"length")
     if length is not None:
         return {"size_bytes": int(length), "name": name}
@@ -363,104 +531,68 @@ def _torrent_info(data: bytes) -> dict:
 
 
 def probe(magnet: str, timeout_sec: int = PROBE_TIMEOUT_SEC) -> dict:
-    """Fetch the magnet's `.torrent` metadata WITHOUT downloading the
-    payload files. Returns `{size_bytes, name}` on success. Raises
-    `TimeoutError` (misleadingly-named for any "no .torrent produced"
-    outcome) with a stderr tail from aria2c so the caller can see why.
-
-    Under the hood: spawn an aria2c with `--bt-metadata-only=true
-    --bt-save-metadata=true --seed-time=0` into a scratch dir, poll
-    for the `.torrent` file, then kill + cleanup regardless of outcome.
-    Metadata typically lands in 5-30 s from a healthy DHT / trackers.
-    """
-    # Scratch dir lives OUTSIDE BT_LIBRARY so the shared /data/bt mount
-    # never gets a transient probe folder that transcribe's reconciler
-    # could see. /tmp is container-local and gets cleaned automatically.
+    """Fetch metadata WITHOUT downloading. Adds the magnet with
+    bt-metadata-only so aria2 stops after resolving the .torrent,
+    polls for the file to land in a scratch dir, then removes the
+    download from aria2 and cleans up the scratch dir."""
     scratch = Path(tempfile.mkdtemp(prefix="probe-", dir="/tmp"))
-    # Buffer stderr in a background thread — aria2c can wedge on a full
-    # pipe if we never drain it, and we want the tail available for the
-    # error message when things go wrong.
-    stderr_chunks: list[str] = []
+    gid: str | None = None
     try:
-        cmd = [
-            "aria2c",
-            "--bt-metadata-only=true",
-            "--bt-save-metadata=true",
-            "--seed-time=0",
-            f"--dir={scratch}",
-            "--enable-color=false",
-            "--console-log-level=warn",
-            "--summary-interval=0",
-            magnet,
-        ]
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-        )
-
-        def _drain() -> None:
-            assert proc.stderr is not None
-            for raw in proc.stderr:
-                text = raw.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    stderr_chunks.append(text)
-                    print(f"[aria2c probe] {text}", flush=True)
-
-        threading.Thread(target=_drain, daemon=True).start()
+        gid = _rpc("aria2.addUri", [magnet], {
+            "dir": str(scratch),
+            "bt-metadata-only": "true",
+            "bt-save-metadata": "true",
+            "seed-time": "0",
+            # Don't let this probe count against the global upload cap or
+            # keep peer connections open past metadata resolution.
+            "max-upload-limit": "1K",
+        })
 
         deadline = time.time() + timeout_sec
         torrent_file: Path | None = None
-        try:
-            while time.time() < deadline:
-                time.sleep(0.5)
-                # Some aria2c builds tuck the .torrent into a subdir
-                # (e.g. via download-file-side metadata); rglob covers
-                # both direct and nested placement.
-                found = next(iter(scratch.rglob("*.torrent")), None)
-                if found is not None and found.stat().st_size > 0:
-                    torrent_file = found
+        while time.time() < deadline:
+            time.sleep(0.5)
+            found = next(iter(scratch.rglob("*.torrent")), None)
+            if found is not None and found.stat().st_size > 0:
+                torrent_file = found
+                break
+            # Bail early if aria2 already finished/errored on this download.
+            try:
+                status = _rpc("aria2.tellStatus", gid, ["status"])
+                if (status or {}).get("status") in ("complete", "error", "removed"):
+                    # Give the .torrent one last chance to appear on disk.
+                    found = next(iter(scratch.rglob("*.torrent")), None)
+                    if found is not None and found.stat().st_size > 0:
+                        torrent_file = found
                     break
-                # If aria2c already exited without producing a .torrent,
-                # no point waiting further.
-                if proc.poll() is not None and torrent_file is None:
-                    break
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+            except RuntimeError:
+                pass
 
         if torrent_file is None:
-            # Include stderr tail so the caller (and Telegram) sees the
-            # actual reason instead of a generic "timeout" line.
-            tail = " | ".join(stderr_chunks[-5:]) if stderr_chunks else "(no stderr)"
             raise TimeoutError(
-                f"no .torrent produced within {timeout_sec}s; "
-                f"aria2c rc={proc.returncode}; stderr tail: {tail}"
+                f"no .torrent produced within {timeout_sec}s "
+                f"(metadata resolution failed — bad tracker set or DHT unreachable)"
             )
         return _torrent_info(torrent_file.read_bytes())
     finally:
+        if gid is not None:
+            try:
+                _rpc("aria2.forceRemove", gid)
+            except RuntimeError:
+                pass
+            try:
+                _rpc("aria2.removeDownloadResult", gid)
+            except RuntimeError:
+                pass
         shutil.rmtree(scratch, ignore_errors=True)
 
 
 def shutdown() -> None:
-    """Kill every still-running aria2c on lifespan teardown.
-
-    Docker's SIGTERM would do this anyway via the process tree, but doing
-    it explicitly lets us reap the children and surface log lines if any
-    refused to die.
-    """
-    with _procs_lock:
-        for name, proc in _procs.items():
-            if proc.poll() is None:
-                proc.terminate()
-        for name, proc in _procs.items():
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        _procs.clear()
+    """Kept for API compatibility — the actual daemon shutdown is
+    handled by stop_daemon(). Callers that only want the graceful
+    aria2 shutdown (without waiting on the subprocess) can still
+    use this; it's a noop if RPC is already dead."""
+    try:
+        _rpc("aria2.shutdown")
+    except Exception:
+        pass

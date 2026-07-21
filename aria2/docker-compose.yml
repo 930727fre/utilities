@@ -72,6 +72,14 @@ services:
       # Relative path assumes utilities/aria2 and utilities/transcribe
       # are siblings, which matches the standard layout.
       - ../transcribe/data/bt:/data/bt
+    environment:
+      # Auth secret for aria2c's JSON-RPC. Sidecar reads the same var
+      # and passes it as `token:<secret>` on every RPC call. Aria2's
+      # RPC is bound to 127.0.0.1 (--rpc-listen-all=false) so it's not
+      # reachable from other containers, but the token is still
+      # mandatory — defense in depth for the netns-shared attack
+      # surface. Any random string works (e.g.  `openssl rand -hex 24`).
+      - ARIA2_RPC_TOKEN=${ARIA2_RPC_TOKEN:?ARIA2_RPC_TOKEN must be exported before docker compose up}
     command: uvicorn main:app --host 0.0.0.0 --port 8080
     restart: unless-stopped
 

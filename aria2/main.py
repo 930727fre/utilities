@@ -1,4 +1,5 @@
-"""Thin REST wrapper around bt_torrents.
+"""Thin REST wrapper around bt_torrents (which now talks to a persistent
+aria2c daemon via JSON-RPC).
 
 Endpoints
     POST   /torrents          {"magnet": "magnet:?..."}         → {"wrapper": "..."}
@@ -7,15 +8,18 @@ Endpoints
     DELETE /torrents/{wrapper}                                   → 204
     GET    /health                                               → {"ok": true}
 
-Lifespan handles subprocess bookkeeping across container restarts:
-    startup  → bt_torrents.resume_all()  (re-attach aria2c to any
-               half-finished download that survived the restart)
-    shutdown → bt_torrents.shutdown()    (kill live subprocesses cleanly)
+Lifespan (order matters):
+    startup  → start_daemon()   (spawn aria2c, wait for RPC)
+               resume_all()     (scan wrappers, re-add any .torrent
+                                 whose infohash isn't already in
+                                 aria2's queue)
+    shutdown → stop_daemon()    (RPC aria2.shutdown → SIGTERM fallback)
 
 All aria2c outbound traffic exits through gluetun's VPN tunnel since
 this container uses network_mode: "service:aria2-gluetun". If gluetun
-dies or the tunnel drops, this container loses connectivity — the
-implicit kill-switch prevents clear-text leaks on VPN failure.
+dies or the tunnel drops, both the daemon and this sidecar lose
+connectivity — the implicit kill-switch prevents clear-text leaks
+on VPN failure.
 """
 from contextlib import asynccontextmanager
 
@@ -27,11 +31,12 @@ import bt_torrents
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    bt_torrents.start_daemon()
     bt_torrents.resume_all()
     try:
         yield
     finally:
-        bt_torrents.shutdown()
+        bt_torrents.stop_daemon()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -56,7 +61,7 @@ async def submit(req: MagnetRequest):
     try:
         wrapper = bt_torrents.submit(req.magnet)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"aria2c launch failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"aria2 addUri failed: {exc}")
     return {"wrapper": wrapper}
 
 
@@ -72,7 +77,7 @@ async def probe(req: MagnetRequest):
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"aria2c probe failed: {exc}")
+        raise HTTPException(status_code=502, detail=f"aria2 probe failed: {exc}")
 
 
 @app.get("/torrents")
