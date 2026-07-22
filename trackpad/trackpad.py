@@ -1,3 +1,10 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "aiohttp>=3.9",
+#     "pyobjc-framework-Quartz>=10",
+# ]
+# ///
 """iPhone-as-trackpad server for macOS.
 
 Serves the sibling index.html and a WebSocket endpoint (/ws) on the
@@ -10,11 +17,12 @@ Quartz.CGEventPost silently returns and the cursor doesn't move. If
 mouse movement works but tap-click doesn't, that's still a permission
 issue — grant Terminal (or whichever app spawned Python).
 
-Deps:
-    pip install aiohttp pyobjc-framework-Quartz
-
 Run:
-    python3 trackpad.py [--port 8080] [--host 0.0.0.0]
+    uv run trackpad.py [--port 8080] [--host 0.0.0.0]
+
+Dependencies are declared inline (PEP 723) — uv builds an ephemeral
+venv on first run, caches it, reuses it on later runs. No manual
+venv, no requirements.txt, no pyproject.toml.
 
 Connect from iPhone (both devices on the same Tailscale tailnet):
     http://<mac-hostname>:8080/
