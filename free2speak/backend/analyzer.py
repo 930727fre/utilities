@@ -49,7 +49,7 @@ def analyze(transcript: str, active_errors: list) -> dict:
     attempts = [
         (ANALYZE_MODEL, 0.2, "sonnet@0.2"),
         (ANALYZE_MODEL, 0.5, "sonnet@0.5"),
-        ("claude-opus-4-7", None, "opus"),
+        ("claude-opus-4-8", None, "opus"),
     ]
     for i, (model, temp, label) in enumerate(attempts, 1):
         print(f"[analyze] attempt {i}/{len(attempts)}: {label}", flush=True)

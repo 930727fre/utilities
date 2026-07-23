@@ -99,7 +99,7 @@ SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".sup"}
 # returns for pattern detection. Kept as a constant for clarity.
 _SAMPLES_PER_DIR = 2
 
-_MODEL = os.environ.get("ANTHROPIC_FILTER_MODEL", "claude-opus-4-7")
+_MODEL = os.environ.get("ANTHROPIC_FILTER_MODEL", "claude-opus-4-8")
 _WEB_SEARCH_MAX_USES = 3
 
 _SCHEMA = {

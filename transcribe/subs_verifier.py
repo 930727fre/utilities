@@ -444,7 +444,7 @@ def verify_against_whisper(
 # was likely over-provisioning. Web search fills gaps for episodes
 # outside training coverage regardless of tier. If Sonnet turns out
 # to false-positive on wrong-episode discrimination, revert to
-# `claude-opus-4-7` and record the failure here.
+# `claude-opus-4-8` and record the failure here.
 _PLOT_MODEL = "claude-sonnet-4-6"
 _PLOT_WEB_SEARCH_MAX_USES = 3
 
@@ -517,7 +517,7 @@ used web_search, note what source you cross-referenced against.
 # of subtitles would cost dollars per episode; a single Haiku pick +
 # one plot-check bounds it to ~$0.10 per bundled attempt.
 _PICK_MODEL = os.environ.get("ANTHROPIC_BUNDLED_PICK_MODEL",
-                             "claude-haiku-4-5-20251001")
+                             "claude-haiku-4-5")
 
 _PICK_SCHEMA = {
     "type": "object",

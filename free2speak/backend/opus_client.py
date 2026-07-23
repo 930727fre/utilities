@@ -15,7 +15,7 @@ from typing import Any
 from anthropic import Anthropic
 from fastapi import HTTPException
 
-DEFAULT_MODEL = os.environ.get("OPUS_MODEL", "claude-opus-4-7")
+DEFAULT_MODEL = os.environ.get("OPUS_MODEL", "claude-opus-4-8")
 DEFAULT_MAX_TOKENS = 4096
 
 
