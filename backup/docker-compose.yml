@@ -3,17 +3,44 @@ services:
     build: .
     container_name: backup
     volumes:
-      # one entry per tool with persistent data — mount path must be /tools/<tool>/data
-      - ../flashcard/data:/tools/flashcard/data
-      - ../free2speak/data:/tools/free2speak/data
+      # One entry per tool with persistent data — mount path must be
+      # /tools/<tool>/data.
+      #
+      # `create_host_path: false` on every mount is the defense against
+      # docker's default "silently mkdir the source" behavior. If a
+      # source path here goes stale (tool renamed, moved to arr/, typo),
+      # docker compose up would otherwise auto-create an empty dir on
+      # host, mount it in, and backup.sh would ship a 0-byte tarball to
+      # R2 with a "done" telegram — the exact silent failure that hid
+      # transcribe/data/archive → arr/data/archive migration for one
+      # cycle. With create_host_path: false, `docker compose up` dies
+      # loudly at container-create time with "bind source path does not
+      # exist" instead.
+      - type: bind
+        source: ../flashcard/data
+        target: /tools/flashcard/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../free2speak/data
+        target: /tools/free2speak/data
+        bind:
+          create_host_path: false
       # transcribe: only the archive/ subdir. It's the canonical
       # SRT store (English + Chinese sidecars) — everything else in
-      # transcribe/data/ is either huge (bt/ videos, ~100 GB) or a
-      # hardlink of it (artifact/), and both are reproducible by
-      # replaying the pipeline. Archive is the only irrecoverable
-      # bit — each SRT costs a Sonnet annotation pass (~$0.05).
-      # 30-day retention × ~8 MB gzipped ≈ 240 MB in R2, negligible.
-      - ../transcribe/data/archive:/tools/transcribe-archive/data
+      # arr/data/ is either huge (bt/ videos, ~100 GB) or a hardlink
+      # of it (artifact/), and both are reproducible by replaying the
+      # pipeline. Archive is the only irrecoverable bit — each SRT
+      # costs a Sonnet annotation pass (~$0.05). 30-day retention ×
+      # ~8 MB gzipped ≈ 240 MB in R2, negligible.
+      # Path lives under arr/data/ since the transcribe/qBit stack
+      # was moved out of utilities/. Relative path from utilities/backup/
+      # is ../../arr/data/archive.
+      - type: bind
+        source: ../../arr/data/archive
+        target: /tools/transcribe-archive/data
+        bind:
+          create_host_path: false
     environment:
       # space-separated list of tools to back up; must match volume mount names above
       - TOOLS=flashcard free2speak transcribe-archive
