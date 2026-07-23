@@ -29,7 +29,7 @@ from models import (
 
 TZ = ZoneInfo("Asia/Taipei")
 
-GEMINI_AUDIO_MODEL = os.environ.get("GEMINI_AUDIO_MODEL", "gemini-2.5-flash")
+GEMINI_AUDIO_MODEL = os.environ.get("GEMINI_AUDIO_MODEL", "gemini-3.1-flash-lite")
 GEMINI_API_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{GEMINI_AUDIO_MODEL}:generateContent"
