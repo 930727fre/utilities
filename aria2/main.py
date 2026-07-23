@@ -60,6 +60,14 @@ async def submit(req: MagnetRequest):
         raise HTTPException(status_code=400, detail="must be a magnet: URI")
     try:
         wrapper = bt_torrents.submit(req.magnet)
+    except bt_torrents.DuplicateMagnetError as exc:
+        # 409 Conflict: caller (transcribe) surfaces a "you already
+        # have this" note instead of treating it as an error.
+        raise HTTPException(status_code=409, detail={
+            "error": "duplicate_magnet",
+            "message": str(exc),
+            "wrapper": exc.wrapper,
+        })
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"aria2 addUri failed: {exc}")
     return {"wrapper": wrapper}

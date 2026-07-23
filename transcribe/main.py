@@ -522,6 +522,16 @@ def _process_magnet(magnet: str) -> None:
     except httpx.HTTPError as exc:
         _send(f"Magnet submit failed | {name} | aria2 unreachable: {exc}")
         return
+    if r.status_code == 409:
+        # Sidecar detected aria2 already has this infohash. Nothing to
+        # do — the existing download continues. Notify so the user
+        # knows nothing new happened and where the existing one lives.
+        try:
+            existing = (r.json().get("detail") or {}).get("wrapper") or "(unknown)"
+        except (ValueError, AttributeError):
+            existing = "(unknown)"
+        _send(f"Magnet already active | {name} | existing wrapper: {existing}")
+        return
     if r.status_code >= 400:
         detail = _extract_detail(r) or f"aria2 sidecar returned {r.status_code}"
         _send(f"Magnet submit failed | {name} | {detail}")

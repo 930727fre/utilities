@@ -231,6 +231,42 @@ def _magnet_display_name(magnet: str) -> str | None:
     return None
 
 
+def _infohash_from_magnet(magnet: str) -> str | None:
+    """Extract 40-char lowercase hex infohash from a magnet URI's
+    xt=urn:btih:XXX param. Accepts both hex (40 chars) and base32
+    (32 chars) encodings. Returns None on any parse failure."""
+    try:
+        u = urlparse(magnet)
+    except Exception:
+        return None
+    if u.scheme != "magnet":
+        return None
+    for xt in parse_qs(u.query).get("xt", []):
+        if not xt.startswith("urn:btih:"):
+            continue
+        raw = xt[len("urn:btih:"):]
+        if len(raw) == 40:
+            try:
+                bytes.fromhex(raw)
+                return raw.lower()
+            except ValueError:
+                continue
+        if len(raw) == 32:
+            try:
+                return base64.b32decode(raw.upper()).hex().lower()
+            except Exception:
+                continue
+    return None
+
+
+class DuplicateMagnetError(RuntimeError):
+    """Magnet's infohash is already known to aria2. Callers can grab
+    `.wrapper` for the existing download's wrapper folder name."""
+    def __init__(self, wrapper: str):
+        super().__init__(f"infohash already in aria2 (wrapper={wrapper!r})")
+        self.wrapper = wrapper
+
+
 def _safe_folder(name: str) -> str:
     safe = _UNSAFE_NAME.sub("_", name).strip(" .\t\n")
     return safe[:180] or "torrent"
@@ -324,13 +360,37 @@ def global_stats() -> dict:
 
 # ── Public API used by main.py ────────────────────────────────────────────
 
+_submit_lock = threading.Lock()
+
+
 def submit(magnet: str) -> str:
     """Reserve a wrapper dir and hand the magnet to aria2 with that
-    dir pinned as the download destination. Returns wrapper name."""
-    wrapper = _pick_wrapper_dir(magnet)
-    print(f"[aria2c] adding magnet → {wrapper.name}", flush=True)
-    _rpc("aria2.addUri", [magnet], {"dir": str(wrapper)})
-    return wrapper.name
+    dir pinned as the download destination. Returns wrapper name.
+
+    Raises DuplicateMagnetError if aria2 already knows this magnet's
+    infohash (active, seeding, complete, errored — anything in
+    tellActive/Waiting/Stopped). Prevents accidental double-adds that
+    would result in two GIDs for the same infohash: as we saw with
+    Fringe on 2026-07-23, the second addUri creates a live GID while
+    the first stays in stopped/complete, and _all_downloads's naive
+    last-wins indexing makes the UI report the wrong state.
+
+    The check-then-addUri is serialized with a module-level lock so
+    two concurrent submits of the same magnet can't both pass the dedup
+    check (which would happen without the lock — FastAPI runs sync
+    endpoints in a threadpool, so two /torrents requests really do race).
+    Cost is negligible for a single-user deployment: addUri is a few
+    hundred ms and submits are rare."""
+    with _submit_lock:
+        info_hash = _infohash_from_magnet(magnet)
+        if info_hash:
+            for d in _all_downloads():
+                if (d.get("infoHash") or "").lower() == info_hash:
+                    raise DuplicateMagnetError(_wrapper_from_download(d) or "(unknown)")
+        wrapper = _pick_wrapper_dir(magnet)
+        print(f"[aria2c] adding magnet → {wrapper.name}", flush=True)
+        _rpc("aria2.addUri", [magnet], {"dir": str(wrapper)})
+        return wrapper.name
 
 
 def list_torrents() -> list[dict]:
@@ -484,7 +544,7 @@ def read_progress(wrapper: Path) -> tuple[int, int] | None:
 
 # ── Probe (metadata-only fetch, unchanged bencode parsing) ────────────────
 
-PROBE_TIMEOUT_SEC = 90
+PROBE_TIMEOUT_SEC = 150
 
 
 def _bdecode(data: bytes, pos: int = 0):
@@ -556,22 +616,63 @@ def _torrent_info(data: bytes) -> dict:
 
 
 def probe(magnet: str, timeout_sec: int = PROBE_TIMEOUT_SEC) -> dict:
-    """Fetch metadata WITHOUT downloading. Adds the magnet with
-    bt-metadata-only so aria2 stops after resolving the .torrent,
-    polls for the file to land in a scratch dir, then removes the
-    download from aria2 and cleans up the scratch dir."""
+    """Fetch metadata WITHOUT downloading payload. Spawns a short-lived
+    aria2c subprocess (NOT the seed daemon) with --bt-metadata-only, polls
+    for the .torrent file to appear in a scratch dir, then kills the
+    subprocess and cleans up.
+
+    Why a subprocess and not the daemon's RPC: `bt-metadata-only` is a
+    startup mode flag in aria2 (changes the whole process's lifecycle:
+    stop after metadata resolution, don't enter payload-download phase).
+    It's NOT a per-download option — passing it as a per-URI addUri
+    option gets HTTP 400 from the RPC layer (aria2 can't have "some
+    downloads in metadata-only mode, others normal" in the same daemon).
+    A pause=true workaround pauses the metadata fetch itself, so no
+    .torrent gets written. Subprocess is the only reliable path.
+
+    Cold DHT bootstrap in a fresh aria2c can take 60-90s (empirically
+    verified on Toy Story 5 magnet — 80s to find 23 peers via DHT). The
+    150s default timeout gives real magnets room to complete; magnets
+    with no live peers will still time out cleanly.
+
+    Aria2 default BT/DHT port ranges (6881-6999) are shared with the
+    seed daemon — aria2 tries the range in sequence and picks any free
+    port, so no explicit --listen-port needed. Verified: daemon binding
+    6881 doesn't stop subprocess from binding 6888.
+
+    Buffered stderr is included in the raised TimeoutError so callers
+    see why aria2c gave up — bad tracker set, DHT unreachable, invalid
+    magnet, etc."""
     scratch = Path(tempfile.mkdtemp(prefix="probe-", dir="/tmp"))
-    gid: str | None = None
+    stderr_chunks: list[str] = []
+    proc: subprocess.Popen | None = None
     try:
-        gid = _rpc("aria2.addUri", [magnet], {
-            "dir": str(scratch),
-            "bt-metadata-only": "true",
-            "bt-save-metadata": "true",
-            "seed-time": "0",
-            # Don't let this probe count against the global upload cap or
-            # keep peer connections open past metadata resolution.
-            "max-upload-limit": "1K",
-        })
+        cmd = [
+            "aria2c",
+            "--bt-metadata-only=true",
+            "--bt-save-metadata=true",
+            "--seed-time=0",
+            f"--dir={scratch}",
+            "--enable-color=false",
+            "--console-log-level=warn",
+            "--summary-interval=0",
+            magnet,
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+
+        def _drain() -> None:
+            assert proc is not None and proc.stderr is not None
+            for raw in proc.stderr:
+                text = raw.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    stderr_chunks.append(text)
+
+        threading.Thread(target=_drain, daemon=True).start()
 
         deadline = time.time() + timeout_sec
         torrent_file: Path | None = None
@@ -581,34 +682,28 @@ def probe(magnet: str, timeout_sec: int = PROBE_TIMEOUT_SEC) -> dict:
             if found is not None and found.stat().st_size > 0:
                 torrent_file = found
                 break
-            # Bail early if aria2 already finished/errored on this download.
-            try:
-                status = _rpc("aria2.tellStatus", gid, ["status"])
-                if (status or {}).get("status") in ("complete", "error", "removed"):
-                    # Give the .torrent one last chance to appear on disk.
-                    found = next(iter(scratch.rglob("*.torrent")), None)
-                    if found is not None and found.stat().st_size > 0:
-                        torrent_file = found
-                    break
-            except RuntimeError:
-                pass
+            if proc.poll() is not None:
+                # aria2c exited on its own — give the .torrent one last
+                # chance to appear in case the file write races the exit.
+                found = next(iter(scratch.rglob("*.torrent")), None)
+                if found is not None and found.stat().st_size > 0:
+                    torrent_file = found
+                break
 
         if torrent_file is None:
+            tail = "\n".join(stderr_chunks[-10:]) or "(no stderr — timeout waiting for peers)"
             raise TimeoutError(
-                f"no .torrent produced within {timeout_sec}s "
-                f"(metadata resolution failed — bad tracker set or DHT unreachable)"
+                f"no .torrent produced within {timeout_sec}s — aria2c stderr:\n{tail}"
             )
         return _torrent_info(torrent_file.read_bytes())
     finally:
-        if gid is not None:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
             try:
-                _rpc("aria2.forceRemove", gid)
-            except RuntimeError:
-                pass
-            try:
-                _rpc("aria2.removeDownloadResult", gid)
-            except RuntimeError:
-                pass
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
         shutil.rmtree(scratch, ignore_errors=True)
 
 
