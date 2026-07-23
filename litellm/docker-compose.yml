@@ -1,0 +1,28 @@
+services:
+  litellm:
+    # Pure gateway. No master_key (any my_network container can call it),
+    # no DB, no cost tracking (utilities services log their own spend).
+    # Purpose: single place to hold provider API keys + a unified
+    # OpenAI-compatible surface for calling Claude / Gemini from anywhere.
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm
+    restart: unless-stopped
+    ports:
+      # Exposed on host too so `curl localhost:4000` works from the shell
+      # without going through a container.
+      - "4000:4000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
+    environment:
+      # Loud-fail at compose-parse time if the shell forgot to export
+      # these. Keeping keys in env (not .env, not a config file) means
+      # they never land in git and never enter Claude Code's context.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?export ANTHROPIC_API_KEY in your shell before docker compose up}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?export GEMINI_API_KEY in your shell before docker compose up}
+    networks:
+      - my_network
+
+networks:
+  my_network:
+    external: true

@@ -1,0 +1,31 @@
+# Wildcard routing: any model name prefixed with `anthropic/` or `gemini/`
+# is forwarded to the matching provider. No per-model entries — new
+# models work automatically without editing this file.
+#
+# Client-side usage:
+#   POST /v1/chat/completions
+#   { "model": "anthropic/claude-opus-4-8", ... }
+#   { "model": "gemini/gemini-3.1-flash-lite", ... }
+model_list:
+  - model_name: "anthropic/*"
+    litellm_params:
+      model: "anthropic/*"
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: "gemini/*"
+    litellm_params:
+      model: "gemini/*"
+      api_key: os.environ/GEMINI_API_KEY
+
+litellm_settings:
+  # Silently drop request params the target provider doesn't support
+  # (e.g. `top_k` sent to a model that rejects it), so calls tuned for
+  # one provider don't 400 when routed to another.
+  drop_params: true
+
+general_settings:
+  # No master_key here → auth is off. Safe because the proxy is only
+  # reachable via my_network + localhost, and both are single-tenant.
+  # If we ever expose it publicly, add:
+  #   master_key: sk-...
+  # and require clients to send it in the Authorization header.
