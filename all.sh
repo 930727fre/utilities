@@ -14,7 +14,6 @@ SERVICES=(
   xyt
   flashcard
   keyboard
-  transcribe
   free2speak
   clock
   recorder

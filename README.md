@@ -7,8 +7,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
 | [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
 | [marker-pipeline](./marker-pipeline) | Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
-| [transcribe](./transcribe) | YouTube URL **or** magnet link → mp4 + Whisper SRT + Claude `※` annotation; plus a "translate to 中" button per torrent that produces a `.zh-tw.srt` sidecar (OpenSubtitles first, Gemini fallback). Sidecar SRTs picked up by Jellyfin / Infuse via [jellyfin](./jellyfin). Magnets are dispatched to the [aria2](./aria2) sidecar (one-shot `aria2c` subprocess per torrent, 1440 min / ratio 1.0 seed limits, BT traffic routed through Surfshark gluetun) |
-| [aria2](./aria2) | Standalone BT downloader with Surfshark gluetun sidecar — one-shot `aria2c` subprocess per magnet, kill-switch via netns sharing (no port forwarding — Surfshark doesn't offer it). Talks to transcribe over `my_network` via REST |
+| _transcribe_ | Moved to `~/arr/transcribe/` — BT stack (transcribe + qBit + gluetun + jellyfin + rclone) now lives in its own `arr/` repo since it grew beyond a single tool |
 | [xyt](./xyt) | Fork of transcribe |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |

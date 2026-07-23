@@ -28,10 +28,10 @@ Start the tunnel first (it creates `my_network` automatically), then each servic
 cd cloudflared && CLOUDFLARE_TUNNEL_TOKEN=<token> docker compose up -d
 # cd ../ollama && docker compose up -d
 cd ../marker-pipeline && docker compose up -d
-cd ../transcribe && docker compose up -d
 cd ../flashcard && docker compose up -d
 cd ../keyboard && docker compose up -d
 cd ../clock && docker compose up -d
+# transcribe / qbit / gluetun / jellyfin / rclone live in ~/arr/ — bring up separately from there
 ```
 
 **Windows CMD**
@@ -39,10 +39,10 @@ cd ../clock && docker compose up -d
 cd cloudflared && set CLOUDFLARE_TUNNEL_TOKEN=<token> && docker compose up -d
 :: cd ../ollama && docker compose up -d
 cd ../marker-pipeline && docker compose up -d
-cd ../transcribe && docker compose up -d
 cd ../flashcard && docker compose up -d
 cd ../keyboard && docker compose up -d
 cd ../clock && docker compose up -d
+:: transcribe / qbit / gluetun / jellyfin / rclone live in ~/arr/ — bring up separately from there
 ```
 
 **Windows PowerShell**
@@ -50,10 +50,10 @@ cd ../clock && docker compose up -d
 cd cloudflared; $env:CLOUDFLARE_TUNNEL_TOKEN="<token>"; docker compose up -d
 # cd ../ollama; docker compose up -d
 cd ../marker-pipeline; docker compose up -d
-cd ../transcribe; docker compose up -d
 cd ../flashcard; docker compose up -d
 cd ../keyboard; docker compose up -d
 cd ../clock; docker compose up -d
+# transcribe / qbit / gluetun / jellyfin / rclone live in ~/arr/ — bring up separately from there
 ```
 
 Services communicate via the shared `my_network` Docker network — no host ports exposed. Cloudflare tunnel routes use **container names** as DNS hostnames (not service names), since cloudflared is a separate compose stack.
