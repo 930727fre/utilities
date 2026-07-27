@@ -57,3 +57,12 @@ cd ../clock; docker compose up -d
 ```
 
 Services communicate via the shared `my_network` Docker network — no host ports exposed. Cloudflare tunnel routes use **container names** as DNS hostnames (not service names), since cloudflared is a separate compose stack.
+
+## Temporarily allow a new IP through CF Access (e.g. hotel wifi)
+
+1. From the CF dashboard home, top-left quick search: `application`
+2. Click **Zero Trust → Access → Application**
+3. Click the app (e.g. `*.930727fre.dev`)
+4. Find the bypass policy in the middle section, edit the IP list — change to the hotel's public IP
+5. Save
+6. **Revert to the home IP (or delete the policy entirely) when you're done** — CF Access has no per-policy expiration on this plan, so it's manual cleanup only.
