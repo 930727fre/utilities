@@ -19,6 +19,7 @@ SERVICES=(
   recorder
   clipboard
   backup
+  monitor
   cloudflared
 )
 

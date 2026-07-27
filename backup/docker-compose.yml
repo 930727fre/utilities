@@ -41,9 +41,22 @@ services:
         target: /tools/transcribe-archive/data
         bind:
           create_host_path: false
+      # jellyfin /config — users, library metadata, watch progress,
+      # per-episode watch state, plugins. Cache/ is mounted separately
+      # in the jellyfin compose and stays out of backup (regenerable
+      # posters + transcode temp). API keys aren't a concern here —
+      # they're managed in Bitwarden and rotatable, but the library +
+      # watch state is genuinely irreplaceable without a manual
+      # re-scan + re-marking.
+      # ~1.6 GB uncompressed → ~500 MB gzipped × 30 days = ~15 GB in R2.
+      - type: bind
+        source: ../../homelab/jellyfin/config
+        target: /tools/jellyfin/data
+        bind:
+          create_host_path: false
     environment:
       # space-separated list of tools to back up; must match volume mount names above
-      - TOOLS=flashcard free2speak transcribe-archive
+      - TOOLS=flashcard free2speak transcribe-archive jellyfin
       - RCLONE_CONFIG_R2_TYPE=${RCLONE_CONFIG_R2_TYPE:?RCLONE_CONFIG_R2_TYPE env var is required}
       - RCLONE_CONFIG_R2_PROVIDER=${RCLONE_CONFIG_R2_PROVIDER:?RCLONE_CONFIG_R2_PROVIDER env var is required}
       - RCLONE_CONFIG_R2_ACCESS_KEY_ID=${RCLONE_CONFIG_R2_ACCESS_KEY_ID:?RCLONE_CONFIG_R2_ACCESS_KEY_ID env var is required}

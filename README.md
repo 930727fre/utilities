@@ -17,6 +17,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
+| [monitor](./monitor) | Hourly health checks against homelab infrastructure — currently just a disk-fill alert on `homelab/data`, Telegram-notifies once/day when ≥ threshold |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 
 ## Notes
