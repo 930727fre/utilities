@@ -91,6 +91,6 @@ Interactive script on the host — pick a tool + snapshot from numbered menus. *
 Two modes depending on which tool you pick:
 
 - `flashcard` / `free2speak` → **wipe & replace** the tool's whole `data/` directory
-- `transcribe-archive` → **pick one title** and restore just that title into `arr/data/archive/`
+- `transcribe-archive` → **pick one title** and restore just that title into `homelab/data/archive/`
 
 Restored files are owned by root (rclone runs in a container as root). If the consuming service runs as a non-root user, `chown -R <uid>:<gid> <tool>/data/` afterward. Restart your services after the restore completes.

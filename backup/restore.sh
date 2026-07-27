@@ -102,9 +102,9 @@ if [ "$TOOL" = "transcribe-archive" ]; then
     pick_index "Which title? (index; Enter to cancel): " "$TOTAL"
     TITLE=$(sed -n "${PICKED}p" "$TMP/titles.txt")
 
-    ARCHIVE_ROOT=$(realpath ../../arr/data/archive 2>/dev/null || echo "")
+    ARCHIVE_ROOT=$(realpath ../../homelab/data/archive 2>/dev/null || echo "")
     [ -z "$ARCHIVE_ROOT" ] || [ ! -d "$ARCHIVE_ROOT" ] && \
-        { echo "ERROR: ../../arr/data/archive not found" >&2; exit 1; }
+        { echo "ERROR: ../../homelab/data/archive not found" >&2; exit 1; }
 
     tar -xzf "$TMP/archive.tar.gz" -C "$TMP" "./${TITLE}"
 

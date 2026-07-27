@@ -7,7 +7,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
 | [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
 | [marker-pipeline](./marker-pipeline) | Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
-| _transcribe_ | Moved to `~/arr/transcribe/` — BT stack (transcribe + qBit + gluetun + jellyfin + rclone) now lives in its own `arr/` repo since it grew beyond a single tool |
+| _transcribe_ | Moved to `~/homelab/transcribe/` — BT stack (transcribe + qBit + gluetun + jellyfin + rclone) now lives in its own `homelab/` repo since it grew beyond a single tool |
 | [xyt](./xyt) | Fork of transcribe |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
