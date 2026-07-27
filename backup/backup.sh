@@ -64,12 +64,19 @@ for TOOL in $TOOLS; do
     done
 
     STEP="${TOOL}:tar"
+    echo "[$(date)] ${TOOL}: tar-gzipping staging..."
     tar -czf "$TARBALL" -C "$STAGING" .
+    SIZE=$(du -h "$TARBALL" | cut -f1)
 
     STEP="${TOOL}:rclone+copy"
-    rclone copyto "$TARBALL" "r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz"
+    echo "[$(date)] ${TOOL}: uploading ${SIZE} to r2:${R2_BUCKET}/${TOOL}/${DATE}/..."
+    # --progress = live in-place bar on TTY, periodic one-line stats on
+    # pipe/cron; --stats 5s = update cadence (default 60s is too coarse
+    # for the small tarballs here — jellyfin at 10 MB / 25 Mbps uplink
+    # is done in 3 sec, so 60s stats would never fire).
+    rclone copyto "$TARBALL" "r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz" \
+        --progress --stats 5s
 
-    SIZE=$(du -h "$TARBALL" | cut -f1)
     echo "[$(date)] ${TOOL}: ${SIZE} uploaded"
 
     rm -rf "$STAGING" "$TARBALL"
