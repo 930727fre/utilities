@@ -24,8 +24,26 @@ for TOOL in $TOOLS; do
         exit 1
     fi
 
-    rm -rf "$STAGING" "$TARBALL"
-    mkdir -p "$STAGING"
+    # Per-tool copy-step exclusion (regex, POSIX ERE via grep -E). Only
+    # affects the plain file copy — sqlite-safe .db backup always runs
+    # so critical DB state is never at risk here.
+    #
+    # Default '^$' never matches, so nothing is excluded when a tool
+    # isn't listed.
+    case "$TOOL" in
+        jellyfin)
+            # metadata/ = TMDB/TVDB poster + backdrop cache (~1.4 GB,
+            # regenerable via library scan). log/ = server logs
+            # (~1 MB, regenerable). Dropping both takes the tarball
+            # from ~500 MB gzipped to ~10 MB while leaving library.db
+            # (in data/, sqlite-backed up above), server config, users,
+            # plugins, and watch state fully covered.
+            COPY_EXCLUDE='/metadata/|/log/'
+            ;;
+        *)
+            COPY_EXCLUDE='^$'
+            ;;
+    esac
 
     STEP="${TOOL}:sqlite"
     find "$DATA" -type f -name "*.db" 2>/dev/null | while IFS= read -r db; do
@@ -36,7 +54,9 @@ for TOOL in $TOOLS; do
     done
 
     STEP="${TOOL}:copy"
-    find "$DATA" -type f ! -name "*.db" ! -name "*.db-wal" ! -name "*.db-shm" 2>/dev/null | while IFS= read -r f; do
+    find "$DATA" -type f ! -name "*.db" ! -name "*.db-wal" ! -name "*.db-shm" 2>/dev/null \
+        | grep -Ev "$COPY_EXCLUDE" \
+        | while IFS= read -r f; do
         rel=${f#$DATA/}
         target="$STAGING/$rel"
         mkdir -p "$(dirname "$target")"
