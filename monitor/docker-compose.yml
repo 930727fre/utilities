@@ -8,10 +8,11 @@ services:
       # instead.
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN must be exported before docker compose up}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID must be exported before docker compose up}
-      # Percent-full threshold. Default 80 leaves headroom for a normal
-      # migration batch (~50–100 GB restore + upload cycle) before
-      # tripping.
-      - DISK_THRESHOLD_PCT=${DISK_THRESHOLD_PCT:-80}
+      # Percent-full threshold. Default 90 is the "actually dangerous"
+      # line — 10% headroom on 1 TB = 100 GB, which is one big wrapper
+      # away from ENOSPC. Below that, fill is user-managed via
+      # rclone/restore.sh's own 90% preflight.
+      - DISK_THRESHOLD_PCT=${DISK_THRESHOLD_PCT:-90}
       # Container-side tz so cron's timestamps match host expectations.
       # UTC is fine too — check-disk.sh uses `date -u` for the dedup
       # marker regardless.

@@ -11,11 +11,13 @@ blocks the disk alert too.
 
 ## Current checks
 
-### `check-disk.sh` — hourly
+### `check-disk.sh` — every 10 minutes
 
 Alerts when `/data` (bind-mounted from `../../homelab/data`) is
-`≥ DISK_THRESHOLD_PCT%` full (default 80). Dedup'd per UTC day, so a
-sustained full disk fires one alert per day, not 24.
+`≥ DISK_THRESHOLD_PCT%` full (default 90). **No dedup** — every
+over-threshold tick fires. At 90% the disk really is close to
+catastrophe and the every-10-min nag is the design intent, not a
+bug. User acts on it, the nag stops.
 
 Extend when a new check is needed: add a script, add a crontab line
 in the Dockerfile, add whatever bind-mounts the new script needs to
@@ -26,7 +28,7 @@ in the Dockerfile, add whatever bind-mounts the new script needs to
 ```sh
 export TELEGRAM_BOT_TOKEN=<from BotFather>
 export TELEGRAM_CHAT_ID=<from getUpdates>
-export DISK_THRESHOLD_PCT=80   # optional, defaults to 80
+export DISK_THRESHOLD_PCT=90   # optional, defaults to 90
 ```
 
 Both TELEGRAM vars are `:?required` at compose-parse — a silently
