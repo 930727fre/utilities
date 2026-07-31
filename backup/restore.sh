@@ -1,8 +1,6 @@
 #!/bin/sh
 # Interactive restore from R2. Picks a tool, picks a snapshot date,
-# then:
-#   flashcard / free2speak → wipe-and-restore the entire data dir
-#   transcribe-archive     → pick one title, sudo cp into archive dir
+# then wipes and restores the entire data dir for the chosen tool.
 #
 # UX modeled after rclone/restore.sh: no CLI args, numbered menus,
 # Enter/EOF cancels at every prompt.
@@ -42,13 +40,7 @@ TOOLS=$(docker compose run --rm backup rclone lsf --dirs-only \
 echo ""
 echo "Tools with snapshots on R2:"
 echo ""
-# Show the restore mode next to each tool so the choice is unambiguous
-# before the user picks. Mode is derived from tool name — anything
-# other than transcribe-archive falls through to wipe-and-replace.
-printf '%s\n' "$TOOLS" | awk '{
-    mode = ($0 == "transcribe-archive") ? "→ pick title" : "→ wipe & replace"
-    printf "  %3d  %-20s %s\n", NR, $0, mode
-}'
+printf '%s\n' "$TOOLS" | awk '{printf "  %3d  %s\n", NR, $0}'
 echo ""
 
 TOTAL=$(printf '%s\n' "$TOOLS" | wc -l)
@@ -84,62 +76,7 @@ docker compose run --rm -v "$TMP:/dl" backup rclone copyto \
     "r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz" \
     /dl/archive.tar.gz >/dev/null
 
-# ── 4a. transcribe-archive → single-title flow ───────────────────────
-if [ "$TOOL" = "transcribe-archive" ]; then
-    tar -tzf "$TMP/archive.tar.gz" 2>/dev/null | \
-        awk '/^\.\/[^\/]+\/$/ { print substr($0, 3, length($0) - 3) }' | \
-        sort -u > "$TMP/titles.txt"
-
-    TOTAL=$(wc -l < "$TMP/titles.txt")
-    [ "$TOTAL" -eq 0 ] && { echo "ERROR: snapshot has no title dirs" >&2; exit 1; }
-
-    echo ""
-    echo "Titles in $TOOL/$DATE:"
-    echo ""
-    awk '{printf "  %3d  %s\n", NR, $0}' "$TMP/titles.txt"
-    echo ""
-
-    pick_index "Which title? (index; Enter to cancel): " "$TOTAL"
-    TITLE=$(sed -n "${PICKED}p" "$TMP/titles.txt")
-
-    ARCHIVE_ROOT=$(realpath ../../homelab/data/archive 2>/dev/null || echo "")
-    [ -z "$ARCHIVE_ROOT" ] || [ ! -d "$ARCHIVE_ROOT" ] && \
-        { echo "ERROR: ../../homelab/data/archive not found" >&2; exit 1; }
-
-    tar -xzf "$TMP/archive.tar.gz" -C "$TMP" "./${TITLE}"
-
-    echo ""
-    echo "→ Restoring: $TITLE"
-    echo ""
-    echo "Contents:"
-    find "$TMP/${TITLE}" -type f | sed "s|$TMP/|  |"
-    echo ""
-
-    DEST="$ARCHIVE_ROOT/$TITLE"
-    if [ -e "$DEST" ]; then
-        echo "WARNING: '$TITLE' already exists in live archive."
-        printf "Overwrite? (y/N): "
-        if ! IFS= read -r OW; then echo ""; echo "Cancelled."; exit 0; fi
-        case "$OW" in
-            [yY]|[yY][eE][sS]) sudo rm -rf "$DEST" ;;
-            *) echo "Cancelled."; exit 0 ;;
-        esac
-    fi
-
-    sudo cp -r "$TMP/${TITLE}" "$ARCHIVE_ROOT/"
-    # Match sibling archive dirs (all root-owned by mirror_to_archive).
-    sudo chown -R root:root "$DEST"
-
-    echo ""
-    echo "✓ Restored '$TITLE' from ${TOOL}/${DATE}"
-    echo ""
-    echo "  Archive entry only — enables Stage 0 archive attach for future"
-    echo "  re-downloads. If the live /artifact/Movies files were also"
-    echo "  deleted, Jellyfin still won't show this until re-downloaded."
-    exit 0
-fi
-
-# ── 4b. flashcard / free2speak → wipe-and-restore full data dir ──────
+# ── 4. Wipe-and-restore full data dir ────────────────────────────────
 TARGET=$(realpath "../${TOOL}/data" 2>/dev/null || echo "")
 [ -z "$TARGET" ] || [ ! -d "$TARGET" ] && \
     { echo "ERROR: ../${TOOL}/data not found" >&2; exit 1; }

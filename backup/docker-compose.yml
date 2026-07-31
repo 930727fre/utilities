@@ -11,11 +11,9 @@ services:
       # source path here goes stale (tool renamed, moved to homelab/, typo),
       # docker compose up would otherwise auto-create an empty dir on
       # host, mount it in, and backup.sh would ship a 0-byte tarball to
-      # R2 with a "done" telegram — the exact silent failure that hid
-      # transcribe/data/archive → homelab/data/archive migration for one
-      # cycle. With create_host_path: false, `docker compose up` dies
-      # loudly at container-create time with "bind source path does not
-      # exist" instead.
+      # R2 with a "done" telegram. With create_host_path: false, `docker
+      # compose up` dies loudly at container-create time with "bind
+      # source path does not exist" instead.
       - type: bind
         source: ../flashcard/data
         target: /tools/flashcard/data
@@ -24,21 +22,6 @@ services:
       - type: bind
         source: ../free2speak/data
         target: /tools/free2speak/data
-        bind:
-          create_host_path: false
-      # transcribe: only the archive/ subdir. It's the canonical
-      # SRT store (English + Chinese sidecars) — everything else in
-      # homelab/data/ is either huge (bt/ videos, ~100 GB) or a hardlink
-      # of it (artifact/), and both are reproducible by replaying the
-      # pipeline. Archive is the only irrecoverable bit — each SRT
-      # costs a Sonnet annotation pass (~$0.05). 30-day retention ×
-      # ~8 MB gzipped ≈ 240 MB in R2, negligible.
-      # Path lives under homelab/data/ since the transcribe/qBit stack
-      # was moved out of utilities/. Relative path from utilities/backup/
-      # is ../../homelab/data/archive.
-      - type: bind
-        source: ../../homelab/data/archive
-        target: /tools/transcribe-archive/data
         bind:
           create_host_path: false
       # jellyfin /config — users, library metadata, watch progress,
@@ -55,8 +38,10 @@ services:
         bind:
           create_host_path: false
     environment:
-      # space-separated list of tools to back up; must match volume mount names above
-      - TOOLS=flashcard free2speak transcribe-archive jellyfin
+      # space-separated list of tools to back up; must match volume mount names above.
+      # transcribe deliberately absent — homelab has its own rclone
+      # backup for its data tree.
+      - TOOLS=flashcard free2speak jellyfin
       - RCLONE_CONFIG_R2_TYPE=${RCLONE_CONFIG_R2_TYPE:?RCLONE_CONFIG_R2_TYPE env var is required}
       - RCLONE_CONFIG_R2_PROVIDER=${RCLONE_CONFIG_R2_PROVIDER:?RCLONE_CONFIG_R2_PROVIDER env var is required}
       - RCLONE_CONFIG_R2_ACCESS_KEY_ID=${RCLONE_CONFIG_R2_ACCESS_KEY_ID:?RCLONE_CONFIG_R2_ACCESS_KEY_ID env var is required}

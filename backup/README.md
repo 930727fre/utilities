@@ -36,7 +36,7 @@ Use a **User API token** with **Admin Read & Write** permission. "Object Read & 
 
 - Data directories are mounted read-write because SQLite WAL mode requires creating a `.db-shm` file alongside the database even for read operations. `sqlite3 .backup` does not modify the source database.
 - marker-pipeline outputs are downloaded zips, not persistent state — not backed up here. keyboard outputs are similarly reproducible from source (vocab list re-edit) and intentionally excluded.
-- transcribe is a partial backup: only `data/archive/` (canonical SRT store) goes up as `transcribe-archive`. `data/bt/` videos are large and re-fetchable from the original torrents; `data/artifact/` shares inodes with `data/bt/` via bt_filter's hardlinks (not a separate state); `_sources/` is intermediate pipeline cache. Archive is the only irrecoverable slice — each SRT there cost a Sonnet annotation pass (~$0.05), so re-annotating a full library would be tens of dollars.
+- transcribe / homelab data intentionally NOT covered here — the homelab tree has its own rclone backup (see `homelab/rclone/`) sized for its own retention + destination.
 
 ## Deploy
 
@@ -88,9 +88,6 @@ Interactive script on the host — pick a tool + snapshot from numbered menus. *
 ./restore.sh
 ```
 
-Two modes depending on which tool you pick:
-
-- `flashcard` / `free2speak` → **wipe & replace** the tool's whole `data/` directory
-- `transcribe-archive` → **pick one title** and restore just that title into `homelab/data/archive/`
+All supported tools (flashcard / free2speak / jellyfin) restore via **wipe & replace** of the tool's whole `data/` directory.
 
 Restored files are owned by root (rclone runs in a container as root). If the consuming service runs as a non-root user, `chown -R <uid>:<gid> <tool>/data/` afterward. Restart your services after the restore completes.
