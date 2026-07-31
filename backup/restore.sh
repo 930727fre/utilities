@@ -128,8 +128,8 @@ fi
 echo ""
 echo "✓ Restored ${TOOL} from ${DATE}"
 echo ""
-echo "  If the consuming service was up during the wipe, restart it now:"
+echo "  Rebuild the consuming service so it picks up restored files:"
 case "$TOOL" in
-    jellyfin) echo "    docker compose -f ../../homelab/jellyfin/docker-compose.yml restart" ;;
-    *)        echo "    docker compose -f ../${TOOL}/docker-compose.yml restart" ;;
+    jellyfin) echo "    docker compose -f ../../homelab/jellyfin/docker-compose.yml up -d --build" ;;
+    *)        echo "    docker compose -f ../${TOOL}/docker-compose.yml up -d --build" ;;
 esac
