@@ -77,9 +77,17 @@ docker compose run --rm -v "$TMP:/dl" backup rclone copyto \
     /dl/archive.tar.gz >/dev/null
 
 # ── 4. Wipe-and-restore full data dir ────────────────────────────────
-TARGET=$(realpath "../${TOOL}/data" 2>/dev/null || echo "")
+# Per-tool restore destination. Mirrors the mount source in
+# docker-compose.yml — must stay in sync when adding tools. Default
+# is ../${TOOL}/data; tools that live outside utilities/ (jellyfin
+# under homelab/) need explicit paths.
+case "$TOOL" in
+    jellyfin) TARGET_SRC="../../homelab/jellyfin/config" ;;
+    *)        TARGET_SRC="../${TOOL}/data" ;;
+esac
+TARGET=$(realpath "$TARGET_SRC" 2>/dev/null || echo "")
 [ -z "$TARGET" ] || [ ! -d "$TARGET" ] && \
-    { echo "ERROR: ../${TOOL}/data not found" >&2; exit 1; }
+    { echo "ERROR: ${TARGET_SRC} not found" >&2; exit 1; }
 
 echo ""
 echo "→ Full-snapshot restore of $TOOL from $DATE"
@@ -121,4 +129,7 @@ echo ""
 echo "✓ Restored ${TOOL} from ${DATE}"
 echo ""
 echo "  If the consuming service was up during the wipe, restart it now:"
-echo "    docker compose -f ../${TOOL}/docker-compose.yml restart"
+case "$TOOL" in
+    jellyfin) echo "    docker compose -f ../../homelab/jellyfin/docker-compose.yml restart" ;;
+    *)        echo "    docker compose -f ../${TOOL}/docker-compose.yml restart" ;;
+esac
