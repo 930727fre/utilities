@@ -8,30 +8,13 @@ Browser-accessible Ubuntu desktop, powered by [Kasm Workspaces](https://www.kasm
 docker compose up -d
 ```
 
-Access at `https://localhost:6901` (self-signed cert — accept the warning). Login: `kasm_user` / `123456`.
+Access at `https://localhost:6901` from the host, or `https://<host-tailnet-name>:6901` from other devices on the same Tailscale tailnet (self-signed cert — accept the warning once per client). Login: `kasm_user` / `123456`.
+
+Not exposed to the public internet on purpose — the full desktop, clipboard sync, and keystroke capture make the blast radius of a compromise too big for CF Access's email-PIN gate to be a reasonable trust boundary. Tailnet-only keeps it inside a WireGuard perimeter you already control.
 
 The user home lives inside the container — `docker compose down` wipes Chrome history, installed apps, and everything else. To start fresh, just recreate the container.
 
 Drag-and-drop file upload, clipboard sync, and audio passthrough work in the browser UI.
-
-## Cloudflare Tunnel
-
-To expose via subdomain, add a route in the Cloudflare tunnel: `desktop.domain.com → https://kasm-desktop:6901`. The container joins `my_network` so cloudflared can reach it by name.
-
-Two settings must be right:
-
-- **Service must be HTTPS, not HTTP** — Kasm refuses plaintext on principle (VNC password, keystrokes, and screen pixels travel over this channel). A plain-HTTP route gets rejected at the kasm side with `non-SSL connection disallowed` in the logs.
-- **Enable "No TLS Verify"** — Kasm's cert is self-signed, so cloudflared can't verify the chain. The toggle is buried: edit the route → expand **Additional application settings** → expand **TLS** → toggle **No TLS Verify** on.
-
-### Why "No TLS Verify" is safe here
-
-The hop is still TLS-encrypted; cloudflared just isn't checking that the cert's CN matches the hostname or that a known CA signed it. End-to-end:
-
-- phone → Cloudflare edge: real Cloudflare-issued TLS, fully verified
-- Cloudflare → `cloudflared` container: tunnel-encrypted, authenticated by tunnel token
-- `cloudflared` → `kasm-desktop:6901`: TLS-encrypted, cert not verified
-
-For the last hop to be MITM'd, an attacker would need a container on `my_network` or root on the host — at which point they already have more access than the kasm session would expose. Baking a custom CA into both containers would close the gap formally but adds significant plumbing for ~zero practical security on a private Docker bridge you control.
 
 ## GPU
 
@@ -41,4 +24,4 @@ If you start running heavy GPU work *inside* the desktop (4K video, WebGL games,
 
 ## Password
 
-`VNC_PW=123456` is hardcoded (Kasm requires ≥ 6 chars). Behind Cloudflare Access this is effectively a second factor on top of the email-PIN gate; for LAN-only access, change it. Don't put it in `.env`.
+`VNC_PW=123456` is hardcoded (Kasm requires ≥ 6 chars). Since access is already gated by tailnet membership, this is effectively a shared secret with every device on the tailnet — treat it as convenience, not real auth. Change it if you ever add a less-trusted device to the tailnet. Don't put it in `.env`.
