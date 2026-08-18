@@ -76,6 +76,16 @@
   // as a stationary tap when all fingers lift.
   const TAP_MOVE_PX = 8;
 
+  // Rolling window (ms) of centroid samples used to estimate lift-off
+  // velocity for momentum scroll. 80ms is long enough to smooth out
+  // single-frame touch jitter, short enough that only the very end of
+  // the flick contributes — matches macOS's own "recent velocity" feel.
+  const VEL_WINDOW_MS = 80;
+  // Below this lift-off speed (px/s) skip the scroll_end message
+  // entirely — no perceptible momentum would fire and the empty task
+  // is just wasted round-trip.
+  const MOMENTUM_MIN_SPEED = 100;
+
   // Per-finger state (id → {startX, startY, x, y, prev}); peakFingers
   // captures the most fingers ever seen simultaneously in this gesture
   // (needed to distinguish 1-finger tap from 2-finger tap after all
@@ -86,11 +96,40 @@
   let peakFingers = 0;
   let didMove = false;
   let scrollLast = null;
+  let scrollSamples = [];   // [{x, y, t}] centroids over the last VEL_WINDOW_MS
 
   function centroid() {
     let sx = 0, sy = 0, n = 0;
     for (const s of touches.values()) { sx += s.x; sy += s.y; n++; }
     return n ? { x: sx / n, y: sy / n } : null;
+  }
+
+  function pushScrollSample(c) {
+    const now = performance.now();
+    scrollSamples.push({ x: c.x, y: c.y, t: now });
+    // Trim from the front while the head sample is older than window.
+    while (scrollSamples.length && now - scrollSamples[0].t > VEL_WINDOW_MS) {
+      scrollSamples.shift();
+    }
+  }
+
+  function scrollLiftVelocity() {
+    // Fit a line through the sample window: use first-vs-last centroid.
+    // Two samples is enough since the window is short and the phone
+    // touch API is already smoothed; regression would be overkill.
+    if (scrollSamples.length < 2) return { vx: 0, vy: 0 };
+    const a = scrollSamples[0];
+    const b = scrollSamples[scrollSamples.length - 1];
+    const dt = (b.t - a.t) / 1000;
+    if (dt < 0.005) return { vx: 0, vy: 0 };
+    return { vx: (b.x - a.x) / dt, vy: (b.y - a.y) / dt };
+  }
+
+  function maybeSendScrollEnd() {
+    if (!scrollLast) return;   // wasn't scrolling
+    const { vx, vy } = scrollLiftVelocity();
+    if (Math.hypot(vx, vy) < MOMENTUM_MIN_SPEED) return;
+    send({ t: 'scroll_end', vx, vy });
   }
 
   document.addEventListener('touchstart', e => {
@@ -102,7 +141,11 @@
       });
     }
     peakFingers = Math.max(peakFingers, touches.size);
-    if (touches.size >= 2) scrollLast = centroid();
+    if (touches.size >= 2) {
+      scrollLast = centroid();
+      scrollSamples = [];
+      pushScrollSample(scrollLast);
+    }
   }, { passive: false });
 
   document.addEventListener('touchmove', e => {
@@ -135,6 +178,7 @@
       const c = centroid();
       const rdx = c.x - scrollLast.x, rdy = c.y - scrollLast.y;
       scrollLast = c;
+      pushScrollSample(c);
       if (rdx * rdx + rdy * rdy > 4) didMove = true;
       if (rdx || rdy) send({ t: 'scroll', dy: rdy, dx: rdx });
     }
@@ -146,16 +190,21 @@
     if (touches.size === 0) {
       if (!didMove) {
         send({ t: 'click', b: peakFingers >= 2 ? 'right' : 'left' });
+      } else {
+        maybeSendScrollEnd();
       }
       didMove = false;
       peakFingers = 0;
       scrollLast = null;
+      scrollSamples = [];
     } else if (touches.size < 2) {
       // Dropped out of 2-finger scroll but 1 finger still down. No
       // reset needed for the leftover finger — the peakFingers gate
       // in touchmove already blocks it from producing cursor moves
       // until all fingers lift.
+      maybeSendScrollEnd();
       scrollLast = null;
+      scrollSamples = [];
     }
   }, { passive: false });
 
@@ -165,6 +214,7 @@
       didMove = false;
       peakFingers = 0;
       scrollLast = null;
+      scrollSamples = [];
     }
   }, { passive: false });
 

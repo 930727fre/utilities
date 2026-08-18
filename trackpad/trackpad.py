@@ -30,6 +30,8 @@ Connect from iPhone (both devices on the same Tailscale tailnet):
 import argparse
 import asyncio
 import json
+import math
+import time
 from pathlib import Path
 
 from aiohttp import web, WSMsgType
@@ -38,15 +40,37 @@ import Quartz
 HERE = Path(__file__).parent
 INDEX_HTML = HERE / "index.html"
 
-# Cursor motion scale. 1.5 feels close to Apple's built-in trackpad
-# with default settings; bump for larger monitors, drop for precision
-# work. Applied to raw touch deltas coming off the phone.
-POINTER_SPEED = 1.5
+# Cursor acceleration curve. macOS's own pointer ballistics amplify by
+# input velocity — slow touches map near 1:1 for precision, fast flicks
+# ramp up to cross the screen quickly. A single scalar can't be both,
+# so per event: gain = min(BASE + ACCEL * touch_velocity, MAX), where
+# velocity is hypot(dx, dy) / dt-since-prior-event in touch-pixels/sec.
+# Rough tuning: bump ACCEL if the cursor feels sluggish crossing a
+# large monitor; drop BASE if fine-target work feels twitchy.
+POINTER_BASE = 0.6
+POINTER_ACCEL = 0.0015
+POINTER_MAX = 7.0
 
-# Scroll wheel scale. Touch deltas are in phone screen pixels, macOS
-# wheel deltas want pixel units for kCGScrollEventUnitPixel — the 0.4
-# multiplier tames a naturally-scrolling swipe into feeling right.
-SCROLL_SPEED = 1.2
+# Scroll wheel acceleration curve — same shape as the pointer curve
+# above. Slow finger scrolls read as precise line-by-line, fast flicks
+# jump multiple screens. Touch deltas are in phone-screen pixels;
+# macOS wheel wants pixels for kCGScrollEventUnitPixel.
+SCROLL_BASE = 0.8
+SCROLL_ACCEL = 0.0015
+SCROLL_MAX = 4.0
+
+# Momentum scroll parameters. When the client's 2-finger scroll gesture
+# ends with non-trivial lift-off velocity, keep emitting scroll events
+# with exponentially-decaying velocity until it drops below STOP. DECAY
+# is per-tick; at 60Hz, 0.94 keeps ~30% of v0 after ~0.33s and dies out
+# around 1s — matches native macOS momentum feel closely enough. The
+# same scroll gain (BASE/ACCEL/MAX above) is applied per tick so
+# momentum inherits the same "amount of scroll per unit finger motion"
+# the active gesture had — otherwise crossing the lift-off boundary
+# feels like the scroll suddenly weakens.
+MOMENTUM_TICK = 1.0 / 60
+MOMENTUM_DECAY = 0.94
+MOMENTUM_STOP = 60.0
 
 # Main display bounds in Quartz global coordinate space. Cached at
 # import time — good enough since the app runs foreground and users
@@ -62,9 +86,25 @@ def _current_pos() -> tuple[float, float]:
     return loc.x, loc.y
 
 
+_last_move_time: float | None = None
+
+
 def move_relative(dx: float, dy: float) -> None:
-    mdx = dx * POINTER_SPEED
-    mdy = dy * POINTER_SPEED
+    global _last_move_time
+    now = time.monotonic()
+    # First event of the session (or first after the module state was
+    # reset) has no prior timestamp to derive velocity from — fall back
+    # to BASE gain. Floor dt at 1ms so two events landing on the same
+    # scheduler tick don't divide by ~0 and produce infinite velocity.
+    if _last_move_time is None:
+        gain = POINTER_BASE
+    else:
+        dt = max(now - _last_move_time, 1e-3)
+        speed = math.hypot(dx, dy) / dt
+        gain = min(POINTER_BASE + POINTER_ACCEL * speed, POINTER_MAX)
+    _last_move_time = now
+    mdx = dx * gain
+    mdy = dy * gain
     x, y = _current_pos()
     x += mdx
     y += mdy
@@ -111,7 +151,19 @@ def _click(button: int) -> None:
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
 
 
+_last_scroll_time: float | None = None
+
+
 def scroll(dy: float, dx: float) -> None:
+    global _last_scroll_time
+    now = time.monotonic()
+    if _last_scroll_time is None:
+        gain = SCROLL_BASE
+    else:
+        dt = max(now - _last_scroll_time, 1e-3)
+        speed = math.hypot(dx, dy) / dt
+        gain = min(SCROLL_BASE + SCROLL_ACCEL * speed, SCROLL_MAX)
+    _last_scroll_time = now
     # Wheel Y positive = scroll up (content moves down). Phone swipe
     # down (touch dy > 0) should scroll document down = wheel negative,
     # so we flip the sign. Same story for X.
@@ -119,10 +171,49 @@ def scroll(dy: float, dx: float) -> None:
         None,
         Quartz.kCGScrollEventUnitPixel,
         2,
-        int(-dy * SCROLL_SPEED),
-        int(-dx * SCROLL_SPEED),
+        int(-dy * gain),
+        int(-dx * gain),
     )
     Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+
+_momentum_task: asyncio.Task | None = None
+
+
+def cancel_momentum() -> None:
+    global _momentum_task
+    t = _momentum_task
+    _momentum_task = None
+    if t is not None and not t.done():
+        t.cancel()
+
+
+async def _run_momentum(vx: float, vy: float) -> None:
+    try:
+        while math.hypot(vx, vy) > MOMENTUM_STOP:
+            speed = math.hypot(vx, vy)
+            gain = min(SCROLL_BASE + SCROLL_ACCEL * speed, SCROLL_MAX)
+            dx = vx * MOMENTUM_TICK * gain
+            dy = vy * MOMENTUM_TICK * gain
+            ev = Quartz.CGEventCreateScrollWheelEvent(
+                None,
+                Quartz.kCGScrollEventUnitPixel,
+                2,
+                int(-dy),
+                int(-dx),
+            )
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            vx *= MOMENTUM_DECAY
+            vy *= MOMENTUM_DECAY
+            await asyncio.sleep(MOMENTUM_TICK)
+    except asyncio.CancelledError:
+        pass
+
+
+def start_momentum(vx: float, vy: float) -> None:
+    global _momentum_task
+    cancel_momentum()
+    _momentum_task = asyncio.create_task(_run_momentum(vx, vy))
 
 
 async def index(_req):
@@ -143,12 +234,21 @@ async def websocket_handler(req):
             except json.JSONDecodeError:
                 continue
             kind = data.get("t")
+            # Any user-initiated event kills in-flight momentum, matching
+            # native trackpad behaviour where touching the surface again
+            # stops the coast. scroll_end starts a new momentum run so
+            # cancel_momentum() runs inside start_momentum() there too.
             if kind == "move":
+                cancel_momentum()
                 move_relative(float(data.get("dx", 0)), float(data.get("dy", 0)))
             elif kind == "click":
+                cancel_momentum()
                 _click(1 if data.get("b") == "right" else 0)
             elif kind == "scroll":
+                cancel_momentum()
                 scroll(float(data.get("dy", 0)), float(data.get("dx", 0)))
+            elif kind == "scroll_end":
+                start_momentum(float(data.get("vx", 0)), float(data.get("vy", 0)))
     finally:
         print(f"[trackpad] disconnect: {peer}", flush=True)
     return ws
