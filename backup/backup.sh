@@ -86,7 +86,20 @@ STEP="rclone+prune"
 # 90d retention — NAS has no daily-quota / cost pressure like R2 did,
 # so keep enough history to survive a "corrupted state noticed weeks
 # later" recovery.
-rclone delete "nas-crypt:backups/" --min-age 90d --rmdirs
+#
+# Two-step instead of `delete --rmdirs`: the combined form errors out
+# with "directory not empty" on every dir that has current snapshots
+# (fresh uploads seconds ago are 0d old, not >90d), and that error
+# exit trips `set -e` even though the delete-of-files portion did the
+# right thing (deleted zero files, which is fine on day one).
+#
+# Standalone `rclone rmdirs` walks bottom-up and no-ops on non-empty
+# dirs instead of erroring. `|| true` guards against WebDAV-backend
+# edge cases where even rmdirs surfaces a non-fatal complaint. Worst
+# case an empty tool/YYYY-MM-DD/ dir sits after its data.tar.gz ages
+# out — visible in `rclone lsf`, cleaned on the next successful run.
+rclone delete "nas-crypt:backups/" --min-age 90d
+rclone rmdirs "nas-crypt:backups/" --leave-root 2>/dev/null || true
 
 ELAPSED=$(( $(date +%s) - START ))
 TOOLS_ENC=$(echo "$TOOLS" | tr ' ' '+')
