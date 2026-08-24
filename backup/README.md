@@ -35,31 +35,21 @@ nas-crypt:backups/<tool>/YYYY-MM-DD/data.tar.gz
 
 ## Setup — rclone.conf
 
-The container reads NAS + crypt config from `./config/rclone.conf` (bind-mounted read-only). It needs two remotes, both defined the same way as `homelab/rclone`:
+The container reads NAS + crypt config from `${HOME}/rclone.conf` on the host, bind-mounted read-only into the container. **This file is shared with `homelab/rclone`** — same crypt key/salt encrypts both the media library and these tool backups, so one Bitwarden entry protects everything. The file lives outside both repos on purpose: it's a host-wide secret, not a project artifact.
 
-- **`nas`** — plain WebDAV pointing at the friend's Tailscale endpoint
-- **`nas-crypt`** — crypt remote wrapping `nas:backups/` (or wherever on the NAS this bucket lives)
-
-**Fastest bootstrap** — reuse the crypt key already living in `homelab/rclone`:
+If `~/rclone.conf` doesn't exist yet, create it once (from either `homelab/rclone/config/rclone.conf` if you had one there previously, or by running `rclone config` interactively):
 
 ```bash
-mkdir -p config
-cp ../../homelab/rclone/config/rclone.conf config/rclone.conf
-chmod 600 config/rclone.conf
+cp path/to/existing/rclone.conf ~/rclone.conf
+chmod 600 ~/rclone.conf
 ```
 
-That gives you `[nas]` + `[nas-crypt]` at the same values homelab uses — same crypt key/salt across both stacks means one Bitwarden secret protects everything.
+It needs two remotes:
 
-**Important: change `[nas-crypt]`'s `remote =` path.** Homelab's config points at `nas:homelab/` on the NAS filesystem, so if you leave the copy verbatim, this backup writes tarballs into the same NAS subtree as your media library — visible in FileStation as `homelab/backups/<tool>/…`. To land under a dedicated top-level (e.g. `backup/`), edit that one line:
+- **`nas`** — plain WebDAV pointing at the friend's Tailscale endpoint
+- **`nas-crypt`** — crypt remote wrapping the NAS-side top-level directory, e.g. `remote = nas:backup-crypt-data/`. Everything both stacks (media + tool-data backups) write goes under this dir on the NAS.
 
-```ini
-[nas-crypt]
-type = crypt
-remote = nas:backup/       # ← change this
-# password / password2 stay the same
-```
-
-Backups then land at `~/backup/<tool>/YYYY-MM-DD/…` on the NAS.
+Container-create dies loudly with `bind source path does not exist` if `~/rclone.conf` isn't there — that's the intended safeguard against silently shipping empty tarballs to nowhere.
 
 Container-create will fail loudly with `bind source path does not exist` if `config/rclone.conf` isn't there — that's the intended behavior (better than shipping an empty tarball to nowhere).
 

@@ -10,15 +10,16 @@ services:
     # losing the bridge attachment costs nothing.
     network_mode: host
     volumes:
-      # rclone.conf carries the WebDAV creds + crypt password/salt for
-      # the friend's NAS. Bind-mounted read-only; user creates it before
-      # first `docker compose up` (see README setup section).
-      # create_host_path: false — same reason as tool data mounts below:
-      # a missing conf file should die loudly at container-create rather
-      # than let docker auto-mkdir a directory named "rclone.conf" which
-      # then confuses rclone at read time.
+      # rclone.conf lives at ${HOME}/rclone.conf on the host — SHARED
+      # with homelab/rclone (both stacks mount the same file read-only).
+      # Rationale: the WebDAV creds + crypt password/salt are host-wide
+      # secrets, not project artifacts. Keeping them outside every repo
+      # avoids per-repo gitignore discipline and makes it obvious neither
+      # stack "owns" the file. See README setup section for the one-time
+      # bootstrap. create_host_path:false so a missing conf dies loudly
+      # at container-create rather than mounting an empty dir.
       - type: bind
-        source: ./config/rclone.conf
+        source: ${HOME}/rclone.conf
         target: /config/rclone.conf
         read_only: true
         bind:
