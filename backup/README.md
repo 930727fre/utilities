@@ -1,70 +1,68 @@
 # backup
 
-Daily backup of tool data directories to Cloudflare R2 at 04:00 Asia/Taipei.
+Daily backup of tool data directories to a friend's Tailscale NAS at 04:00 Asia/Taipei, encrypted at rest via `rclone crypt`.
 
-For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is), tarred, gzipped, and uploaded. Snapshots older than 30 days are pruned automatically.
+For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is), tarred, gzipped, and uploaded. Snapshots older than 90 days are pruned automatically.
 
-R2 layout:
+NAS layout (encrypted; only rclone with the crypt password sees this tree):
 ```
-<tool>/YYYY-MM-DD/data.tar.gz
+nas-crypt:backups/<tool>/YYYY-MM-DD/data.tar.gz
 ```
+
+`backups/` sits alongside `homelab/rclone`'s `Movies/` + `TV/` on the same NAS remote — different top-level, no collision.
 
 ## Adding a tool
-
-To back up a new tool's `data/` directory:
 
 1. Add a volume mount in `docker-compose.yml` — must use the exact path `/tools/<tool>/data` inside the container:
    ```yaml
    volumes:
-     - ../flashcard/data:/tools/flashcard/data
-     - ../free2speak/data:/tools/free2speak/data   # new
+     - type: bind
+       source: ../newtool/data
+       target: /tools/newtool/data
+       bind:
+         create_host_path: false
    ```
-2. Add the tool name to the `TOOLS` env var (space-separated):
-   ```yaml
-   environment:
-     - TOOLS=flashcard free2speak
-   ```
-3. Rebuild: `docker compose up -d --build`.
+2. Add the tool name to the `TOOLS` env var (space-separated).
+3. If the tool's host path isn't `../<tool>/data` (e.g. `keyboard`'s data lives at `keyboard/backend/data`), add a `case` branch in `restore.sh` so the restore target resolves correctly.
+4. Rebuild: `docker compose up -d --build`.
 
 `*.db` files are snapshotted via `sqlite3 .backup` (safe while the source app is running). `*.db-wal` and `*.db-shm` are skipped — they're regenerable WAL artifacts. Everything else is plain copied.
-
-## R2 API Token
-
-Use a **User API token** with **Admin Read & Write** permission. "Object Read & Write" silently denies writes at the S3 API level.
 
 ## Notes
 
 - Data directories are mounted read-write because SQLite WAL mode requires creating a `.db-shm` file alongside the database even for read operations. `sqlite3 .backup` does not modify the source database.
-- marker-pipeline outputs are downloaded zips, not persistent state — not backed up here. keyboard outputs are similarly reproducible from source (vocab list re-edit) and intentionally excluded.
-- transcribe / homelab data intentionally NOT covered here — the homelab tree has its own rclone backup (see `homelab/rclone/`) sized for its own retention + destination.
+- transcribe / homelab-side data (jobs.json, downloads, artifact/) intentionally NOT covered here — user manages those manually.
+
+## Setup — rclone.conf
+
+The container reads NAS + crypt config from `./config/rclone.conf` (bind-mounted read-only). It needs two remotes, both defined the same way as `homelab/rclone`:
+
+- **`nas`** — plain WebDAV pointing at the friend's Tailscale endpoint
+- **`nas-crypt`** — crypt remote wrapping `nas:backups/` (or wherever on the NAS this bucket lives)
+
+**Fastest bootstrap** — reuse the crypt key already living in `homelab/rclone`:
+
+```bash
+mkdir -p config
+cp ../../homelab/rclone/config/rclone.conf config/rclone.conf
+chmod 600 config/rclone.conf
+```
+
+That gives you both `[nas]` and `[nas-crypt]` at the same values homelab uses — the crypt key/salt is shared so both stacks encrypt against the same secret (means you only need to protect one password in Bitwarden).
+
+If you want `backups/` under a different NAS subdir than `homelab/rclone`, edit `remote =` on the `[nas-crypt]` section after copying.
+
+Container-create will fail loudly with `bind source path does not exist` if `config/rclone.conf` isn't there — that's the intended behavior (better than shipping an empty tarball to nowhere).
 
 ## Deploy
 
-**bash**
 ```bash
-RCLONE_CONFIG_R2_TYPE=s3 \
-RCLONE_CONFIG_R2_PROVIDER=Cloudflare \
-RCLONE_CONFIG_R2_ACCESS_KEY_ID=xxx \
-RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=xxx \
-RCLONE_CONFIG_R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com \
-R2_BUCKET=your_bucket \
-TELEGRAM_BOT_TOKEN=xxx \
-TELEGRAM_CHAT_ID=xxx \
+export TELEGRAM_BOT_TOKEN=xxx
+export TELEGRAM_CHAT_ID=xxx
 docker compose up -d --build
 ```
 
-**PowerShell**
-```powershell
-$env:RCLONE_CONFIG_R2_TYPE="s3"
-$env:RCLONE_CONFIG_R2_PROVIDER="Cloudflare"
-$env:RCLONE_CONFIG_R2_ACCESS_KEY_ID="xxx"
-$env:RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="xxx"
-$env:RCLONE_CONFIG_R2_ENDPOINT="https://<account_id>.r2.cloudflarestorage.com"
-$env:R2_BUCKET="your_bucket"
-$env:TELEGRAM_BOT_TOKEN="xxx"
-$env:TELEGRAM_CHAT_ID="xxx"
-docker compose up -d --build
-```
+`network_mode: host` is set on the container so rclone can reach `tailscale0` — Docker's default bridge netns can't see the host's Tailscale interface.
 
 ## Test
 
@@ -74,10 +72,11 @@ Run the backup script immediately without waiting for 04:00:
 docker compose run --rm backup /backup.sh
 ```
 
-Verify the R2 bucket:
+Verify the NAS:
 
 ```bash
-docker compose run --rm backup rclone ls r2:${R2_BUCKET}
+docker compose run --rm backup rclone lsf --dirs-only nas-crypt:backups/
+docker compose run --rm backup rclone ls nas-crypt:backups/<tool>/
 ```
 
 ## Restore
@@ -88,6 +87,6 @@ Interactive script on the host — pick a tool + snapshot from numbered menus. *
 ./restore.sh
 ```
 
-All supported tools (flashcard / free2speak / jellyfin) restore via **wipe & replace** of the tool's whole `data/` directory.
+All supported tools restore via **wipe & replace** of the tool's whole `data/` directory (or, for jellyfin, its `config/`).
 
 Restored files are owned by root (rclone runs in a container as root). If the consuming service runs as a non-root user, `chown -R <uid>:<gid> <tool>/data/` afterward. Restart your services after the restore completes.

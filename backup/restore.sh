@@ -1,6 +1,7 @@
 #!/bin/sh
-# Interactive restore from R2. Picks a tool, picks a snapshot date,
-# then wipes and restores the entire data dir for the chosen tool.
+# Interactive restore from the NAS. Picks a tool, picks a snapshot
+# date, then wipes and restores the entire data dir for the chosen
+# tool.
 #
 # UX modeled after rclone/restore.sh: no CLI args, numbered menus,
 # Enter/EOF cancels at every prompt.
@@ -31,14 +32,14 @@ pick_index() {
 }
 
 # ── 1. Which tool ────────────────────────────────────────────────────
-echo "Listing tools on R2..."
+echo "Listing tools on NAS..."
 TOOLS=$(docker compose run --rm backup rclone lsf --dirs-only \
-    "r2:${R2_BUCKET}/" 2>/dev/null | sed 's|/$||' | sort)
+    "nas-crypt:backups/" 2>/dev/null | sed 's|/$||' | sort)
 
 [ -z "$TOOLS" ] && { echo "ERROR: no tools on remote" >&2; exit 1; }
 
 echo ""
-echo "Tools with snapshots on R2:"
+echo "Tools with snapshots on NAS:"
 echo ""
 printf '%s\n' "$TOOLS" | awk '{printf "  %3d  %s\n", NR, $0}'
 echo ""
@@ -51,7 +52,7 @@ TOOL=$(printf '%s\n' "$TOOLS" | sed -n "${PICKED}p")
 echo ""
 echo "Listing snapshots for $TOOL..."
 DATES=$(docker compose run --rm backup rclone lsf --dirs-only \
-    "r2:${R2_BUCKET}/${TOOL}/" 2>/dev/null | sed 's|/$||' | \
+    "nas-crypt:backups/${TOOL}/" 2>/dev/null | sed 's|/$||' | \
     grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort -r)
 
 [ -z "$DATES" ] && { echo "ERROR: no snapshots for $TOOL" >&2; exit 1; }
@@ -71,9 +72,9 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 echo ""
-echo "Downloading r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz ..."
+echo "Downloading nas-crypt:backups/${TOOL}/${DATE}/data.tar.gz ..."
 docker compose run --rm -v "$TMP:/dl" backup rclone copyto \
-    "r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz" \
+    "nas-crypt:backups/${TOOL}/${DATE}/data.tar.gz" \
     /dl/archive.tar.gz >/dev/null
 
 # ── 4. Wipe-and-restore full data dir ────────────────────────────────
@@ -83,6 +84,7 @@ docker compose run --rm -v "$TMP:/dl" backup rclone copyto \
 # under homelab/) need explicit paths.
 case "$TOOL" in
     jellyfin) TARGET_SRC="../../homelab/jellyfin/config" ;;
+    keyboard) TARGET_SRC="../keyboard/backend/data" ;;
     *)        TARGET_SRC="../${TOOL}/data" ;;
 esac
 TARGET=$(realpath "$TARGET_SRC" 2>/dev/null || echo "")
@@ -131,5 +133,6 @@ echo ""
 echo "  Rebuild the consuming service so it picks up restored files:"
 case "$TOOL" in
     jellyfin) echo "    docker compose -f ../../homelab/jellyfin/docker-compose.yml up -d --build" ;;
+    keyboard) echo "    docker compose -f ../keyboard/docker-compose.yml up -d --build" ;;
     *)        echo "    docker compose -f ../${TOOL}/docker-compose.yml up -d --build" ;;
 esac

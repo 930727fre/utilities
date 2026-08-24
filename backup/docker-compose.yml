@@ -2,18 +2,38 @@ services:
   backup:
     build: .
     container_name: backup
+    # network_mode: host — rclone dials the friend's NAS over Tailscale
+    # (WebDAV endpoint on a 100.x.x.x tailnet IP). Docker containers on
+    # a bridge network can't see the host's tailscale0 interface from
+    # their default netns; host networking lets rclone reach it directly.
+    # Rclone is client-only here (dials out, nothing dials in), so
+    # losing the bridge attachment costs nothing.
+    network_mode: host
     volumes:
+      # rclone.conf carries the WebDAV creds + crypt password/salt for
+      # the friend's NAS. Bind-mounted read-only; user creates it before
+      # first `docker compose up` (see README setup section).
+      # create_host_path: false — same reason as tool data mounts below:
+      # a missing conf file should die loudly at container-create rather
+      # than let docker auto-mkdir a directory named "rclone.conf" which
+      # then confuses rclone at read time.
+      - type: bind
+        source: ./config/rclone.conf
+        target: /config/rclone.conf
+        read_only: true
+        bind:
+          create_host_path: false
       # One entry per tool with persistent data — mount path must be
       # /tools/<tool>/data.
       #
       # `create_host_path: false` on every mount is the defense against
       # docker's default "silently mkdir the source" behavior. If a
-      # source path here goes stale (tool renamed, moved to homelab/, typo),
-      # docker compose up would otherwise auto-create an empty dir on
-      # host, mount it in, and backup.sh would ship a 0-byte tarball to
-      # R2 with a "done" telegram. With create_host_path: false, `docker
-      # compose up` dies loudly at container-create time with "bind
-      # source path does not exist" instead.
+      # source path here goes stale (tool renamed, moved, typo), docker
+      # compose up would otherwise auto-create an empty dir on host,
+      # mount it in, and backup.sh would ship a 0-byte tarball to the
+      # NAS with a "done" telegram. With create_host_path: false,
+      # `docker compose up` dies loudly at container-create time with
+      # "bind source path does not exist" instead.
       - type: bind
         source: ../flashcard/data
         target: /tools/flashcard/data
@@ -24,6 +44,16 @@ services:
         target: /tools/free2speak/data
         bind:
           create_host_path: false
+      - type: bind
+        source: ../marker-pipeline/data
+        target: /tools/marker-pipeline/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ../keyboard/backend/data
+        target: /tools/keyboard/data
+        bind:
+          create_host_path: false
       # jellyfin /config — users, library metadata, watch progress,
       # per-episode watch state, plugins. Cache/ is mounted separately
       # in the jellyfin compose and stays out of backup (regenerable
@@ -31,7 +61,7 @@ services:
       # they're managed in Bitwarden and rotatable, but the library +
       # watch state is genuinely irreplaceable without a manual
       # re-scan + re-marking.
-      # ~1.6 GB uncompressed → ~500 MB gzipped × 30 days = ~15 GB in R2.
+      # ~1.6 GB uncompressed → ~500 MB gzipped.
       - type: bind
         source: ../../homelab/jellyfin/config
         target: /tools/jellyfin/data
@@ -39,15 +69,12 @@ services:
           create_host_path: false
     environment:
       # space-separated list of tools to back up; must match volume mount names above.
-      # transcribe deliberately absent — homelab has its own rclone
-      # backup for its data tree.
-      - TOOLS=flashcard free2speak jellyfin
-      - RCLONE_CONFIG_R2_TYPE=${RCLONE_CONFIG_R2_TYPE:?RCLONE_CONFIG_R2_TYPE env var is required}
-      - RCLONE_CONFIG_R2_PROVIDER=${RCLONE_CONFIG_R2_PROVIDER:?RCLONE_CONFIG_R2_PROVIDER env var is required}
-      - RCLONE_CONFIG_R2_ACCESS_KEY_ID=${RCLONE_CONFIG_R2_ACCESS_KEY_ID:?RCLONE_CONFIG_R2_ACCESS_KEY_ID env var is required}
-      - RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=${RCLONE_CONFIG_R2_SECRET_ACCESS_KEY:?RCLONE_CONFIG_R2_SECRET_ACCESS_KEY env var is required}
-      - RCLONE_CONFIG_R2_ENDPOINT=${RCLONE_CONFIG_R2_ENDPOINT:?RCLONE_CONFIG_R2_ENDPOINT env var is required}
-      - R2_BUCKET=${R2_BUCKET:?R2_BUCKET env var is required}
+      # transcribe / homelab-data deliberately absent — user manages
+      # those manually.
+      - TOOLS=flashcard free2speak jellyfin marker-pipeline keyboard
+      # Point rclone at the mounted conf file (default lookup is
+      # ~/.config/rclone/rclone.conf which isn't mounted).
+      - RCLONE_CONFIG=/config/rclone.conf
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN env var is required}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID env var is required}
     restart: unless-stopped

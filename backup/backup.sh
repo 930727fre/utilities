@@ -69,12 +69,12 @@ for TOOL in $TOOLS; do
     SIZE=$(du -h "$TARBALL" | cut -f1)
 
     STEP="${TOOL}:rclone+copy"
-    echo "[$(date)] ${TOOL}: uploading ${SIZE} to r2:${R2_BUCKET}/${TOOL}/${DATE}/..."
+    echo "[$(date)] ${TOOL}: uploading ${SIZE} to nas-crypt:backups/${TOOL}/${DATE}/..."
     # --progress = live in-place bar on TTY, periodic one-line stats on
     # pipe/cron; --stats 5s = update cadence (default 60s is too coarse
     # for the small tarballs here — jellyfin at 10 MB / 25 Mbps uplink
     # is done in 3 sec, so 60s stats would never fire).
-    rclone copyto "$TARBALL" "r2:${R2_BUCKET}/${TOOL}/${DATE}/data.tar.gz" \
+    rclone copyto "$TARBALL" "nas-crypt:backups/${TOOL}/${DATE}/data.tar.gz" \
         --progress --stats 5s
 
     echo "[$(date)] ${TOOL}: ${SIZE} uploaded"
@@ -83,7 +83,10 @@ for TOOL in $TOOLS; do
 done
 
 STEP="rclone+prune"
-rclone delete "r2:${R2_BUCKET}/" --min-age 30d --rmdirs
+# 90d retention — NAS has no daily-quota / cost pressure like R2 did,
+# so keep enough history to survive a "corrupted state noticed weeks
+# later" recovery.
+rclone delete "nas-crypt:backups/" --min-age 90d --rmdirs
 
 ELAPSED=$(( $(date +%s) - START ))
 TOOLS_ENC=$(echo "$TOOLS" | tr ' ' '+')
