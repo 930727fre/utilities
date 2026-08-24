@@ -1,6 +1,6 @@
 # backup
 
-Daily backup of tool data directories to a friend's Tailscale NAS at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption).
+Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `marker-pipeline`, `keyboard`, `nextcloud`) to a friend's Tailscale NAS at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption).
 
 For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is) into a staging area, then `restic backup`ed into the shared repo. Restic dedups against every prior snapshot chunk-by-chunk, so 90-day retention across 5 tools costs roughly base-repo-size + delta chunks, not `snapshots × tarball_size`.
 
