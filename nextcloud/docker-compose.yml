@@ -39,7 +39,13 @@ services:
       # of hostnames + IPs family will type into the app. Add your LAN
       # IP + hostname; Tailscale MagicDNS name gets added later when
       # that path is wired.
-      - NEXTCLOUD_TRUSTED_DOMAINS=${NEXTCLOUD_TRUSTED_DOMAINS:?NEXTCLOUD_TRUSTED_DOMAINS required — space-separated hostnames/IPs, e.g. "192.168.1.100 tuf-3060-2404.local"}
+      #
+      # `nextcloud` is prepended so container-to-container calls from
+      # other my_network services (e.g. homelab/disk-watchdog reaching
+      # http://nextcloud/) pass the Host-header check without extra
+      # config. Only takes effect on FIRST init; existing installs need
+      # `occ config:system:set trusted_domains 99 --value=nextcloud`.
+      - NEXTCLOUD_TRUSTED_DOMAINS=nextcloud ${NEXTCLOUD_TRUSTED_DOMAINS:?NEXTCLOUD_TRUSTED_DOMAINS required — space-separated hostnames/IPs, e.g. "192.168.1.100 tuf-3060-2404.local"}
     networks:
       # Attached even without CF Tunnel, so future disk-watchdog
       # integration (quota adjustments via occ) or CF re-wiring for
