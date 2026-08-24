@@ -1,0 +1,28 @@
+services:
+  filebrowser:
+    image: filebrowser/filebrowser:v2.32.0
+    container_name: filebrowser
+    # No host port publish — cloudflared reaches this container by
+    # name on my_network (`http://filebrowser:80`). Public HTTPS
+    # terminates at Cloudflare's edge.
+    #
+    # --port 80 keeps parity with the other utilities' cloudflared
+    # routes (transcribe-frontend:8000 is the odd one out).
+    # --database points at the persistent BoltDB (users, settings,
+    # share links). Without --database, filebrowser writes to a
+    # container-local file that gets nuked on rebuild.
+    command: --port 80 --address 0.0.0.0 --root /srv --database /config/filebrowser.db
+    volumes:
+      # Files the users see + upload / download.
+      - ./data/files:/srv
+      # BoltDB + any future filebrowser config artifacts. Separated
+      # from /srv so a "wipe user files" is `rm -rf data/files`
+      # without wiping accounts + shares too.
+      - ./data/config:/config
+    networks:
+      - my_network
+    restart: unless-stopped
+
+networks:
+  my_network:
+    external: true
