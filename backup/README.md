@@ -48,9 +48,18 @@ cp ../../homelab/rclone/config/rclone.conf config/rclone.conf
 chmod 600 config/rclone.conf
 ```
 
-That gives you both `[nas]` and `[nas-crypt]` at the same values homelab uses — the crypt key/salt is shared so both stacks encrypt against the same secret (means you only need to protect one password in Bitwarden).
+That gives you `[nas]` + `[nas-crypt]` at the same values homelab uses — same crypt key/salt across both stacks means one Bitwarden secret protects everything.
 
-If you want `backups/` under a different NAS subdir than `homelab/rclone`, edit `remote =` on the `[nas-crypt]` section after copying.
+**Important: change `[nas-crypt]`'s `remote =` path.** Homelab's config points at `nas:homelab/` on the NAS filesystem, so if you leave the copy verbatim, this backup writes tarballs into the same NAS subtree as your media library — visible in FileStation as `homelab/backups/<tool>/…`. To land under a dedicated top-level (e.g. `backup/`), edit that one line:
+
+```ini
+[nas-crypt]
+type = crypt
+remote = nas:backup/       # ← change this
+# password / password2 stay the same
+```
+
+Backups then land at `~/backup/<tool>/YYYY-MM-DD/…` on the NAS.
 
 Container-create will fail loudly with `bind source path does not exist` if `config/rclone.conf` isn't there — that's the intended behavior (better than shipping an empty tarball to nowhere).
 
