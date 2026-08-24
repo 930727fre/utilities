@@ -22,17 +22,19 @@ In the CF Zero Trust dashboard:
 ```bash
 cd ~/utilities/filebrowser
 docker compose up -d
-docker compose logs filebrowser
 ```
 
-**Look for the admin password in the first-run logs** — filebrowser generates a random one on init and prints it once (e.g. `Randomly generated password: XXXXXXXX`). Grab it before scrolling past.
-
-If you miss it: `rm -rf data/config && docker compose up -d` re-inits. (This wipes users + shares, not files under `data/files/`.)
+Default admin credentials on first init: **`admin` / `admin`** (v2.32.0 behavior — despite what older tutorials say about "random generated password in logs", this version just uses hardcoded default; not a bug, checked directly).
 
 ### 3. First login
-Visit `https://files.930727fre.dev` → pass CF Access (Gmail OTP) → filebrowser login page → username `admin`, password from step 2.
+Visit `https://files.930727fre.dev` → pass CF Access (Gmail OTP) → filebrowser login page → `admin` / `admin`.
 
-Immediately: **Settings → Profile → change admin password** to something you'll store in Bitwarden. The auto-generated one is fine but not something you can look up later.
+**Immediately** change the admin password via **Settings → Profile** and store the new one in Bitwarden. The default `admin/admin` is behind CF Access (Gmail-gated) so it's not instantly exploitable, but leaving it means anyone who slips past CF Access is instantly admin.
+
+If you'd rather set a known password before ever touching the UI:
+```bash
+docker compose exec filebrowser filebrowser users update admin --password 'your-chosen-password'
+```
 
 ### 4. Create the 2 other user accounts
 Settings → Users → New. For each:
