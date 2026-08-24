@@ -53,6 +53,14 @@ There's no in-app trash. If a user deletes a file:
 
 Snapshots are daily, retention 90d — so worst case a same-day delete + oops means losing edits made since 04:00 that morning.
 
+## LAN access (bypass CF Tunnel for full-speed uploads)
+
+Family on home Wi-Fi can hit filebrowser at `http://<host-lan-ip>:8082` directly (port 8082 is mapped to the container's port 80 in the compose file). This bypasses CF Tunnel entirely — LAN-native speed (Gbps class) instead of the ~2 MB/s CF free-tier tunnel throughput.
+
+Filebrowser's own account login still gates access, so publishing the port to LAN is safe under normal home Wi-Fi (any device on your Wi-Fi still needs a filebrowser account to log in).
+
+External access continues to work at `https://files.930727fre.dev` — the CF Tunnel route hasn't changed. Family visiting outside home uses that URL, family at home uses the LAN one.
+
 ## Ops
 
 **Rebuild / update:**
