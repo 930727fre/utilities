@@ -2,39 +2,26 @@ services:
   backup:
     build: .
     container_name: backup
-    # network_mode: host — rclone dials the friend's NAS over Tailscale
-    # (WebDAV endpoint on a 100.x.x.x tailnet IP). Docker containers on
-    # a bridge network can't see the host's tailscale0 interface from
-    # their default netns; host networking lets rclone reach it directly.
-    # Rclone is client-only here (dials out, nothing dials in), so
-    # losing the bridge attachment costs nothing.
+    # network_mode: host — rclone (used by restic's rclone: backend)
+    # dials the friend's NAS over Tailscale. Docker's default bridge
+    # netns can't see the host's tailscale0.
     network_mode: host
     volumes:
       # rclone.conf lives at ${HOME}/rclone.conf on the host — SHARED
-      # with homelab/rclone (both stacks mount the same file read-only).
-      # Rationale: the WebDAV creds + crypt password/salt are host-wide
-      # secrets, not project artifacts. Keeping them outside every repo
-      # avoids per-repo gitignore discipline and makes it obvious neither
-      # stack "owns" the file. See README setup section for the one-time
-      # bootstrap. create_host_path:false so a missing conf dies loudly
-      # at container-create rather than mounting an empty dir.
+      # with homelab/rclone. This container only uses the `[nas]`
+      # (plain WebDAV) remote, not `[nas-crypt]`: restic does its own
+      # encryption, layering rclone-crypt on top would be redundant
+      # CPU for zero security gain.
       - type: bind
         source: ${HOME}/rclone.conf
         target: /config/rclone.conf
         read_only: true
         bind:
           create_host_path: false
-      # One entry per tool with persistent data — mount path must be
-      # /tools/<tool>/data.
-      #
-      # `create_host_path: false` on every mount is the defense against
-      # docker's default "silently mkdir the source" behavior. If a
-      # source path here goes stale (tool renamed, moved, typo), docker
-      # compose up would otherwise auto-create an empty dir on host,
-      # mount it in, and backup.sh would ship a 0-byte tarball to the
-      # NAS with a "done" telegram. With create_host_path: false,
-      # `docker compose up` dies loudly at container-create time with
-      # "bind source path does not exist" instead.
+      # Tool data mounts — must use the exact path /tools/<tool>/data
+      # inside the container. create_host_path: false so a missing
+      # source dies loudly at container-create instead of silently
+      # backing up an empty tree.
       - type: bind
         source: ../flashcard/data
         target: /tools/flashcard/data
@@ -55,27 +42,25 @@ services:
         target: /tools/keyboard/data
         bind:
           create_host_path: false
-      # jellyfin /config — users, library metadata, watch progress,
-      # per-episode watch state, plugins. Cache/ is mounted separately
-      # in the jellyfin compose and stays out of backup (regenerable
-      # posters + transcode temp). API keys aren't a concern here —
-      # they're managed in Bitwarden and rotatable, but the library +
-      # watch state is genuinely irreplaceable without a manual
-      # re-scan + re-marking.
-      # ~1.6 GB uncompressed → ~500 MB gzipped.
       - type: bind
         source: ../../homelab/jellyfin/config
         target: /tools/jellyfin/data
         bind:
           create_host_path: false
     environment:
-      # space-separated list of tools to back up; must match volume mount names above.
-      # transcribe / homelab-data deliberately absent — user manages
-      # those manually.
+      # Space-separated tool list — must match /tools/<name>/data mount
+      # names above. transcribe / homelab-data intentionally absent
+      # (user manages those manually).
       - TOOLS=flashcard free2speak jellyfin marker-pipeline keyboard
-      # Point rclone at the mounted conf file (default lookup is
-      # ~/.config/rclone/rclone.conf which isn't mounted).
       - RCLONE_CONFIG=/config/rclone.conf
+      # Restic repo lives at nas:restic/ (plain WebDAV path, restic
+      # encrypts contents). rclone: prefix tells restic to use the
+      # rclone binary as backend; nas: is the shared rclone.conf remote.
+      - RESTIC_REPOSITORY=rclone:nas:restic/
+      # LOSING THIS PASSWORD = LOSING ALL SNAPSHOTS (restic uses it as
+      # the master key for the repo's AES-256 encryption; no recovery
+      # mechanism). Store in Bitwarden, export in shell before compose up.
+      - RESTIC_PASSWORD=${RESTIC_PASSWORD:?RESTIC_PASSWORD env var is required — store plaintext in Bitwarden, losing it means all restic snapshots are unrecoverable}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN env var is required}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID env var is required}
     restart: unless-stopped

@@ -1,10 +1,9 @@
 #!/bin/sh
-# Interactive restore from the NAS. Picks a tool, picks a snapshot
-# date, then wipes and restores the entire data dir for the chosen
-# tool.
+# Interactive restic-based restore. Picks a tool, picks a snapshot,
+# wipes and restores the tool's whole data dir.
 #
-# UX modeled after rclone/restore.sh: no CLI args, numbered menus,
-# Enter/EOF cancels at every prompt.
+# UX modeled after the previous tarball restore.sh: no CLI args,
+# numbered menus, Enter/EOF cancels at every prompt.
 
 set -eu
 cd "$(dirname "$0")"
@@ -32,14 +31,16 @@ pick_index() {
 }
 
 # ── 1. Which tool ────────────────────────────────────────────────────
-echo "Listing tools on NAS..."
-TOOLS=$(docker compose run --rm backup rclone lsf --dirs-only \
-    "nas-crypt:backups/" 2>/dev/null | sed 's|/$||' | sort)
+# Enumerate distinct tags from all snapshots in the repo.
+echo "Listing tools in restic repo..."
+TOOLS=$(docker compose run --rm --no-TTY backup \
+    sh -c 'restic snapshots --json 2>/dev/null | jq -r ".[].tags[]" | sort -u' \
+    2>/dev/null | tr -d '\r')
 
-[ -z "$TOOLS" ] && { echo "ERROR: no tools on remote" >&2; exit 1; }
+[ -z "$TOOLS" ] && { echo "ERROR: no snapshots in repo" >&2; exit 1; }
 
 echo ""
-echo "Tools with snapshots on NAS:"
+echo "Tools with snapshots:"
 echo ""
 printf '%s\n' "$TOOLS" | awk '{printf "  %3d  %s\n", NR, $0}'
 echo ""
@@ -49,39 +50,30 @@ pick_index "Which tool? (index; Enter to cancel): " "$TOTAL"
 TOOL=$(printf '%s\n' "$TOOLS" | sed -n "${PICKED}p")
 
 # ── 2. Which snapshot ────────────────────────────────────────────────
+# List snapshots for that tag, newest first. Format: "<short_id>  <time>".
 echo ""
 echo "Listing snapshots for $TOOL..."
-DATES=$(docker compose run --rm backup rclone lsf --dirs-only \
-    "nas-crypt:backups/${TOOL}/" 2>/dev/null | sed 's|/$||' | \
-    grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort -r)
+SNAPS=$(docker compose run --rm --no-TTY backup \
+    sh -c "restic snapshots --tag '$TOOL' --json 2>/dev/null | jq -r '.[] | \"\\(.short_id)  \\(.time)\"' | sort -r -k2" \
+    2>/dev/null | tr -d '\r')
 
-[ -z "$DATES" ] && { echo "ERROR: no snapshots for $TOOL" >&2; exit 1; }
+[ -z "$SNAPS" ] && { echo "ERROR: no snapshots for $TOOL" >&2; exit 1; }
 
 echo ""
 echo "Snapshots for $TOOL (newest first):"
 echo ""
-printf '%s\n' "$DATES" | awk '{printf "  %3d  %s\n", NR, $0}'
+printf '%s\n' "$SNAPS" | awk '{printf "  %3d  %s\n", NR, $0}'
 echo ""
 
-TOTAL=$(printf '%s\n' "$DATES" | wc -l)
+TOTAL=$(printf '%s\n' "$SNAPS" | wc -l)
 pick_index "Which snapshot? (index; Enter to cancel): " "$TOTAL"
-DATE=$(printf '%s\n' "$DATES" | sed -n "${PICKED}p")
+LINE=$(printf '%s\n' "$SNAPS" | sed -n "${PICKED}p")
+SNAP_ID=$(echo "$LINE" | awk '{print $1}')
+SNAP_TIME=$(echo "$LINE" | awk '{print $2}' | cut -c1-19)
 
-# ── 3. Download the tarball to a host-visible temp dir ───────────────
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
-
-echo ""
-echo "Downloading nas-crypt:backups/${TOOL}/${DATE}/data.tar.gz ..."
-docker compose run --rm -v "$TMP:/dl" backup rclone copyto \
-    "nas-crypt:backups/${TOOL}/${DATE}/data.tar.gz" \
-    /dl/archive.tar.gz >/dev/null
-
-# ── 4. Wipe-and-restore full data dir ────────────────────────────────
+# ── 3. Where does the restored data belong ────────────────────────────
 # Per-tool restore destination. Mirrors the mount source in
-# docker-compose.yml — must stay in sync when adding tools. Default
-# is ../${TOOL}/data; tools that live outside utilities/ (jellyfin
-# under homelab/) need explicit paths.
+# docker-compose.yml — must stay in sync when adding tools.
 case "$TOOL" in
     jellyfin) TARGET_SRC="../../homelab/jellyfin/config" ;;
     keyboard) TARGET_SRC="../keyboard/backend/data" ;;
@@ -92,7 +84,7 @@ TARGET=$(realpath "$TARGET_SRC" 2>/dev/null || echo "")
     { echo "ERROR: ${TARGET_SRC} not found" >&2; exit 1; }
 
 echo ""
-echo "→ Full-snapshot restore of $TOOL from $DATE"
+echo "→ Restore $TOOL from snapshot $SNAP_ID (taken $SNAP_TIME)"
 echo ""
 echo "  Target: $TARGET"
 echo "  Existing contents will be WIPED and replaced."
@@ -104,15 +96,32 @@ case "$CONFIRM" in
     *) echo "Cancelled."; exit 0 ;;
 esac
 
+# ── 4. Restore to a host-visible temp dir, then wipe-and-move ────────
+# Snapshot stores files under /tmp/staging/... (see backup.sh). We
+# restore to a fresh temp dir and then `mv` the tree into $TARGET so
+# any restic-side error doesn't leave $TARGET half-wiped.
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+echo ""
+echo "Restoring to staging: $TMP"
+docker compose run --rm -v "$TMP:/restore-out" backup \
+    restic restore "$SNAP_ID" --target /restore-out
+
+# Where restic actually wrote the files (mirrors backup.sh's STAGING).
+SRC="$TMP/tmp/staging"
+if [ ! -d "$SRC" ]; then
+    echo "ERROR: expected restored files under $SRC (restic output layout changed?)" >&2
+    exit 1
+fi
+
 # Wipe target contents (not the dir itself — that's a bind-mount source
-# in the backup / consuming service's compose file, don't disturb it).
+# in the tool's compose file, don't disturb the mountpoint).
 sudo find "$TARGET" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+sudo cp -a "$SRC"/. "$TARGET/"
 
-sudo tar -xzf "$TMP/archive.tar.gz" -C "$TARGET"
-
-# Quick sanity check on any .db files — same as the pre-consolidation
-# pull.sh, delegates to the container's sqlite3 binary so we don't
-# require host-side sqlite install.
+# Quick sanity check on any .db files — delegates to the container's
+# sqlite3 binary so we don't require host-side sqlite install.
 DB_HITS=$(find "$TARGET" -name "*.db" 2>/dev/null | wc -l)
 if [ "$DB_HITS" -gt 0 ]; then
     echo ""
@@ -128,7 +137,7 @@ if [ "$DB_HITS" -gt 0 ]; then
 fi
 
 echo ""
-echo "✓ Restored ${TOOL} from ${DATE}"
+echo "✓ Restored ${TOOL} from snapshot ${SNAP_ID} (${SNAP_TIME})"
 echo ""
 echo "  Rebuild the consuming service so it picks up restored files:"
 case "$TOOL" in
