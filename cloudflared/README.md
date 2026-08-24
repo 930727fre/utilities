@@ -12,6 +12,7 @@ Runs a Cloudflare Tunnel to expose all services via subdomains on your domain.
    - `transcribe.domain.com` → `http://transcribe-frontend:8000`
    - `flashcard.domain.com` → `http://flashcard-frontend:80`
    - `keyboard.domain.com` → `http://keyboard-backend:8080`
+   - `seafile.domain.com` → `http://seafile:80`
 4. Go to Zero Trust → Access → Applications → Add an application → Self-hosted:
    - Domain: `*.domain.com`
    - Under Policies, add a rule: **Emails → `you@gmail.com`** (one-time PIN sent to your email)
@@ -30,6 +31,7 @@ cd ../marker-pipeline && docker compose up -d
 cd ../flashcard && docker compose up -d
 cd ../keyboard && docker compose up -d
 cd ../clock && docker compose up -d
+cd ../seafile && docker compose up -d   # needs SEAFILE_MYSQL_ROOT_PASSWORD + SEAFILE_ADMIN_EMAIL + SEAFILE_ADMIN_PASSWORD exported
 # transcribe / qbit / gluetun / jellyfin / rclone live in ~/homelab/ — bring up separately from there
 ```
 
@@ -41,6 +43,7 @@ cd ../marker-pipeline && docker compose up -d
 cd ../flashcard && docker compose up -d
 cd ../keyboard && docker compose up -d
 cd ../clock && docker compose up -d
+cd ../seafile && docker compose up -d
 :: transcribe / qbit / gluetun / jellyfin / rclone live in ~/homelab/ — bring up separately from there
 ```
 
@@ -52,6 +55,7 @@ cd ../marker-pipeline; docker compose up -d
 cd ../flashcard; docker compose up -d
 cd ../keyboard; docker compose up -d
 cd ../clock; docker compose up -d
+cd ../seafile; docker compose up -d
 # transcribe / qbit / gluetun / jellyfin / rclone live in ~/homelab/ — bring up separately from there
 ```
 
