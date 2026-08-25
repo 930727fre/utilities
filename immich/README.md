@@ -26,10 +26,12 @@ Data at `./data/{upload,postgres,model-cache}/`, gitignored. Backup via `utiliti
 ### 1. Secrets (Bitwarden + shell export)
 
 ```bash
-export DB_PASSWORD="$(openssl rand -base64 32)"
+export IMMICH_DB_PASSWORD="$(openssl rand -base64 32)"
 # DB_USERNAME + DB_DATABASE_NAME default to "postgres" / "immich" —
 # no need to override unless you want.
 ```
+
+Shell-side we use `IMMICH_DB_PASSWORD` to namespace against any other service that also uses a `DB_PASSWORD`. Compose interpolation maps it to `DB_PASSWORD` internally (which is the fixed name Immich's server binary reads).
 
 ### 2. Bring up
 
