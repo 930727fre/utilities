@@ -51,6 +51,13 @@ for TOOL in $TOOLS; do
             # + watch state — the irreplaceable bits.
             COPY_EXCLUDE='/metadata/|/log/'
             ;;
+        immich)
+            # Live postgres files can't be safely raw-copied (WAL /
+            # mid-transaction corruption risk). We handle the DB via
+            # the pg_dump pass below; exclude the live data dir from
+            # the copy pass here so it doesn't sneak into the tarball.
+            COPY_EXCLUDE='/postgres/'
+            ;;
         *)
             COPY_EXCLUDE='^$'
             ;;
@@ -65,6 +72,24 @@ for TOOL in $TOOLS; do
         mkdir -p "$(dirname "$target")"
         sqlite3 "$db" ".backup '$target'"
     done
+
+    # Immich-specific: dump Postgres via pg_dump over the loopback
+    # port Immich compose publishes (127.0.0.1:5433). Fails LOUD —
+    # a snapshot without the DB is nearly useless for Immich (all
+    # metadata / face embedding refs / album structure live in the DB),
+    # better to abort the whole tick than ship a half backup.
+    if [ "$TOOL" = "immich" ]; then
+        STEP="${TOOL}:pgdump"
+        if [ -z "$IMMICH_DB_PASSWORD" ]; then
+            echo "Error: immich in TOOLS but IMMICH_DB_PASSWORD not set" >&2
+            exit 1
+        fi
+        echo "[$(date)] immich: pg_dump →  $STAGING/immich-postgres.sql"
+        PGPASSWORD="$IMMICH_DB_PASSWORD" pg_dump \
+            -h 127.0.0.1 -p 5433 -U postgres -d immich \
+            --no-owner --clean --if-exists \
+            > "$STAGING/immich-postgres.sql"
+    fi
 
     STEP="${TOOL}:copy"
     find "$DATA" -type f ! -name "*.db" ! -name "*.db-wal" ! -name "*.db-shm" 2>/dev/null \

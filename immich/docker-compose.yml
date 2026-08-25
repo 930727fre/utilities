@@ -90,6 +90,13 @@ services:
       POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+    ports:
+      # Loopback-only publish for utilities/backup's pg_dump pass.
+      # 127.0.0.1 bind means only host-loopback callers can reach it
+      # (not LAN, not any container on a different docker network).
+      # Port 5433 (not default 5432) avoids collision with any other
+      # postgres you might run on the host later.
+      - "127.0.0.1:5433:5432"
     shm_size: 128mb
     healthcheck:
       # Image ships its own healthcheck (checks pg_isready + Immich

@@ -14,7 +14,10 @@ FROM alpine:3.19
 #            filesystem, can't hand it a live wal-mode db.
 # jq       — parse `restic snapshots --json` in restore.sh (shell text
 #            parsing on restic output is fragile).
-RUN apk add --no-cache rclone restic sqlite tzdata jq
+# postgresql-client — pg_dump binary for the immich case in backup.sh.
+# alpine's default package pulls a matching-major client; forward-
+# compatible with Immich's postgres 14 server.
+RUN apk add --no-cache rclone restic sqlite tzdata jq postgresql-client
 
 COPY backup.sh /backup.sh
 RUN chmod +x /backup.sh

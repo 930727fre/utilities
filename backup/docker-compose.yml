@@ -47,22 +47,30 @@ services:
         target: /tools/jellyfin/data
         bind:
           create_host_path: false
-      # Nextcloud: bind mounts both config/ + data/ subtrees. Restic
-      # gets the SQLite DB via backup.sh's sqlite3 .backup pass (finds
-      # nextcloud.db by extension), everything else copied as-is.
-      # Preview thumbnails + logs left in — restic dedup handles the
-      # repeated content across snapshots efficiently.
+      # Immich: bind mounts upload/ + postgres/ subtrees. postgres/
+      # live data can't be safely raw-copied (WAL / mid-transaction
+      # corruption risk), so backup.sh has an immich-specific
+      # pg_dump pre-step that writes .sql into STAGING; the /postgres/
+      # dir is excluded from the copy pass via COPY_EXCLUDE. Restore
+      # requires manually `psql < immich-postgres.sql` after files land
+      # (documented in README).
       - type: bind
-        source: ../nextcloud/data
-        target: /tools/nextcloud/data
+        source: ../immich/data
+        target: /tools/immich/data
         bind:
           create_host_path: false
     environment:
       # Space-separated tool list — must match /tools/<name>/data mount
       # names above. transcribe / homelab-data intentionally absent
       # (user manages those manually).
-      - TOOLS=flashcard free2speak jellyfin marker-pipeline keyboard nextcloud
+      - TOOLS=flashcard free2speak jellyfin marker-pipeline keyboard immich
       - RCLONE_CONFIG=/config/rclone.conf
+      # Immich's Postgres. backup.sh's immich case-branch pg_dumps to
+      # STAGING before the file copy — needs to authenticate to postgres
+      # via host loopback (Immich compose publishes 127.0.0.1:5433 for
+      # this specific purpose, not exposed to LAN). Reuse the same
+      # password already exported for Immich itself.
+      - IMMICH_DB_PASSWORD=${IMMICH_DB_PASSWORD:-}
       # Restic repo lives at nas:restic/ (plain WebDAV path, restic
       # encrypts contents). rclone: prefix tells restic to use the
       # rclone binary as backend; nas: is the shared rclone.conf remote.

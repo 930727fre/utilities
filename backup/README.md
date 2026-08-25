@@ -1,6 +1,6 @@
 # backup
 
-Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `marker-pipeline`, `keyboard`, `nextcloud`) to a friend's Tailscale NAS at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption).
+Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `marker-pipeline`, `keyboard`, `immich`) to a friend's Tailscale NAS at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption).
 
 For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is) into a staging area, then `restic backup`ed into the shared repo. Restic dedups against every prior snapshot chunk-by-chunk, so 90-day retention across 5 tools costs roughly base-repo-size + delta chunks, not `snapshots × tarball_size`.
 
@@ -22,6 +22,24 @@ Repo layout on NAS: `nas:restic/` (plain WebDAV path, restic encrypts contents).
 4. Rebuild: `docker compose up -d --build`.
 
 `*.db` files are snapshotted via `sqlite3 .backup` (safe while the source app is running); `.db-wal` / `.db-shm` skipped as regenerable WAL artifacts. Everything else is plain copied into staging.
+
+### Immich exception (Postgres)
+
+Immich uses Postgres (not SQLite). backup.sh has an immich-specific pre-copy step that runs `pg_dump` against `127.0.0.1:5433` (Immich's compose publishes Postgres on loopback specifically for this) and writes `immich-postgres.sql` into the staging dir. The live `postgres/` data dir is excluded from the file copy (`COPY_EXCLUDE=/postgres/`) since raw-copying WAL-in-flight files corrupts them. Restic tarball ends up with `upload/` (photos) + `immich-postgres.sql` (DB snapshot).
+
+**Restore is manual on the Immich side**: `restore.sh` puts files back (including the `.sql`), but you then have to:
+
+```bash
+cd ~/utilities/immich
+docker compose down
+sudo rm -rf data/postgres              # nuke stale schema
+docker compose up -d database          # fresh init
+sleep 20
+docker compose exec -T database psql -U postgres -d immich < data/immich-postgres.sql
+docker compose up -d                   # bring server back up
+```
+
+Not automated because it's rare + destructive; explicit steps prevent accidents.
 
 ## Setup — rclone.conf
 
