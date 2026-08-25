@@ -8,9 +8,11 @@ Picked over FileBrowser (no native apps, Safari transcode plague), Seafile (post
 
 ## Architecture
 
-One container. `nextcloud:apache` runs Apache + PHP + Nextcloud all-in-one. SQLite DB lives inside the bind-mounted `./data/data/` alongside user files, so backup is straightforward (one dir, sqlite3 .backup for the DB).
+One container. Local build extends `nextcloud:apache` with `libheif1` + `ffmpeg` (see Dockerfile) so HEIC (iPhone photo default) and MOV/HEVC (iPhone video default) files get proper server-side thumbnails. Without these, uploads work but thumbnails are blank icons — bad UX for photo browsing. SQLite DB lives inside the bind-mounted `./data/data/` alongside user files, so backup is straightforward (one dir, sqlite3 .backup for the DB).
 
 Trade-off vs external MariaDB: SQLite is officially "not recommended for production" but that guidance is aimed at 100+ user deployments. For 3 concurrent users, SQLite is fine and saves 2 sidecar containers.
+
+Photo browsing UX (timeline, face recognition, map view) is still noticeably worse than Immich even with thumbnails working — accept as trade-off or run Immich alongside for photo-heavy use.
 
 ## Setup
 

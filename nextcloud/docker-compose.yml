@@ -1,6 +1,9 @@
 services:
   nextcloud:
-    image: nextcloud:apache
+    # Local build extends nextcloud:apache with libheif + ffmpeg for
+    # HEIC/MOV thumbnail generation — see Dockerfile.
+    build: .
+    image: nextcloud-local:latest
     container_name: nextcloud
     # LAN-only exposure — no CF Tunnel route this time. Family uses
     # native app over LAN Wi-Fi (when at home) or Tailscale share
