@@ -52,13 +52,9 @@ services:
     restart: unless-stopped
     # NVIDIA GPU passthrough. Requires host nvidia-docker runtime
     # (already installed for transcribe / whisper containers).
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    # Shorthand of the older verbose deploy.resources.reservations.devices
+    # form — needs Docker Compose v2.30+ (host is on v5.x, plenty new).
+    gpus: all
 
   # ── Redis (job queue + cache) ────────────────────────────────────
   # Immich uses Bull queue on top of Redis for background job
