@@ -6,20 +6,21 @@ Self-hosted Google Photos replacement — family iPhone/Android photo backup wit
 
 ## Architecture
 
-Four containers (Immich's official reference architecture):
+Three containers:
 
-- **immich-server** — API + web UI + background workers (jobs like thumbnail gen, metadata extraction, sidecar sync)
-- **immich-machine-learning** — face detection, object recognition, CLIP semantic search. **CUDA variant** using host's NVIDIA GPU — face-embedding pass on 10k photos drops from ~hours to ~minutes vs CPU.
+- **immich-server** — API + web UI + background workers (thumbnail gen, metadata extraction, sidecar sync). libvips inside handles image decode for HEIC/PNG/JPEG/etc, ffmpeg for video thumbs.
 - **redis** — job queue (Bull), ephemeral cache. No backup needed.
-- **database** — Postgres 14 + pgvecto-rs (for embedding vector search). Photos metadata + face/object embeddings live here.
+- **database** — Postgres 14 + pgvecto-rs. Immich's schema uses vector columns even when ML worker isn't running, so we keep the vector-capable Postgres image; the columns stay empty without ML producing embeddings.
 
-Data at `./data/{upload,postgres,model-cache}/`, gitignored. Backup via `utilities/backup` — needs `pg_dump` special case in backup.sh (postgres live files can't be safely tarred), TBD in a follow-up commit.
+**ML worker deliberately absent** — family use case is "photo backup + basic browsing", not "AI search". Skipping the `immich-machine-learning` container drops face recognition / object search / CLIP semantic search / duplicate detection, but the trade-off buys: one fewer container, no GPU / persistenced-socket dance, ~500-1000 MB less idle RAM, ~4 GB less disk (no ML model weight downloads). Timeline / thumbnails / upload / album / EXIF-based search / map view all still work.
+
+**After first boot**, disable ML features in the admin UI so Immich stops retrying the absent ML endpoint: **Administration → Settings → Machine Learning → toggle everything off**. Otherwise logs get spammed with "ML unreachable" errors.
+
+To re-enable ML later: add the `immich-machine-learning` service back to compose (with `gpus: all` for CUDA acceleration if desired), re-enable in admin UI, ML pipeline picks up from scratch.
+
+Data at `./data/{upload,postgres}/`, gitignored. Backup via `utilities/backup` — needs `pg_dump` special case in backup.sh (postgres live files can't be safely tarred), TBD in a follow-up commit.
 
 **Port 8082** on host (native Immich port is 2283 inside container). LAN-only exposure — no CF Tunnel route. Family uses native iOS/Android app.
-
-## GPU note
-
-`immich-machine-learning` uses the CUDA image variant (`:release-cuda`). Requires nvidia-docker runtime on the host (already installed here for transcribe / whisper). If GPU access fails at container start, it silently falls back to CPU — you'll see it in slow initial embedding scans. Verify with `docker logs immich_machine_learning` looking for CUDA init messages.
 
 ## Setup
 

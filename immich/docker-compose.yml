@@ -31,30 +31,32 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      # default: internal comms with redis / postgres / ML worker.
+      # default: internal comms with redis / postgres.
       # my_network: reachable by external containers (future disk-watchdog
       # quota-freeze integration via container-name resolution).
       - default
       - my_network
 
-  # ── Machine Learning worker (face + object detection, CLIP search) ─
-  # Separate image so ML can scale independently. CUDA variant uses
-  # the host's NVIDIA GPU (3060) — face embedding pass on 10k photos
-  # drops from ~hours (CPU) to ~minutes. Falls back to CPU if GPU not
-  # visible; you'll notice in initial scans if the drivers aren't wired.
-  immich-machine-learning:
-    container_name: immich_machine_learning
-    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}-cuda
-    volumes:
-      - ./data/model-cache:/cache
-    environment:
-      - TZ=Asia/Taipei
-    restart: unless-stopped
-    # NVIDIA GPU passthrough. Requires host nvidia-docker runtime
-    # (already installed for transcribe / whisper containers).
-    # Shorthand of the older verbose deploy.resources.reservations.devices
-    # form — needs Docker Compose v2.30+ (host is on v5.x, plenty new).
-    gpus: all
+  # ── ML worker deliberately absent ─────────────────────────────────
+  # No immich-machine-learning container: family use case is "photo
+  # backup + basic browsing", not "search by face / object / natural
+  # language". Skipping ML means:
+  #   - no face recognition, object search, CLIP semantic search,
+  #     duplicate detection, auto-tagging
+  #   + no GPU / nvidia-persistenced socket dance
+  #   + one fewer container, ~500-1000 MB less RAM idle
+  #   + ~4 GB less disk (skipped model weight downloads)
+  # Timeline / thumbnails / upload / album / EXIF search / map view
+  # all still work — libvips inside immich-server handles all of that.
+  #
+  # After first boot, disable ML features in the admin UI so Immich
+  # stops retrying the (absent) ML endpoint: Administration → Settings
+  # → Machine Learning → toggle everything off. Otherwise logs get
+  # spammed with "ML unreachable" errors.
+  #
+  # To re-enable later: add the immich-machine-learning service block
+  # back (with `gpus: all` for CUDA acceleration if wanted), re-enable
+  # in admin UI, ML pipeline picks up from scratch.
 
   # ── Redis (job queue + cache) ────────────────────────────────────
   # Immich uses Bull queue on top of Redis for background job
