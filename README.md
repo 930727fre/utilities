@@ -6,11 +6,11 @@ A collection of self-hosted tools, each containerized with Docker.
 |------|-------------|
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
 | [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
-| [marker-pipeline](./marker-pipeline) | Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
+| [marker-pipeline](./marker-pipeline) | _(stale, see notes)_ Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
 | _transcribe_ | Moved to `~/homelab/transcribe/` — BT stack (transcribe + qBit + gluetun + jellyfin + rclone) now lives in its own `homelab/` repo since it grew beyond a single tool |
-| [xyt](./xyt) | Fork of transcribe |
+| [xyt](./xyt) | _(stale, see notes)_ Fork of transcribe |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
-| [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
+| [keyboard](./keyboard) | _(stale, see notes)_ Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
@@ -22,6 +22,7 @@ A collection of self-hosted tools, each containerized with Docker.
 - Make sure to `.gitignore` `data/` and put all persistent files under it — services must create all required subdirectories programmatically on startup (no manual `mkdir` needed after `git clone && docker compose up`)
 - Remember to register a subdomain in the Cloudflare tunnel dashboard for each new service
 - Always prefix service names and container names with the service name (e.g. `flashcard-backend`, `flashcard-frontend`). Service names act as DNS hostnames on shared networks — generic names like `frontend` or `backend` will collide across services on `my_network`. Container names should match for clarity in `docker ps`.
+- **Stale stacks** (`marker-pipeline`, `xyt`, `keyboard`): won't come up cleanly as-is. Their `backend/*.py` still imports `gpu_lock.py` (targets a `gpu-broker` container that no longer exists) and `xyt` / `keyboard` still call `WHISPER_URL=http://whisper:8000` (also gone — see `ac3858a`). All three were unused when their deps were retired, so gutting the call sites was deferred; the wiring is left in place as documentation for whoever comes back to resurrect one of them. Reviving = either restore the deps (recreate `whisper` / `gpu-broker` compose stacks) or gut the call sites (delete `gpu_lock.py`, replace whisper calls with a cloud STT or a fresh local runner). No urgency — this note exists so future-me doesn't wonder why they broke.
 - **Tools using Gemini API** require `GEMINI_API_KEY` exported in the shell before `docker compose up`. Compose's `${GEMINI_API_KEY:?...}` syntax fails loudly at parse time if missing. Don't write the key to `.env` (Claude reads `.env` into context). Get a free key at https://aistudio.google.com/app/apikey.
 - (Optional) To prevent iOS Safari from auto-zooming on input/textarea focus, add `maximum-scale=1` to the viewport meta tag: `<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">`
 - **iOS viewport lock — fix it once at html/body, not per-component.** Safari's address bar collapses/expands as you scroll, which makes `100vh` taller than the actually-visible area. Stacking `100svh`, `calc()` heights, or per-page wrappers to compensate amplifies the bug. The pattern that just works:
