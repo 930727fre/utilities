@@ -11,9 +11,6 @@ A collection of self-hosted tools, each containerized with Docker.
 | [xyt](./xyt) | Fork of transcribe |
 | [flashcard](./flashcard) | FSRS-based flashcard app with spaced repetition |
 | [keyboard](./keyboard) | Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
-| [ollama](./ollama) | Local LLM runtime — kept around but no longer used by other tools (they moved to Gemini API); not started by `./all.sh` |
-| [gpu-broker](./gpu-broker) | Single-machine GPU mutex + queue dashboard — coordinates whisper-callers (transcribe / xyt / keyboard) against marker-pipeline to prevent VRAM contention |
-| [whisper](./whisper) | Shared faster-whisper-server (`large-v3-turbo`) — HTTP API used by transcribe / xyt / keyboard |
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
 | [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
@@ -25,7 +22,6 @@ A collection of self-hosted tools, each containerized with Docker.
 - Make sure to `.gitignore` `data/` and put all persistent files under it — services must create all required subdirectories programmatically on startup (no manual `mkdir` needed after `git clone && docker compose up`)
 - Remember to register a subdomain in the Cloudflare tunnel dashboard for each new service
 - Always prefix service names and container names with the service name (e.g. `flashcard-backend`, `flashcard-frontend`). Service names act as DNS hostnames on shared networks — generic names like `frontend` or `backend` will collide across services on `my_network`. Container names should match for clarity in `docker ps`.
-- **Any container that runs ML / heavy GPU workloads must route through [gpu-broker](./gpu-broker).** Bypassing the broker reintroduces the cross-container OOM class of bug we fixed. See `gpu-broker/README.md` § "Adding a new GPU consumer" for the checklist. (Cloud LLM calls don't count as GPU work — Gemini API doesn't need the lock.) Exception: [kasm-desktop](./kasm-desktop) uses GPU passthrough for desktop streaming / browser acceleration but doesn't coordinate through the broker — casual use stays under a few hundred MB of VRAM and coexists with brokered jobs. See its README for the heavy-concurrent-load caveat.
 - **Tools using Gemini API** require `GEMINI_API_KEY` exported in the shell before `docker compose up`. Compose's `${GEMINI_API_KEY:?...}` syntax fails loudly at parse time if missing. Don't write the key to `.env` (Claude reads `.env` into context). Get a free key at https://aistudio.google.com/app/apikey.
 - (Optional) To prevent iOS Safari from auto-zooming on input/textarea focus, add `maximum-scale=1` to the viewport meta tag: `<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">`
 - **iOS viewport lock — fix it once at html/body, not per-component.** Safari's address bar collapses/expands as you scroll, which makes `100vh` taller than the actually-visible area. Stacking `100svh`, `calc()` heights, or per-page wrappers to compensate amplifies the bug. The pattern that just works:

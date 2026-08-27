@@ -5,11 +5,9 @@
 
 cd "$(dirname "$0")"
 
-# Order: infrastructure (ollama, gpu-broker) first, then GPU consumers, then
-# UI/utility tools. cloudflared last so the tunnel opens with every route
-# already serving 200 instead of 502.
+# cloudflared last so the tunnel opens with every route already serving 200
+# instead of 502.
 SERVICES=(
-  gpu-broker
   marker-pipeline
   xyt
   flashcard
