@@ -11,17 +11,15 @@ Both repos share `RESTIC_PASSWORD` (one keychain entry, two storage locations), 
 
 | Tool bucket | NAS | MEGA | Retention |
 |---|---|---|---|
-| `crucial-docs` | ✓ | ✓ | **infinite** on both (in `NO_FORGET_TOOLS`) |
-| `flashcard` / `free2speak` / `jellyfin` | ✓ | ✓ | 90-day on both |
+| `flashcard` / `free2speak` / `jellyfin` / `crucial-docs` | ✓ | ✓ | 90-day on both |
 | `immich` | ✓ | ✗ (in `MEGA_EXCLUDE`) | 90-day on NAS |
 
 Rationale:
 
-- **crucial-docs** — passive folder of "would cry if lost" personal documents (certs, transcripts, IDs). Both tiers, both infinite. Any bounded window here is regret waiting to happen. See [`../crucial-docs/README.md`](../crucial-docs).
-- **Selfhost tool data** — recoverable-with-effort state (SQLite scheduling, config, watch history). Both tiers for tier-loss survivability, but 90-day is plenty — nobody restores flashcard state from a year ago.
+- **Selfhost tool data + crucial-docs** — recoverable-with-effort state (SQLite scheduling, config, watch history) plus a passive folder of personal documents. Both tiers for tier-loss survivability, uniform 90-day retention. 90 days is enough to catch accidental deletion; anything you'd genuinely regret losing after 90 days doesn't belong in this pipeline — it belongs in [`../secrets-vault/`](../secrets-vault) with infinite retention.
 - **Immich** — photo library already has 3-2-1 via phone originals + host + NAS, so MEGA is redundant. 90-day NAS is enough for accidental-delete recovery.
 
-Bitwarden vault backups live in [`../bitwarden-backup/`](../bitwarden-backup) with a separate encryption / distribution pipeline (age pubkey wrap + rclone copy directly, no restic) — not part of this container's TOOLS list.
+Truly critical sealed blobs (Bitwarden vault export, hardware-encrypted archives) live in [`../secrets-vault/`](../secrets-vault) with a separate pipeline (plain rclone copy of already-sealed monolithic blobs, no restic layer) — infinite retention there, not here.
 
 For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is) into a staging area, then `restic backup`ed. Restic dedups against every prior snapshot chunk-by-chunk, so retention costs roughly base-repo-size + delta chunks, not `snapshots × tarball_size`.
 

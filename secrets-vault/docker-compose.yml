@@ -1,0 +1,36 @@
+services:
+  secrets-vault:
+    build: .
+    container_name: secrets-vault
+    # network_mode: host — rclone dials the friend's NAS over Tailscale.
+    # Docker's default bridge netns can't see the host's tailscale0.
+    # Same reason as utilities/backup.
+    network_mode: host
+    volumes:
+      # rclone.conf lives at ${HOME}/rclone.conf on the host — SHARED
+      # with utilities/backup + homelab/rclone. This container uses the
+      # plain [nas] + [mega] remotes; blobs pushed here are treated as
+      # already-sealed opaque bytes (either age-wrapped or the user's
+      # own hardware-encrypted archive), so no additional crypto layer
+      # on the transport.
+      - type: bind
+        source: ${HOME}/rclone.conf
+        target: /config/rclone.conf
+        read_only: true
+        bind:
+          create_host_path: false
+      # /data holds the blobs to push. Populated two ways:
+      #   1. bw export → age wrap (PLANNED, needs age pubkey)
+      #   2. user manually drops pre-sealed files (IMPLEMENTED)
+      # Container never modifies files in here — pure rclone copy source.
+      - type: bind
+        source: ./data
+        target: /data
+        bind:
+          create_host_path: false
+    environment:
+      - RCLONE_CONFIG=/config/rclone.conf
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN env var is required}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID env var is required}
+      - TZ=Asia/Taipei
+    restart: unless-stopped

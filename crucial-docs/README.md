@@ -1,17 +1,18 @@
 # crucial-docs
 
-A passive folder for personal documents that are painful to lose and painful to recreate — certificates, transcripts, IDs, insurance, tax records, medical scans, anything you'd feel sick about losing.
+A passive folder for personal file-tree stuff worth keeping around — certificates, transcripts, IDs, insurance, tax records, medical scans. Loss of any single file here is annoying (usually re-requestable from the issuing institution) but not catastrophic — the blast radius stays per-file.
 
 No container, no cron, no service. You drop files into `data/` by hand; the backup pipeline picks it up.
 
 ## Backup treatment
 
-Handled by [`utilities/backup`](../backup) as a standard tool (mount, `TOOLS` list, restic pipeline). Special treatment vs the other tools:
+Handled by [`utilities/backup`](../backup) as a standard selfhost tool — same tier as `flashcard`, `free2speak`, `jellyfin`:
 
-- **Both tiers**: NAS + MEGA (not MEGA-excluded — this stuff is more important than immich, not less)
-- **Retention**: infinite on both tiers (listed in `NO_FORGET_TOOLS`) — you don't want a bounded window on a legal document you last touched three years ago
+- **Both tiers**: NAS + MEGA
+- **Retention**: 90-day on both (uniform with other selfhost tools)
+- **Verify**: weekly structural + monthly 10% sampled read-data check (uniform)
 
-Restic still encrypts (via `RESTIC_PASSWORD`) — the two-layer bitwarden dance isn't warranted here because these files usually aren't format-sensitive: worst case a PDF certificate leaks its own contents, unlike a Bitwarden vault which is the master key to your whole digital life. Single strong `RESTIC_PASSWORD` is enough for this bucket.
+If you have blobs whose loss would be **genuinely catastrophic** (Bitwarden vault export, hardware-encrypted archive of irreplaceable keys), those live in [`../secrets-vault/`](../secrets-vault) — infinite retention, plain rclone copy of pre-sealed monolithic files. Don't put those here.
 
 ## Adding files
 
@@ -35,7 +36,8 @@ data/
 
 ## What NOT to put here
 
-- **Bitwarden vault** — has its own encryption discipline (see [`../bitwarden-backup/`](../bitwarden-backup)), lives in its own pipeline
-- **Working files you're actively editing** — this folder is for stable references, not scratch space
-- **Anything so large that daily backup delta becomes expensive** — restic dedup handles small changes fine; multi-GB video files that change often go elsewhere
-- **Secrets meant for automation** — those go in your password manager, not a passive folder
+- **Anything that would be catastrophic if lost** — belongs in [`../secrets-vault/`](../secrets-vault) with infinite retention, not here (this folder rotates at 90 days like other selfhost tools).
+- **Bitwarden vault** — has its own encryption discipline; lives in `secrets-vault`.
+- **Working files you're actively editing** — this folder is for stable references, not scratch space.
+- **Multi-GB media that changes often** — restic dedup handles small changes fine; large frequently-changing binaries burn snapshot storage.
+- **Secrets meant for automation** — those go in your password manager, not a passive folder.

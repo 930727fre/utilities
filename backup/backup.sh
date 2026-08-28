@@ -23,7 +23,6 @@ trap 'notify "❌ | Backup | FAILED at ${STEP}"' EXIT
 echo "[$(date)] Starting backup for tools: ${TOOLS}"
 echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS}"
 echo "[$(date)] MEGA repo: ${RESTIC_REPOSITORY_MEGA} (excluding: ${MEGA_EXCLUDE:-none})"
-echo "[$(date)] No-forget (infinite retention) tools: ${NO_FORGET_TOOLS:-none}"
 
 # ── One-time repo init on first run ─────────────────────────────────
 # `restic snapshots` returns non-zero when the repo doesn't exist yet.
@@ -156,10 +155,15 @@ for TOOL in $TOOLS; do
     rm -rf "$STAGING"
 done
 
-# ── Retention (both repos, per-tool opt-out via NO_FORGET_TOOLS) ────
-# Default: every tool gets `restic forget --tag $TOOL --keep-daily 90
-# --prune` applied on both repos (NAS + MEGA). Tools listed in
-# NO_FORGET_TOOLS are exempt from forget entirely → infinite retention.
+# ── Retention (both repos, uniform 90-day) ──────────────────────────
+# Every tool gets `restic forget --tag $TOOL --keep-daily 90 --prune`
+# applied on both repos (NAS + MEGA). No exemptions here — the
+# "infinite retention" bucket lives in utilities/secrets-vault/ via
+# rclone copy, which is the right primitive for pre-sealed monolithic
+# blobs. Everything backed up through this container is either
+# recoverable via other channels (immich → phone) or acceptable-to-
+# lose-after-90-days (jellyfin watch state, flashcard scheduling,
+# scanned docs).
 #
 # --tag scopes each forget to that tool's snapshots so the 90-slot
 # budget isn't shared across tools (each keeps its own 90 dailies).
@@ -168,14 +172,7 @@ done
 # reusing them ensures we only forget on repos where the tool actually
 # has snapshots (e.g. immich never lands on MEGA, so it's absent from
 # MEGA_TOOLS_DONE — no forget call needed there).
-
-is_no_forget() {
-    for exempt in $NO_FORGET_TOOLS; do
-        [ "$exempt" = "$1" ] && return 0
-    done
-    return 1
-}
-
+#
 # --retry-lock 30s: restic backup and forget both take exclusive
 # repo locks. Through the rclone: backend, the just-completed backup's
 # lock-file DELETE hasn't fully round-tripped to the remote by the
@@ -184,10 +181,6 @@ is_no_forget() {
 # and any transient WebDAV / MEGA API slowness without meaningfully
 # delaying the happy path (lock usually clears in <1s).
 for FTOOL in $NAS_TOOLS_DONE; do
-    if is_no_forget "$FTOOL"; then
-        echo "[$(date)] NAS forget SKIPPED for '${FTOOL}' (in NO_FORGET_TOOLS)"
-        continue
-    fi
     STEP="restic+forget:nas:${FTOOL}"
     echo "[$(date)] NAS forget for tag '${FTOOL}' (keep-daily 90)..."
     restic --repo "$RESTIC_REPOSITORY_NAS" \
@@ -195,10 +188,6 @@ for FTOOL in $NAS_TOOLS_DONE; do
 done
 
 for FTOOL in $MEGA_TOOLS_DONE; do
-    if is_no_forget "$FTOOL"; then
-        echo "[$(date)] MEGA forget SKIPPED for '${FTOOL}' (in NO_FORGET_TOOLS)"
-        continue
-    fi
     STEP="restic+forget:mega:${FTOOL}"
     echo "[$(date)] MEGA forget for tag '${FTOOL}' (keep-daily 90)..."
     restic --repo "$RESTIC_REPOSITORY_MEGA" \

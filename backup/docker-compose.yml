@@ -80,16 +80,16 @@ services:
       # its photo library is already 3-2-1 via phone + host + NAS, no
       # value in a fourth copy on MEGA free tier.
       #
-      # NO_FORGET_TOOLS: tools whose snapshots are NEVER forgotten (on
-      # either repo). Default (everything else) = keep-daily 90 --prune.
-      # Currently crucial-docs — anything you'd cry over losing gets
-      # infinite retention. Every other tool gets 90-day rolling on
-      # both repos (deltas are small, but noise piles up and the tools
-      # themselves aren't "recover state from three years ago" material).
+      # Retention: every tool gets --keep-daily 90 --prune on both repos.
+      # No exemptions — the "would cry if lost" bucket now lives in
+      # utilities/secrets-vault/ (rclone copy + infinite retention),
+      # which is the right primitive for pre-sealed monolithic blobs.
+      # Everything backed up through this container is either recoverable
+      # via other channels (immich → phone) or acceptable-to-lose-after-
+      # 90-days (jellyfin watch state, flashcard scheduling, misc docs).
       - RESTIC_REPOSITORY_NAS=rclone:nas:restic/
       - RESTIC_REPOSITORY_MEGA=rclone:mega:restic/
       - MEGA_EXCLUDE=immich
-      - NO_FORGET_TOOLS=crucial-docs
       # LOSING THIS PASSWORD = LOSING ALL SNAPSHOTS on BOTH repos (restic
       # uses it as the master key for each repo's AES-256 encryption; no
       # recovery mechanism). Store in Bitwarden, export in shell before

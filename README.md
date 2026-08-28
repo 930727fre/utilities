@@ -13,9 +13,9 @@ A collection of self-hosted tools, each containerized with Docker.
 | [keyboard](./keyboard) | _(stale, see notes)_ Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
-| [backup](./backup) | Daily backup of configured tools' `data/` dirs at 04:00 Asia/Taipei via restic, fans out to NAS + MEGA with per-tool retention policy |
-| [crucial-docs](./crucial-docs) | Passive folder for hard-to-recreate personal documents (certs, transcripts, IDs). Backed up on both tiers with infinite retention. |
-| [bitwarden-backup](./bitwarden-backup) | _(planned, spec only)_ Nightly export of Bitwarden vault, doubly encrypted (PBKDF2 master password + age pubkey) and pushed to NAS + MEGA via plain `rclone copy` — self-contained blobs, no restic dependency |
+| [backup](./backup) | Daily backup of configured tools' `data/` dirs at 04:00 Asia/Taipei via restic, fans out to NAS + MEGA at uniform 90-day retention |
+| [crucial-docs](./crucial-docs) | Passive folder for personal file-tree stuff (certs, transcripts, IDs). Standard selfhost tool — both tiers, 90-day retention. |
+| [secrets-vault](./secrets-vault) | Sealed-blob pipeline: mirrors pre-encrypted monolithic files (Bitwarden export, hardware-encrypted archives) to NAS + MEGA via plain `rclone copy` at infinite retention. Bitwarden export flow _planned_ (waiting on age pubkey); user-drop flow _implemented_. |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 
 ## Notes
