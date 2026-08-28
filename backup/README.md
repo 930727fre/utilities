@@ -1,31 +1,51 @@
 # backup
 
-Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `immich`, `crucial-docs`) at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption). Fans out to **two independent offsite tiers**:
+Daily backup at 04:00 Asia/Taipei, fanning out to **two independent offsite tiers** — `nas:` (friend's Tailscale WebDAV) and `mega:` (mega.nz free tier, 50 GB). Two branches inside one container:
 
-- **NAS** — `rclone:nas:restic/`, friend's Tailscale WebDAV. Primary.
-- **MEGA** — `rclone:mega:restic/`, mega.nz free tier (50 GB). Second offsite.
+### Branch 1 — restic (tool data)
 
-Both repos share `RESTIC_PASSWORD` (one keychain entry, two storage locations), but chunk keyspaces are separate — no `restic copy` between them; each backup pass pushes staging to both.
+Tools: `flashcard`, `free2speak`, `jellyfin`, `immich`, `crucial-docs`. Each `<tool>/data/` directory is snapshotted (SQLite via `sqlite3 .backup`, everything else copied as-is) into a staging dir, then `restic backup`ed into both repos independently.
 
-### Per-tool policy (as of 2026-08-28)
+Repos: `rclone:nas:restic/` + `rclone:mega:restic/`. Both share `RESTIC_PASSWORD` (one keychain entry, two storage locations); chunk keyspaces are separate — no `restic copy` between them, each push builds staging once and sends to both.
 
 | Tool bucket | NAS | MEGA | Retention |
 |---|---|---|---|
 | `flashcard` / `free2speak` / `jellyfin` / `crucial-docs` | ✓ | ✓ | 90-day on both |
 | `immich` | ✓ | ✗ (in `MEGA_EXCLUDE`) | 90-day on NAS |
 
-Rationale:
+Restic dedups per-snapshot chunk-by-chunk, so 90-day retention costs roughly base-repo-size + delta chunks, not `snapshots × tarball_size`.
 
-- **Selfhost tool data + crucial-docs** — recoverable-with-effort state (SQLite scheduling, config, watch history) plus a passive folder of personal documents. Both tiers for tier-loss survivability, uniform 90-day retention. 90 days is enough to catch accidental deletion; anything you'd genuinely regret losing after 90 days doesn't belong in this pipeline — it belongs in [`../secrets-vault/`](../secrets-vault) with infinite retention.
-- **Immich** — photo library already has 3-2-1 via phone originals + host + NAS, so MEGA is redundant. 90-day NAS is enough for accidental-delete recovery.
+### Branch 2 — rclone copy (secrets-vault)
 
-Truly critical sealed blobs (Bitwarden vault export, hardware-encrypted archives) live in [`../secrets-vault/`](../secrets-vault) with a separate pipeline (plain rclone copy of already-sealed monolithic blobs, no restic layer) — infinite retention there, not here.
+Location: `data/secrets-vault/` (bind-mounted to `/secrets/` in the container). Holds pre-sealed monolithic blobs — user-dropped hardware-encrypted archives, and (once the age pubkey lands) age-wrapped bw exports produced by a separate `utilities/bitwarden-producer/` container that shares this directory as its output target.
 
-For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is) into a staging area, then `restic backup`ed. Restic dedups against every prior snapshot chunk-by-chunk, so retention costs roughly base-repo-size + delta chunks, not `snapshots × tarball_size`.
+Push: plain `rclone copy /secrets/ nas:secrets/` + `rclone copy /secrets/ mega:secrets/`, no encryption applied at this layer (sources supply their own strong seal). No retention pruning — blobs accumulate forever (they're tiny, updates infrequent).
+
+Why not restic for these: pre-encrypted monolithic blobs get zero benefit from restic dedup (random-looking bytes per update = unique chunks every time). Recovery is more direct through plain rclone (just download the `.age` / `.7z` file), avoiding the `restic → RESTIC_PASSWORD → Bitwarden` circular dependency for the disaster case.
+
+### Data folders (`data/`)
+
+Both branches read from `data/` inside this repo, gitignored entirely (private per-install content):
+
+- `data/crucial-docs/` — passive folder of "would cry to lose but not catastrophic" personal documents (certs, transcripts, IDs, scanned records). `cp` files in by hand; the restic branch picks up the tree.
+- `data/secrets-vault/` — passive folder of pre-sealed critical blobs. `cp` in already-sealed archives (or let `bitwarden-producer` write age-wrapped exports there). The rclone branch mirrors to both tiers.
+
+Neither folder has a container or code of its own — pure input directories for this pipeline. If you clone this repo to a fresh machine, both dirs need to be created first (docker's `create_host_path: false` will fail loudly otherwise): `mkdir -p data/crucial-docs data/secrets-vault`.
+
+### Integrity checks
+
+Every Sunday, tacked onto the end of the daily tick — no separate cron entry:
+
+- `restic check --read-data` on both repos: downloads and decrypts every pack, verifies HMAC → catches bit-rot or password/crypto issues.
+- `rclone check --download` on secrets-vault against both tiers: fetches every remote blob, byte-compares against local → catches bit-rot at either tier.
+
+One unified weekly cadence, no monthly/subset split — bandwidth isn't the constraint (04:00, home broadband, no quota concerns), simpler is better. Failures bubble to the outer trap → Telegram `❌ | Backup | FAILED at {step}`.
+
+Manual quarterly restore drill is still worth doing on top: pick a tool via `./restore.sh` (or a secrets blob), verify the restored bytes are actually usable end-to-end.
 
 ### MEGA opt-out (`MEGA_EXCLUDE`)
 
-`MEGA_EXCLUDE` in `docker-compose.yml` is a space-separated tool list that skips the MEGA push (NAS still gets it). Currently: `immich` — the photo library is already covered by phone-side originals + host + NAS (3-2-1 satisfied), so paying MEGA space + upload time for a fourth copy is wasteful. Any new tool that lands with a comparable independent-copy story goes here too. Default is empty (include all tools).
+`MEGA_EXCLUDE` in `docker-compose.yml` is a space-separated tool list that skips the MEGA restic push (NAS still gets it). Currently: `immich` — photo library already 3-2-1 via phone + host + NAS. Any new tool with a comparable independent-copy story goes here too. Does NOT apply to the secrets-vault branch — that branch pushes to both tiers unconditionally.
 
 ## Adding a tool
 
@@ -106,20 +126,6 @@ docker compose up -d --build
 
 `network_mode: host` is set so rclone reaches `tailscale0` — Docker's default bridge netns can't see the host's Tailscale interface.
 
-## Periodic integrity checks (automatic)
-
-`backup.sh` runs `restic check` on both repos on a rolling cadence, tacked onto the end of the daily tick — no separate cron entry needed:
-
-| Cadence | Command | What it catches |
-|---|---|---|
-| **Monthly** (day 01) | `restic check --read-data-subset=10%` | Downloads and decrypts a 10% sample of pack files — proves the data at rest hasn't bit-rotted, and that the password + crypto still work. Includes an implicit structural check. |
-| **Weekly** (Sundays, unless day 01 already ran the monthly) | `restic check` | Structural only — walks index + snapshot tree + pack refs. No data download. Cheap, catches most metadata corruption early. |
-| Other days | — | daily backup + forget only, no check |
-
-Failures bubble to the outer trap → Telegram "Backup FAILED at `restic+check(:read)?:{NAS|MEGA}`" so you notice the same way you notice a failed backup.
-
-Random per-week/per-month sample means everything eventually gets covered (10% × 10 months ≈ full coverage of contents, structural check every 7 days ≈ metadata always fresh). A full `restic check --read-data` (no subset) is manual — run when you're paranoid, or once a quarter as belt-and-suspenders.
-
 ## Test
 
 Run the backup script immediately without waiting for 04:00:
@@ -151,26 +157,20 @@ docker compose run --rm --privileged -e RESTIC_REPOSITORY=rclone:nas:restic/ bac
 
 ## Restore
 
-Interactive script on the host — pick a source repo (NAS / MEGA), pick a tool, pick a snapshot, done. **Stop dependent services for the tool first** — the script writes to the live path.
+Interactive script on the host, dispatches by restore kind at the top.
 
 ```bash
 ./restore.sh
 ```
 
-Menu prompts:
+**Kind 1 — Tool data (restic snapshot)**: pick source repo (NAS / MEGA) → pick tool → pick snapshot → confirm → wipes and replaces the tool's whole `data/` directory (or, for jellyfin, its `config/`). Stop dependent services first. Files restored to a staging temp dir first and moved into place, so a restic-side error doesn't leave the target half-wiped. Restored files land root-owned (rclone in-container runs as root); `chown -R <uid>:<gid> <path>` afterward if the consuming service runs non-root. Exception: `crucial-docs` auto-chowns back to the host user because it's user-facing, not service-consumed.
 
-1. Source repo (`NAS` or `MEGA`)
-2. Tool (enumerated from that repo's snapshot tags)
-3. Snapshot (newest first)
-4. Confirm
+**Kind 2 — Secrets vault file**: pick source tier (NAS / MEGA) → pick file from the remote listing → download to a fresh `/tmp/restore-XXXXXX/` dir. Never dropped back into `data/secrets-vault/` — you unseal / decrypt / import from `/tmp` and decide where the plaintext (if any) goes. Blob types + how to unseal each:
 
-NAS is the go-to for a routine restore (primary, holds every tool including immich). Fall back to MEGA when NAS is unreachable or gone.
+- `bw-*.encrypted.json.age` — `age --decrypt -i <private-key> ...` then import into Bitwarden Desktop / Vaultwarden with master password
+- `*.7z` — 7z + hardware key (or whatever the archive was sealed with)
 
-All supported tools restore via **wipe & replace** of the tool's whole `data/` directory (or, for jellyfin, its `config/`). Files are restored to a staging temp dir first and moved into place at the end, so a restic-side error doesn't leave the target half-wiped.
-
-Restored files are owned by root (rclone runs in a container as root). If the consuming service runs as a non-root user, `chown -R <uid>:<gid> <tool>/data/` afterward. Restart your services after the restore completes.
-
-For advanced restore (single file, browse historical state via FUSE, restore to alternate location), fall back to `docker compose run --rm backup restic ...` directly — see the restic docs.
+NAS is the go-to for a routine restore (primary, holds every restic tool including immich, and has the full secrets-vault mirror). Fall back to MEGA when NAS is unreachable or gone. For advanced restore (single file, browse historical state via FUSE, restore to alternate location), fall back to `docker compose run --rm backup restic ...` directly — see the restic docs.
 
 ## Migration from the old tarball setup
 

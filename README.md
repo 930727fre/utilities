@@ -13,9 +13,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [keyboard](./keyboard) | _(stale, see notes)_ Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
-| [backup](./backup) | Daily backup of configured tools' `data/` dirs at 04:00 Asia/Taipei via restic, fans out to NAS + MEGA at uniform 90-day retention |
-| [crucial-docs](./crucial-docs) | Passive folder for personal file-tree stuff (certs, transcripts, IDs). Standard selfhost tool — both tiers, 90-day retention. |
-| [secrets-vault](./secrets-vault) | Sealed-blob pipeline: mirrors pre-encrypted monolithic files (Bitwarden export, hardware-encrypted archives) to NAS + MEGA via plain `rclone copy` at infinite retention. Bitwarden export flow _planned_ (waiting on age pubkey); user-drop flow _implemented_. |
+| [backup](./backup) | Daily 04:00 pipeline, two branches under one container. Branch 1: restic snapshot of configured tools' `data/` dirs → NAS + MEGA, 90-day. Branch 2: rclone copy of pre-sealed blobs from `data/secrets-vault/` → NAS + MEGA, infinite. Data folders `data/crucial-docs/` (personal docs, restic-managed) and `data/secrets-vault/` (sealed blobs, rclone-managed) both live in-repo, gitignored. |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 
 ## Notes

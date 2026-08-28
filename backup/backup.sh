@@ -194,49 +194,56 @@ for FTOOL in $MEGA_TOOLS_DONE; do
         forget --tag "$FTOOL" --keep-daily 90 --prune --retry-lock 30s
 done
 
-# ── Periodic integrity checks ───────────────────────────────────────
-# Two cadences, both applied to NAS + MEGA:
-#   * Monthly (day 01): --read-data-subset=10%. Actually downloads and
-#     decrypts a 10% sample of pack files — proves the data at rest
-#     hasn't bit-rotted and that the password + crypto still work.
-#     Includes an implicit structural check.
-#   * Weekly (Sundays other than day 01): structural check only. Cheap
-#     (no data download) — walks index + snapshot tree + pack refs
-#     to catch metadata corruption early.
+# ── secrets-vault rclone copy branch ────────────────────────────────
+# Non-restic branch: /secrets/ holds pre-sealed monolithic blobs
+# (hardware-encrypted archives now; future age-wrapped bw exports too).
+# Copied as-is to nas:secrets/ + mega:secrets/. No encryption applied
+# here (sources supply their own seal). No retention pruning either —
+# blobs accumulate forever. --exclude ".*" skips any dotfiles that
+# might land in the directory (paranoia; there shouldn't be any).
+STEP="rclone+copy:secrets:nas"
+echo "[$(date)] rclone copy /secrets/ → nas:secrets/ ..."
+rclone copy /secrets/ nas:secrets/ --exclude ".*"
+
+STEP="rclone+copy:secrets:mega"
+echo "[$(date)] rclone copy /secrets/ → mega:secrets/ ..."
+rclone copy /secrets/ mega:secrets/ --exclude ".*"
+
+SECRETS_COUNT=$(find /secrets -type f ! -name '.*' 2>/dev/null | wc -l)
+
+# ── Weekly full integrity check (Sundays) ───────────────────────────
+# One unified verify cadence: every Sunday, fully verify both restic
+# repos AND both secrets-vault mirrors. No monthly/subset split —
+# bandwidth is not the constraint here (04:00, home broadband, no
+# quota concerns on either backend), simpler is better.
+#
+# restic check --read-data: downloads and decrypts every pack file,
+# verifies HMAC → catches any bit-rot or password/crypto issue.
+#
+# rclone check --download: fetches every remote object in secrets/,
+# byte-compares against the local /secrets/ tree → catches any bit-
+# rot on either tier.
 #
 # Failures bubble to the outer EXIT trap → Telegram "Backup FAILED at
-# restic+check(:read)?:{NAS|MEGA}" so you notice the same way you'd
-# notice a failed backup.
-#
-# Skipping check on non-Sunday non-day-01 keeps the daily 04:00 tick
-# fast (~1min) and reserves the extra bandwidth spikes for one
-# predictable day per week/month.
-DOM=$(date +%d)
-DOW=$(date +%u)
-
-# CHECK_STATUS gets set only when a check ran and passed (set -e means
-# a failing check exits the script before reaching this point → the
-# EXIT trap fires the FAILED notify instead). Included in the success
-# Telegram message so silent successes are visible ("yes, verification
-# actually ran this week").
+# {step}" so you notice the same way you notice a failed backup.
 CHECK_STATUS=""
-
-run_check() {
+if [ "$(date +%u)" = "7" ]; then
     for REPO_NAME in NAS MEGA; do
         eval "REPO_URL=\$RESTIC_REPOSITORY_$REPO_NAME"
-        STEP="$1:${REPO_NAME}"
-        echo "[$(date)] $REPO_NAME $2..."
-        restic --repo "$REPO_URL" check $3 --retry-lock 30s
+        STEP="restic+check-read:${REPO_NAME}"
+        echo "[$(date)] $REPO_NAME weekly full check (--read-data)..."
+        restic --repo "$REPO_URL" check --read-data --retry-lock 30s
     done
-}
 
-if [ "$DOM" = "01" ]; then
-    run_check "restic+check-read" "monthly deep check (--read-data-subset=10%)" \
-        "--read-data-subset=10%"
-    CHECK_STATUS="Monthly deep check OK (--read-data-subset=10%)"
-elif [ "$DOW" = "7" ]; then
-    run_check "restic+check" "weekly structural check" ""
-    CHECK_STATUS="Weekly structural check OK"
+    STEP="rclone+check:secrets:nas"
+    echo "[$(date)] Weekly full verify secrets — NAS..."
+    rclone check --download /secrets/ nas:secrets/ --exclude ".*"
+
+    STEP="rclone+check:secrets:mega"
+    echo "[$(date)] Weekly full verify secrets — MEGA..."
+    rclone check --download /secrets/ mega:secrets/ --exclude ".*"
+
+    CHECK_STATUS="Weekly full verify OK (restic + secrets, both tiers)"
 fi
 
 ELAPSED=$(( $(date +%s) - START ))
@@ -244,12 +251,13 @@ ELAPSED=$(( $(date +%s) - START ))
 # ── Telegram summary ────────────────────────────────────────────────
 # jq @uri in notify() handles encoding — this string is authored as
 # plain UTF-8 with actual newlines. Header follows the homelab
-# {emoji} | {Service} | {details} convention; per-repo detail
-# follows on subsequent lines.
+# {emoji} | {Service} | {details} convention.
 MSG="✅ | Backup | ${ELAPSED}s
 NAS:  ${NAS_TOOLS_DONE}
 MEGA: ${MEGA_TOOLS_DONE}"
 [ -n "$MEGA_TOOLS_SKIPPED" ] && MSG="${MSG} (skipped ${MEGA_TOOLS_SKIPPED})"
+MSG="${MSG}
+Secrets: ${SECRETS_COUNT} file(s) pushed"
 [ -n "$CHECK_STATUS" ] && MSG="${MSG}
 ${CHECK_STATUS}"
 

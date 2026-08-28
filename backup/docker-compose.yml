@@ -51,12 +51,24 @@ services:
           create_host_path: false
       # crucial-docs: passive user-managed folder (certs, transcripts,
       # IDs, tax, etc.). No service writes here — files land manually
-      # via `cp`, backup picks up the tree as-is. Special retention
-      # treatment (infinite via NO_FORGET_TOOLS) since these are the
-      # painful-to-recreate ones.
+      # via `cp`, backup picks up the tree as-is. Lives under data/
+      # inside this repo instead of at a top-level utilities/crucial-docs/
+      # because it has no code / no container of its own — it's just a
+      # folder that this pipeline reads from.
       - type: bind
-        source: ../crucial-docs/data
+        source: ./data/crucial-docs
         target: /tools/crucial-docs/data
+        bind:
+          create_host_path: false
+      # secrets-vault: pre-sealed monolithic blobs (hardware-encrypted
+      # archives now; future age-wrapped bw exports will land here too,
+      # produced by a separate utilities/bitwarden-producer/ container
+      # that mounts this same directory as its output target). Mounted
+      # at /secrets/ (not /tools/) because it takes a different code
+      # path — plain rclone copy at infinite retention, not restic.
+      - type: bind
+        source: ./data/secrets-vault
+        target: /secrets
         bind:
           create_host_path: false
     environment:
