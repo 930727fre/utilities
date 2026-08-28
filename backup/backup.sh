@@ -12,7 +12,7 @@ notify() {
 trap 'notify "Backup+FAILED+at+${STEP}"' EXIT
 
 echo "[$(date)] Starting backup for tools: ${TOOLS}"
-echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS}"
+echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS} (forget --keep-daily 90 on: ${NAS_FORGET_TOOLS:-none})"
 echo "[$(date)] MEGA repo: ${RESTIC_REPOSITORY_MEGA} (excluding: ${MEGA_EXCLUDE:-none})"
 
 # ── One-time repo init on first run ─────────────────────────────────
@@ -146,18 +146,25 @@ for TOOL in $TOOLS; do
     rm -rf "$STAGING"
 done
 
-# ── Retention (NAS only) ────────────────────────────────────────────
-# 90 daily snapshots per tool on NAS. --group-by tag applies the keep
-# policy WITHIN each tool's snapshot set (else 5 tools × 1/day would
-# compete for the same 90 slots and each tool would only keep ~18 days).
-# --prune reclaims disk immediately.
+# ── Retention (NAS, per-tool opt-in via NAS_FORGET_TOOLS) ───────────
+# Only tools listed in NAS_FORGET_TOOLS get `restic forget --keep-daily
+# 90 --prune` applied on NAS. Everything else = infinite retention on
+# NAS (SQLite/config tools are tiny — even years of deltas cost almost
+# nothing under restic dedup).
 #
-# MEGA repo has NO forget — retention is intentionally infinite.
-# Deltas are tiny (~100 MB/day worst case) against a 50 GB free tier,
-# multi-year runway. Revisit if MEGA usage climbs past ~40 GB.
-STEP="restic+forget:nas"
-restic --repo "$RESTIC_REPOSITORY_NAS" \
-    forget --group-by tag --keep-daily 90 --prune
+# --tag $TOOL scopes the forget to that tool's snapshots only, so the
+# 90-slot budget isn't shared across tools (each tool independently
+# keeps its own 90 dailies).
+#
+# MEGA repo has NO forget — retention is intentionally infinite across
+# the board. Deltas are tiny (~100 MB/day worst case) against a 50 GB
+# free tier, multi-year runway. Revisit if MEGA usage climbs past ~40 GB.
+for FTOOL in $NAS_FORGET_TOOLS; do
+    STEP="restic+forget:nas:${FTOOL}"
+    echo "[$(date)] NAS forget for tag '${FTOOL}' (keep-daily 90)..."
+    restic --repo "$RESTIC_REPOSITORY_NAS" \
+        forget --tag "$FTOOL" --keep-daily 90 --prune
+done
 
 ELAPSED=$(( $(date +%s) - START ))
 

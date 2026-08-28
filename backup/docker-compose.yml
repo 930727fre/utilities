@@ -74,16 +74,22 @@ services:
       # Two independent restic repos (both under the shared rclone.conf's
       # [nas] and [mega] remotes). Each is a separate keyspace, but the
       # SAME RESTIC_PASSWORD unlocks both — one keychain entry, two
-      # storage locations.
+      # storage locations. Both get the same daily backup pass.
       #
-      # NAS: friend's Tailscale WebDAV. Primary; 90-day retention.
-      # MEGA: mega.nz free-tier (50 GB). Second offsite, infinite retention.
-      # Both get the same daily backup pass; MEGA_EXCLUDE lets specific
-      # tools opt out (currently immich, which already has 3-2-1 via
-      # phone + host + NAS).
+      # MEGA_EXCLUDE: tools to skip from the MEGA push. Currently immich,
+      # which already has 3-2-1 via phone + host + NAS.
+      #
+      # NAS_FORGET_TOOLS: tools to apply `restic forget --keep-daily 90`
+      # to on NAS. Empty = infinite retention for all. Currently immich
+      # only — its photo/postgres data is the one that grows fast enough
+      # to matter; the SQLite/config tools are tiny even after years.
+      #
+      # MEGA has no forget at all — infinite retention across the board
+      # (50 GB free tier has multi-year runway for the tiny deltas).
       - RESTIC_REPOSITORY_NAS=rclone:nas:restic/
       - RESTIC_REPOSITORY_MEGA=rclone:mega:restic/
       - MEGA_EXCLUDE=immich
+      - NAS_FORGET_TOOLS=immich
       # LOSING THIS PASSWORD = LOSING ALL SNAPSHOTS on BOTH repos (restic
       # uses it as the master key for each repo's AES-256 encryption; no
       # recovery mechanism). Store in Bitwarden, export in shell before

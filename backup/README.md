@@ -4,8 +4,10 @@ Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `m
 
 | Tier | Path | Retention | Notes |
 |---|---|---|---|
-| NAS | `rclone:nas:restic/` (friend's Tailscale WebDAV) | 90 daily / tool | Primary. `forget --prune` runs every tick. |
-| MEGA | `rclone:mega:restic/` (mega.nz free tier, 50 GB) | infinite | Second offsite. No `forget`; deltas are tiny (~100 MB/day worst case), multi-year runway on free tier. |
+| NAS | `rclone:nas:restic/` (friend's Tailscale WebDAV) | infinite for most tools; 90 daily for immich only | Primary. `forget --prune` scoped to tools listed in `NAS_FORGET_TOOLS`. |
+| MEGA | `rclone:mega:restic/` (mega.nz free tier, 50 GB) | infinite (all tools) | Second offsite. No `forget`; deltas are tiny (~100 MB/day worst case), multi-year runway on free tier. |
+
+Per-tool NAS retention: immich is the only tool whose data (photos + postgres dump) grows fast enough to warrant a bounded window. SQLite/config tools produce tiny deltas — restic dedup makes infinite retention costs asymptotic to base-repo-size + a rounding error per year.
 
 Both repos share `RESTIC_PASSWORD` (one keychain entry, two storage locations), but chunk keyspaces are separate — no `restic copy` between them; each backup pass pushes staging to both.
 
