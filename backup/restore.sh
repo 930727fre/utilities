@@ -124,7 +124,11 @@ esac
 # restore to a fresh temp dir and then `mv` the tree into $TARGET so
 # any restic-side error doesn't leave $TARGET half-wiped.
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# sudo rm: the backup container runs as root, so files restic writes into
+# $TMP (via the -v mount below) are root-owned on the host. Plain `rm -rf`
+# from a non-root shell then fails with "Permission denied" and leaves
+# cruft in /tmp. sudo covers both restored files and any nested dirs.
+trap 'sudo rm -rf "$TMP"' EXIT
 
 echo ""
 echo "Restoring to staging: $TMP  (from $REPO_LABEL)"
@@ -142,6 +146,15 @@ fi
 # in the tool's compose file, don't disturb the mountpoint).
 sudo find "$TARGET" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 sudo cp -a "$SRC"/. "$TARGET/"
+
+# crucial-docs is user-facing (you `cp` files in by hand, you browse them,
+# no service consumes it). Chown back to the host user so you can read
+# the restored certs/transcripts/etc without needing sudo forever after.
+# Every other tool stays root-owned so its container / systemd unit can
+# reassign as needed (README documents per-tool chown).
+if [ "$TOOL" = "crucial-docs" ]; then
+    sudo chown -R "$(id -u):$(id -g)" "$TARGET"
+fi
 
 # Quick sanity check on any .db files — delegates to the container's
 # sqlite3 binary so we don't require host-side sqlite install.
