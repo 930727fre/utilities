@@ -60,12 +60,12 @@ services:
         target: /tools/crucial-docs/data
         bind:
           create_host_path: false
-      # secrets: pre-sealed monolithic blobs (hardware-encrypted
-      # archives now; future age-wrapped bw exports will land here too,
-      # produced by a separate utilities/bitwarden-export/ container
-      # that mounts this same directory as its output target). Mounted
-      # at /secrets/ (not /tools/) because it takes a different code
-      # path — plain rclone copy at infinite retention, not restic.
+      # secrets: pre-sealed monolithic blobs. Sources today:
+      # hardware-encrypted archives (dropped in manually), and daily
+      # age-wrapped bw exports written here by the sibling
+      # utilities/bitwarden-export/ container. Mounted at /secrets/
+      # (not /tools/) because it takes a different code path — plain
+      # rclone copy at infinite retention, not restic.
       - type: bind
         source: ./data/secrets
         target: /secrets

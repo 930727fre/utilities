@@ -14,6 +14,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
 | [backup](./backup) | Daily 04:00 pipeline, two branches under one container. Branch 1: restic snapshot of configured tools' `data/` dirs → NAS + MEGA, 90-day. Branch 2: rclone copy of pre-sealed blobs from `data/secrets/` → NAS + MEGA, infinite. Data folders `data/crucial-docs/` (personal docs, restic-managed) and `data/secrets/` (sealed blobs, rclone-managed) both live in-repo, gitignored. |
+| [bitwarden-export](./bitwarden-export) | Daily 03:00 producer of age-wrapped Bitwarden vault exports. Drops `bw-YYYY-MM-DD.encrypted.json.age` into `backup/data/secrets/` so the next 04:00 backup pass fans it out to both tiers. Two encryption layers: Bitwarden's own encrypted_json + age using an offline public key. |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 
 ## Notes

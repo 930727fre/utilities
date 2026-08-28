@@ -1,0 +1,31 @@
+services:
+  bitwarden-export:
+    build: .
+    container_name: bitwarden-export
+    volumes:
+      # Output target: the backup container's rclone-copy branch reads
+      # from this exact directory and fans out to nas:secrets/ +
+      # mega:secrets/. Do NOT change this path without updating
+      # backup/docker-compose.yml's data/secrets bind.
+      - type: bind
+        source: ../backup/data/secrets
+        target: /output
+        bind:
+          create_host_path: false
+    environment:
+      # Bitwarden API key — vault Web → Settings → My Account → API key.
+      # Independent of master password, revokable in the same panel.
+      - BW_CLIENTID=${BW_CLIENTID:?export BW_CLIENTID required — Bitwarden vault Settings → API key clientId}
+      - BW_CLIENTSECRET=${BW_CLIENTSECRET:?export BW_CLIENTSECRET required — Bitwarden vault Settings → API key clientSecret}
+      # Master password — required to unlock vault AND used as the
+      # export password (so recovery is one-secret, not two).
+      - BW_PASSWORD=${BW_PASSWORD:?export BW_PASSWORD required — Bitwarden master password}
+      # age recipient (public key, `age1...`). The matching private key
+      # is stored OFFLINE only — never in this container, never on the
+      # host. During bootstrap, this may point to a throwaway pubkey
+      # whose private key was intentionally destroyed to prove the
+      # pipeline before the real offline key arrives — see README.
+      - AGE_RECIPIENT=${AGE_RECIPIENT:?export AGE_RECIPIENT required — age public key starting with age1...}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?required}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?required}
+    restart: unless-stopped
