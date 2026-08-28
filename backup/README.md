@@ -17,7 +17,7 @@ Restic dedups per-snapshot chunk-by-chunk, so 90-day retention costs roughly bas
 
 ### Branch 2 — rclone copy (secrets)
 
-Location: `data/secrets/` (bind-mounted to `/secrets/` in the container). Holds pre-sealed monolithic blobs — hardware-encrypted archives, age-wrapped bw exports produced manually on the user's Mac (see manual ritual below), or any other one-shot sealed file dropped in by hand. This container never generates blobs, only mirrors them.
+Location: `data/secrets/` (bind-mounted to `/secrets/` in the container). Holds pre-sealed monolithic blobs — user drops them in already-sealed and this container just mirrors bytes out. Never generates or unseals anything.
 
 Push: plain `rclone copy /secrets/ nas:secrets/` + `rclone copy /secrets/ mega:secrets/`, no encryption applied at this layer (sources supply their own strong seal). No retention pruning — blobs accumulate forever (they're tiny, updates infrequent).
 
@@ -28,32 +28,9 @@ Why not restic for these: pre-encrypted monolithic blobs get zero benefit from r
 Both branches read from `data/` inside this repo, gitignored entirely (private per-install content):
 
 - `data/crucial-docs/` — passive folder of "would cry to lose but not catastrophic" personal documents (certs, transcripts, IDs, scanned records). `cp` files in by hand; the restic branch picks up the tree.
-- `data/secrets/` — passive folder of pre-sealed critical blobs. `cp` / `scp` in already-sealed files by hand (hardware-encrypted archives, age-wrapped bw exports produced manually on the user's Mac, etc.). The rclone branch mirrors to both tiers.
+- `data/secrets/` — passive folder of pre-sealed critical blobs. `cp` / `scp` in already-sealed files by hand. The rclone branch mirrors to both tiers.
 
 Neither folder has a container or code of its own — pure input directories for this pipeline. If you clone this repo to a fresh machine, both dirs need to be created first (docker's `create_host_path: false` will fail loudly otherwise): `mkdir -p data/crucial-docs data/secrets`.
-
-### Manual bw export ritual (Mac, quarterly)
-
-The Bitwarden vault export blob is produced by hand on the user's Mac — folded into the quarterly decrypt drill (see Integrity checks below). Rationale for not automating: an always-on container producing daily exports would need `BW_PASSWORD` persistent in its env 24/7, which is a real attack surface added for insurance against a low-probability event (Bitwarden.com dying). Manual on Mac keeps the master password only in shell memory for ~10 seconds per ritual, and lets `age-plugin-se` directly encrypt to the Secure-Enclave-backed recipient (no wrap-key indirection needed).
-
-```bash
-# On Mac, once per quarter:
-bw login          # if not already logged in
-BW_SESSION=$(bw unlock --raw)  # prompts for master password, returns session token
-export BW_SESSION
-
-DATE=$(date +%Y-%m-%d)
-read -s -p "master password again for export: " PW; echo
-bw export --format encrypted_json --password "$PW" --output /dev/stdout \
-  | age -r age1se1<your SE recipient here> -o "bw-${DATE}.encrypted.json.age"
-
-scp "bw-${DATE}.encrypted.json.age" host:~/utilities/backup/data/secrets/
-rm "bw-${DATE}.encrypted.json.age"
-unset PW BW_SESSION
-bw lock
-```
-
-Next daily backup pass (04:00) will fan the new blob out to both tiers.
 
 ### Integrity checks
 

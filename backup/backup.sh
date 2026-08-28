@@ -196,11 +196,12 @@ done
 
 # ── secrets rclone copy branch ────────────────────────────────
 # Non-restic branch: /secrets/ holds pre-sealed monolithic blobs
-# (hardware-encrypted archives now; future age-wrapped bw exports too).
-# Copied as-is to nas:secrets/ + mega:secrets/. No encryption applied
-# here (sources supply their own seal). No retention pruning either —
-# blobs accumulate forever. --exclude ".*" skips any dotfiles that
-# might land in the directory (paranoia; there shouldn't be any).
+# dropped in by the user (already sealed with whatever mechanism they
+# chose — hardware key, age, gpg, etc.). Copied as-is to nas:secrets/
+# + mega:secrets/. No encryption applied here (sources supply their
+# own seal). No retention pruning either — blobs accumulate forever.
+# --exclude ".*" skips any dotfiles that might land in the directory
+# (paranoia; there shouldn't be any).
 STEP="rclone+copy:secrets:nas"
 echo "[$(date)] rclone copy /secrets/ → nas:secrets/ ..."
 rclone copy /secrets/ nas:secrets/ --exclude ".*"
