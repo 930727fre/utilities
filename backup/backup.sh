@@ -6,10 +6,19 @@ START=$(date +%s)
 STEP="init"
 
 notify() {
-    wget -qO- "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=$1" > /dev/null || true
+    # jq @uri handles emoji + newline + special chars correctly. Alternative
+    # would be hand-encoding \n as %0A and spaces as + like before, but that
+    # breaks the moment we want UTF-8 characters (✅❌⚠️) in the message.
+    ENCODED=$(printf '%s' "$1" | jq -sRr @uri)
+    wget -qO- "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${ENCODED}" > /dev/null || true
 }
 
-trap 'notify "Backup+FAILED+at+${STEP}"' EXIT
+# Format: {emoji} | Backup | {details}
+# Matches the homelab/disk-watchdog + homelab/transcribe notifier
+# convention so all self-host notifications look uniform in the Telegram
+# feed. Multi-line detail (NAS/MEGA tool lists, check status) follows on
+# subsequent lines below the standard header.
+trap 'notify "❌ | Backup | FAILED at ${STEP}"' EXIT
 
 echo "[$(date)] Starting backup for tools: ${TOOLS}"
 echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS}"
@@ -235,23 +244,25 @@ run_check() {
 if [ "$DOM" = "01" ]; then
     run_check "restic+check-read" "monthly deep check (--read-data-subset=10%)" \
         "--read-data-subset=10%"
-    CHECK_STATUS="Monthly+deep+check+OK+(--read-data-subset=10%)"
+    CHECK_STATUS="Monthly deep check OK (--read-data-subset=10%)"
 elif [ "$DOW" = "7" ]; then
     run_check "restic+check" "weekly structural check" ""
-    CHECK_STATUS="Weekly+structural+check+OK"
+    CHECK_STATUS="Weekly structural check OK"
 fi
 
 ELAPSED=$(( $(date +%s) - START ))
 
 # ── Telegram summary ────────────────────────────────────────────────
-# URL-encoded: '+' for space, '%0A' for newline, '%7C' for '|'.
-NAS_ENC=$(echo "$NAS_TOOLS_DONE" | tr ' ' '+')
-MEGA_ENC=$(echo "$MEGA_TOOLS_DONE" | tr ' ' '+')
-SKIP_ENC=$(echo "$MEGA_TOOLS_SKIPPED" | tr ' ' '+')
-
-MSG="Backup+done+%7C+${ELAPSED}s%0ANAS:+${NAS_ENC}%0AMEGA:+${MEGA_ENC}"
-[ -n "$MEGA_TOOLS_SKIPPED" ] && MSG="${MSG}+(skipped+${SKIP_ENC})"
-[ -n "$CHECK_STATUS" ] && MSG="${MSG}%0A${CHECK_STATUS}"
+# jq @uri in notify() handles encoding — this string is authored as
+# plain UTF-8 with actual newlines. Header follows the homelab
+# {emoji} | {Service} | {details} convention; per-repo detail
+# follows on subsequent lines.
+MSG="✅ | Backup | ${ELAPSED}s
+NAS:  ${NAS_TOOLS_DONE}
+MEGA: ${MEGA_TOOLS_DONE}"
+[ -n "$MEGA_TOOLS_SKIPPED" ] && MSG="${MSG} (skipped ${MEGA_TOOLS_SKIPPED})"
+[ -n "$CHECK_STATUS" ] && MSG="${MSG}
+${CHECK_STATUS}"
 
 trap - EXIT
 notify "$MSG"
