@@ -33,16 +33,6 @@ services:
         bind:
           create_host_path: false
       - type: bind
-        source: ../marker-pipeline/data
-        target: /tools/marker-pipeline/data
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ../keyboard/backend/data
-        target: /tools/keyboard/data
-        bind:
-          create_host_path: false
-      - type: bind
         source: ../../homelab/jellyfin/config
         target: /tools/jellyfin/data
         bind:
@@ -73,7 +63,7 @@ services:
       # Space-separated tool list — must match /tools/<name>/data mount
       # names above. transcribe / homelab-data intentionally absent
       # (user manages those manually).
-      - TOOLS=flashcard free2speak jellyfin marker-pipeline keyboard immich crucial-docs
+      - TOOLS=flashcard free2speak jellyfin immich crucial-docs
       - RCLONE_CONFIG=/config/rclone.conf
       # Immich's Postgres. backup.sh's immich case-branch pg_dumps to
       # STAGING before the file copy — needs to authenticate to postgres

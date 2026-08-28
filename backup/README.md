@@ -1,6 +1,6 @@
 # backup
 
-Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `marker-pipeline`, `keyboard`, `immich`, `crucial-docs`) at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption). Fans out to **two independent offsite tiers**:
+Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `immich`, `crucial-docs`) at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption). Fans out to **two independent offsite tiers**:
 
 - **NAS** — `rclone:nas:restic/`, friend's Tailscale WebDAV. Primary.
 - **MEGA** — `rclone:mega:restic/`, mega.nz free tier (50 GB). Second offsite.
@@ -12,7 +12,7 @@ Both repos share `RESTIC_PASSWORD` (one keychain entry, two storage locations), 
 | Tool bucket | NAS | MEGA | Retention |
 |---|---|---|---|
 | `crucial-docs` | ✓ | ✓ | **infinite** on both (in `NO_FORGET_TOOLS`) |
-| `flashcard` / `free2speak` / `jellyfin` / `marker-pipeline` / `keyboard` | ✓ | ✓ | 90-day on both |
+| `flashcard` / `free2speak` / `jellyfin` | ✓ | ✓ | 90-day on both |
 | `immich` | ✓ | ✗ (in `MEGA_EXCLUDE`) | 90-day on NAS |
 
 Rationale:
@@ -41,7 +41,7 @@ For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQ
          create_host_path: false
    ```
 2. Add the tool name to the `TOOLS` env var.
-3. If the tool's host path isn't `../<tool>/data` (e.g. `keyboard`'s data lives at `keyboard/backend/data`), add a `case` branch in `restore.sh` so the restore target resolves correctly.
+3. If the tool's host path isn't `../<tool>/data` (e.g. `jellyfin`'s config lives at `../../homelab/jellyfin/config`), add a `case` branch in `restore.sh` so the restore target resolves correctly.
 4. Rebuild: `docker compose up -d --build`.
 
 `*.db` files are snapshotted via `sqlite3 .backup` (safe while the source app is running); `.db-wal` / `.db-shm` skipped as regenerable WAL artifacts. Everything else is plain copied into staging.

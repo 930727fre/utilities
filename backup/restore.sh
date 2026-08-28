@@ -100,7 +100,6 @@ SNAP_TIME=$(echo "$LINE" | awk '{print $2}' | cut -c1-19)
 # docker-compose.yml — must stay in sync when adding tools.
 case "$TOOL" in
     jellyfin) TARGET_SRC="../../homelab/jellyfin/config" ;;
-    keyboard) TARGET_SRC="../keyboard/backend/data" ;;
     *)        TARGET_SRC="../${TOOL}/data" ;;
 esac
 TARGET=$(realpath "$TARGET_SRC" 2>/dev/null || echo "")
@@ -166,6 +165,5 @@ echo ""
 echo "  Rebuild the consuming service so it picks up restored files:"
 case "$TOOL" in
     jellyfin) echo "    docker compose -f ../../homelab/jellyfin/docker-compose.yml up -d --build" ;;
-    keyboard) echo "    docker compose -f ../keyboard/docker-compose.yml up -d --build" ;;
     *)        echo "    docker compose -f ../${TOOL}/docker-compose.yml up -d --build" ;;
 esac
