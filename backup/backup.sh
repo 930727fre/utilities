@@ -196,6 +196,42 @@ for FTOOL in $MEGA_TOOLS_DONE; do
         forget --tag "$FTOOL" --keep-daily 90 --prune --retry-lock 30s
 done
 
+# ── Periodic integrity checks ───────────────────────────────────────
+# Two cadences, both applied to NAS + MEGA:
+#   * Monthly (day 01): --read-data-subset=10%. Actually downloads and
+#     decrypts a 10% sample of pack files — proves the data at rest
+#     hasn't bit-rotted and that the password + crypto still work.
+#     Includes an implicit structural check.
+#   * Weekly (Sundays other than day 01): structural check only. Cheap
+#     (no data download) — walks index + snapshot tree + pack refs
+#     to catch metadata corruption early.
+#
+# Failures bubble to the outer EXIT trap → Telegram "Backup FAILED at
+# restic+check(:read)?:{NAS|MEGA}" so you notice the same way you'd
+# notice a failed backup.
+#
+# Skipping check on non-Sunday non-day-01 keeps the daily 04:00 tick
+# fast (~1min) and reserves the extra bandwidth spikes for one
+# predictable day per week/month.
+DOM=$(date +%d)
+DOW=$(date +%u)
+
+run_check() {
+    for REPO_NAME in NAS MEGA; do
+        eval "REPO_URL=\$RESTIC_REPOSITORY_$REPO_NAME"
+        STEP="$1:${REPO_NAME}"
+        echo "[$(date)] $REPO_NAME $2..."
+        restic --repo "$REPO_URL" check $3 --retry-lock 30s
+    done
+}
+
+if [ "$DOM" = "01" ]; then
+    run_check "restic+check-read" "monthly deep check (--read-data-subset=10%)" \
+        "--read-data-subset=10%"
+elif [ "$DOW" = "7" ]; then
+    run_check "restic+check" "weekly structural check" ""
+fi
+
 ELAPSED=$(( $(date +%s) - START ))
 
 # ── Telegram summary ────────────────────────────────────────────────

@@ -108,6 +108,20 @@ docker compose up -d --build
 
 `network_mode: host` is set so rclone reaches `tailscale0` — Docker's default bridge netns can't see the host's Tailscale interface.
 
+## Periodic integrity checks (automatic)
+
+`backup.sh` runs `restic check` on both repos on a rolling cadence, tacked onto the end of the daily tick — no separate cron entry needed:
+
+| Cadence | Command | What it catches |
+|---|---|---|
+| **Monthly** (day 01) | `restic check --read-data-subset=10%` | Downloads and decrypts a 10% sample of pack files — proves the data at rest hasn't bit-rotted, and that the password + crypto still work. Includes an implicit structural check. |
+| **Weekly** (Sundays, unless day 01 already ran the monthly) | `restic check` | Structural only — walks index + snapshot tree + pack refs. No data download. Cheap, catches most metadata corruption early. |
+| Other days | — | daily backup + forget only, no check |
+
+Failures bubble to the outer trap → Telegram "Backup FAILED at `restic+check(:read)?:{NAS|MEGA}`" so you notice the same way you notice a failed backup.
+
+Random per-week/per-month sample means everything eventually gets covered (10% × 10 months ≈ full coverage of contents, structural check every 7 days ≈ metadata always fresh). A full `restic check --read-data` (no subset) is manual — run when you're paranoid, or once a quarter as belt-and-suspenders.
+
 ## Test
 
 Run the backup script immediately without waiting for 04:00:
