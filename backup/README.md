@@ -17,7 +17,7 @@ Restic dedups per-snapshot chunk-by-chunk, so 90-day retention costs roughly bas
 
 ### Branch 2 — rclone copy (secrets)
 
-Location: `data/secrets/` (bind-mounted to `/secrets/` in the container). Holds pre-sealed monolithic blobs — user-dropped hardware-encrypted archives, and (once the age pubkey lands) age-wrapped bw exports produced by a separate `utilities/bitwarden-producer/` container that shares this directory as its output target.
+Location: `data/secrets/` (bind-mounted to `/secrets/` in the container). Holds pre-sealed monolithic blobs — user-dropped hardware-encrypted archives, and (once the age pubkey lands) age-wrapped bw exports produced by a separate `utilities/bitwarden-export/` container that shares this directory as its output target.
 
 Push: plain `rclone copy /secrets/ nas:secrets/` + `rclone copy /secrets/ mega:secrets/`, no encryption applied at this layer (sources supply their own strong seal). No retention pruning — blobs accumulate forever (they're tiny, updates infrequent).
 
@@ -28,7 +28,7 @@ Why not restic for these: pre-encrypted monolithic blobs get zero benefit from r
 Both branches read from `data/` inside this repo, gitignored entirely (private per-install content):
 
 - `data/crucial-docs/` — passive folder of "would cry to lose but not catastrophic" personal documents (certs, transcripts, IDs, scanned records). `cp` files in by hand; the restic branch picks up the tree.
-- `data/secrets/` — passive folder of pre-sealed critical blobs. `cp` in already-sealed archives (or let `bitwarden-producer` write age-wrapped exports there). The rclone branch mirrors to both tiers.
+- `data/secrets/` — passive folder of pre-sealed critical blobs. `cp` in already-sealed archives (or let `bitwarden-export` write age-wrapped exports there). The rclone branch mirrors to both tiers.
 
 Neither folder has a container or code of its own — pure input directories for this pipeline. If you clone this repo to a fresh machine, both dirs need to be created first (docker's `create_host_path: false` will fail loudly otherwise): `mkdir -p data/crucial-docs data/secrets`.
 

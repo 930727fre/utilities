@@ -62,7 +62,7 @@ services:
           create_host_path: false
       # secrets: pre-sealed monolithic blobs (hardware-encrypted
       # archives now; future age-wrapped bw exports will land here too,
-      # produced by a separate utilities/bitwarden-producer/ container
+      # produced by a separate utilities/bitwarden-export/ container
       # that mounts this same directory as its output target). Mounted
       # at /secrets/ (not /tools/) because it takes a different code
       # path — plain rclone copy at infinite retention, not restic.
