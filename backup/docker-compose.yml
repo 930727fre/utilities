@@ -60,14 +60,14 @@ services:
         target: /tools/crucial-docs/data
         bind:
           create_host_path: false
-      # secrets-vault: pre-sealed monolithic blobs (hardware-encrypted
+      # secrets: pre-sealed monolithic blobs (hardware-encrypted
       # archives now; future age-wrapped bw exports will land here too,
       # produced by a separate utilities/bitwarden-producer/ container
       # that mounts this same directory as its output target). Mounted
       # at /secrets/ (not /tools/) because it takes a different code
       # path — plain rclone copy at infinite retention, not restic.
       - type: bind
-        source: ./data/secrets-vault
+        source: ./data/secrets
         target: /secrets
         bind:
           create_host_path: false
@@ -94,7 +94,7 @@ services:
       #
       # Retention: every tool gets --keep-daily 90 --prune on both repos.
       # No exemptions — the "would cry if lost" bucket now lives in
-      # utilities/secrets-vault/ (rclone copy + infinite retention),
+      # backup/data/secrets/ (rclone copy + infinite retention),
       # which is the right primitive for pre-sealed monolithic blobs.
       # Everything backed up through this container is either recoverable
       # via other channels (immich → phone) or acceptable-to-lose-after-

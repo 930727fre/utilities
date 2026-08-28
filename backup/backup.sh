@@ -158,7 +158,7 @@ done
 # ── Retention (both repos, uniform 90-day) ──────────────────────────
 # Every tool gets `restic forget --tag $TOOL --keep-daily 90 --prune`
 # applied on both repos (NAS + MEGA). No exemptions here — the
-# "infinite retention" bucket lives in utilities/secrets-vault/ via
+# "infinite retention" bucket lives in backup/data/secrets/ via
 # rclone copy, which is the right primitive for pre-sealed monolithic
 # blobs. Everything backed up through this container is either
 # recoverable via other channels (immich → phone) or acceptable-to-
@@ -194,7 +194,7 @@ for FTOOL in $MEGA_TOOLS_DONE; do
         forget --tag "$FTOOL" --keep-daily 90 --prune --retry-lock 30s
 done
 
-# ── secrets-vault rclone copy branch ────────────────────────────────
+# ── secrets rclone copy branch ────────────────────────────────
 # Non-restic branch: /secrets/ holds pre-sealed monolithic blobs
 # (hardware-encrypted archives now; future age-wrapped bw exports too).
 # Copied as-is to nas:secrets/ + mega:secrets/. No encryption applied
@@ -213,7 +213,7 @@ SECRETS_COUNT=$(find /secrets -type f ! -name '.*' 2>/dev/null | wc -l)
 
 # ── Weekly full integrity check (Sundays) ───────────────────────────
 # One unified verify cadence: every Sunday, fully verify both restic
-# repos AND both secrets-vault mirrors. No monthly/subset split —
+# repos AND both secrets mirrors. No monthly/subset split —
 # bandwidth is not the constraint here (04:00, home broadband, no
 # quota concerns on either backend), simpler is better.
 #

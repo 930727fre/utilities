@@ -1,6 +1,6 @@
 #!/bin/sh
 # Interactive restore. First picks the KIND of restore (restic-managed
-# tool data vs a single secrets-vault blob), then dispatches:
+# tool data vs a single secrets blob), then dispatches:
 #
 #   * Tool data: pick source repo (NAS/MEGA), pick tool, pick snapshot,
 #     wipe & replace the tool's live data dir.
@@ -86,7 +86,7 @@ if [ "$KIND" = "2" ]; then
 
     # Download to a fresh temp dir so it's obvious where the file went;
     # user handles unseal / decrypt from there. Never dropped back into
-    # data/secrets-vault — that's the source-of-truth, restore shouldn't
+    # data/secrets — that's the source-of-truth, restore shouldn't
     # touch it.
     OUT=$(mktemp -d)
     echo ""
