@@ -71,13 +71,23 @@ services:
       # this specific purpose, not exposed to LAN). Reuse the same
       # password already exported for Immich itself.
       - IMMICH_DB_PASSWORD=${IMMICH_DB_PASSWORD:-}
-      # Restic repo lives at nas:restic/ (plain WebDAV path, restic
-      # encrypts contents). rclone: prefix tells restic to use the
-      # rclone binary as backend; nas: is the shared rclone.conf remote.
-      - RESTIC_REPOSITORY=rclone:nas:restic/
-      # LOSING THIS PASSWORD = LOSING ALL SNAPSHOTS (restic uses it as
-      # the master key for the repo's AES-256 encryption; no recovery
-      # mechanism). Store in Bitwarden, export in shell before compose up.
+      # Two independent restic repos (both under the shared rclone.conf's
+      # [nas] and [mega] remotes). Each is a separate keyspace, but the
+      # SAME RESTIC_PASSWORD unlocks both — one keychain entry, two
+      # storage locations.
+      #
+      # NAS: friend's Tailscale WebDAV. Primary; 90-day retention.
+      # MEGA: mega.nz free-tier (50 GB). Second offsite, infinite retention.
+      # Both get the same daily backup pass; MEGA_EXCLUDE lets specific
+      # tools opt out (currently immich, which already has 3-2-1 via
+      # phone + host + NAS).
+      - RESTIC_REPOSITORY_NAS=rclone:nas:restic/
+      - RESTIC_REPOSITORY_MEGA=rclone:mega:restic/
+      - MEGA_EXCLUDE=immich
+      # LOSING THIS PASSWORD = LOSING ALL SNAPSHOTS on BOTH repos (restic
+      # uses it as the master key for each repo's AES-256 encryption; no
+      # recovery mechanism). Store in Bitwarden, export in shell before
+      # compose up.
       - RESTIC_PASSWORD=${RESTIC_PASSWORD:?RESTIC_PASSWORD env var is required — store plaintext in Bitwarden, losing it means all restic snapshots are unrecoverable}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN env var is required}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:?TELEGRAM_CHAT_ID env var is required}

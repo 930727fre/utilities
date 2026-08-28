@@ -12,23 +12,33 @@ notify() {
 trap 'notify "Backup+FAILED+at+${STEP}"' EXIT
 
 echo "[$(date)] Starting backup for tools: ${TOOLS}"
+echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS}"
+echo "[$(date)] MEGA repo: ${RESTIC_REPOSITORY_MEGA} (excluding: ${MEGA_EXCLUDE:-none})"
 
 # ── One-time repo init on first run ─────────────────────────────────
 # `restic snapshots` returns non-zero when the repo doesn't exist yet.
 # Check that specifically rather than `restic init || true` — the
 # latter would swallow real init errors (wrong password after a rekey,
-# NAS unreachable, permission denied).
-STEP="restic:init"
-if ! restic snapshots >/dev/null 2>&1; then
-    echo "[$(date)] restic repository missing; initializing..."
-    restic init
-fi
+# remote unreachable, permission denied).
+for REPO_NAME in NAS MEGA; do
+    STEP="restic:init:$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]')"
+    eval "REPO_URL=\$RESTIC_REPOSITORY_$REPO_NAME"
+    if ! restic --repo "$REPO_URL" snapshots >/dev/null 2>&1; then
+        echo "[$(date)] restic repository ${REPO_NAME} missing; initializing..."
+        restic --repo "$REPO_URL" init
+    fi
+done
 
 # ── Per-tool snapshot ──────────────────────────────────────────────
 # Staging dir is the same path each iteration; restic tag (--tag $TOOL)
 # is what distinguishes snapshots. Restore step in restore.sh knows to
 # strip the /tmp/staging/ prefix when restoring back to /tools/<tool>/data.
 STAGING="/tmp/staging"
+
+# Track per-repo tool coverage for the summary notification.
+NAS_TOOLS_DONE=""
+MEGA_TOOLS_DONE=""
+MEGA_TOOLS_SKIPPED=""
 
 for TOOL in $TOOLS; do
     STEP="${TOOL}:setup"
@@ -101,32 +111,66 @@ for TOOL in $TOOLS; do
         cp "$f" "$target"
     done
 
-    STEP="${TOOL}:restic+backup"
-    echo "[$(date)] ${TOOL}: sending to restic repo..."
-    # --host utilities-backup: static hostname so `restic snapshots`
-    # groups cleanly (container hostname is random-ish otherwise).
-    # --tag $TOOL: primary snapshot filter dimension for restore.
-    restic backup "$STAGING" \
+    # ── Push staging to both repos (MEGA opt-out via MEGA_EXCLUDE) ──
+    # Staging is built once, both backups reuse it. --host is fixed so
+    # `restic snapshots` groups cleanly (container hostname is random).
+    # --tag $TOOL is the primary restore filter dimension.
+
+    STEP="${TOOL}:restic+backup:nas"
+    echo "[$(date)] ${TOOL}: pushing to NAS repo..."
+    restic --repo "$RESTIC_REPOSITORY_NAS" backup "$STAGING" \
         --tag "$TOOL" \
         --host "utilities-backup"
+    NAS_TOOLS_DONE="${NAS_TOOLS_DONE}${NAS_TOOLS_DONE:+ }${TOOL}"
+
+    # MEGA opt-out: MEGA_EXCLUDE is a space-separated list. Match on
+    # whole-word membership so partial names ('mich' vs 'immich') don't
+    # collide.
+    SKIP_MEGA=0
+    for excl in $MEGA_EXCLUDE; do
+        [ "$excl" = "$TOOL" ] && { SKIP_MEGA=1; break; }
+    done
+
+    if [ "$SKIP_MEGA" = "1" ]; then
+        echo "[$(date)] ${TOOL}: skipping MEGA (in MEGA_EXCLUDE)"
+        MEGA_TOOLS_SKIPPED="${MEGA_TOOLS_SKIPPED}${MEGA_TOOLS_SKIPPED:+ }${TOOL}"
+    else
+        STEP="${TOOL}:restic+backup:mega"
+        echo "[$(date)] ${TOOL}: pushing to MEGA repo..."
+        restic --repo "$RESTIC_REPOSITORY_MEGA" backup "$STAGING" \
+            --tag "$TOOL" \
+            --host "utilities-backup"
+        MEGA_TOOLS_DONE="${MEGA_TOOLS_DONE}${MEGA_TOOLS_DONE:+ }${TOOL}"
+    fi
 
     rm -rf "$STAGING"
 done
 
-# ── Retention ──────────────────────────────────────────────────────
-# 90 daily snapshots per tool. --group-by tag applies the keep policy
-# WITHIN each tool's snapshot set (else 5 tools × 1/day would compete
-# for the same 90 slots and each tool would only keep ~18 days).
-# --prune reclaims disk immediately. At our scale (single-digit GB
-# repo, hundreds of snapshots) prune-every-run is fine; for larger
-# repos you'd split forget (every run) + prune (weekly).
-STEP="restic+forget"
-restic forget --group-by tag --keep-daily 90 --prune
+# ── Retention (NAS only) ────────────────────────────────────────────
+# 90 daily snapshots per tool on NAS. --group-by tag applies the keep
+# policy WITHIN each tool's snapshot set (else 5 tools × 1/day would
+# compete for the same 90 slots and each tool would only keep ~18 days).
+# --prune reclaims disk immediately.
+#
+# MEGA repo has NO forget — retention is intentionally infinite.
+# Deltas are tiny (~100 MB/day worst case) against a 50 GB free tier,
+# multi-year runway. Revisit if MEGA usage climbs past ~40 GB.
+STEP="restic+forget:nas"
+restic --repo "$RESTIC_REPOSITORY_NAS" \
+    forget --group-by tag --keep-daily 90 --prune
 
 ELAPSED=$(( $(date +%s) - START ))
-TOOLS_ENC=$(echo "$TOOLS" | tr ' ' '+')
+
+# ── Telegram summary ────────────────────────────────────────────────
+# URL-encoded: '+' for space, '%0A' for newline, '%7C' for '|'.
+NAS_ENC=$(echo "$NAS_TOOLS_DONE" | tr ' ' '+')
+MEGA_ENC=$(echo "$MEGA_TOOLS_DONE" | tr ' ' '+')
+SKIP_ENC=$(echo "$MEGA_TOOLS_SKIPPED" | tr ' ' '+')
+
+MSG="Backup+done+%7C+${ELAPSED}s%0ANAS:+${NAS_ENC}%0AMEGA:+${MEGA_ENC}"
+[ -n "$MEGA_TOOLS_SKIPPED" ] && MSG="${MSG}+(skipped+${SKIP_ENC})"
 
 trap - EXIT
-notify "Backup+done+%7C+${TOOLS_ENC}+%7C+${ELAPSED}s"
+notify "$MSG"
 
 echo "[$(date)] Done"

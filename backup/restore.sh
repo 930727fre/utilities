@@ -1,12 +1,20 @@
 #!/bin/sh
-# Interactive restic-based restore. Picks a tool, picks a snapshot,
-# wipes and restores the tool's whole data dir.
+# Interactive restic-based restore. Picks a source repo (NAS or MEGA),
+# picks a tool, picks a snapshot, wipes and restores the tool's whole
+# data dir.
 #
 # UX modeled after the previous tarball restore.sh: no CLI args,
 # numbered menus, Enter/EOF cancels at every prompt.
 
 set -eu
 cd "$(dirname "$0")"
+
+# Repo URLs — MUST match docker-compose.yml's RESTIC_REPOSITORY_{NAS,MEGA}.
+# Hardcoded here so restore.sh can pick a source before spawning the
+# container (compose env only enters the container's env, not this
+# script's). If you rename a repo path, update both files.
+REPO_NAS="rclone:nas:restic/"
+REPO_MEGA="rclone:mega:restic/"
 
 # ── helper: numeric-index prompt with bounds check ───────────────────
 # Result goes in the global `PICKED` so calls aren't wrapped in `$()`
@@ -30,10 +38,26 @@ pick_index() {
     PICKED="$a"
 }
 
+# ── 0. Which source repo ─────────────────────────────────────────────
+# NAS is primary (90-day retention). MEGA is offsite second tier
+# (infinite retention, minus MEGA_EXCLUDE tools from backup.sh).
+echo ""
+echo "Restore from which repo?"
+echo ""
+echo "  1  NAS   ($REPO_NAS, 90-day retention)"
+echo "  2  MEGA  ($REPO_MEGA, infinite retention)"
+echo ""
+pick_index "Which? (index; Enter to cancel): " 2
+case "$PICKED" in
+    1) REPO="$REPO_NAS"  ; REPO_LABEL="NAS"  ;;
+    2) REPO="$REPO_MEGA" ; REPO_LABEL="MEGA" ;;
+esac
+
 # ── 1. Which tool ────────────────────────────────────────────────────
-# Enumerate distinct tags from all snapshots in the repo.
-echo "Listing tools in restic repo..."
-TOOLS=$(docker compose run --rm --no-TTY backup \
+# Enumerate distinct tags from all snapshots in the chosen repo.
+echo ""
+echo "Listing tools in $REPO_LABEL repo..."
+TOOLS=$(docker compose run --rm --no-TTY -e RESTIC_REPOSITORY="$REPO" backup \
     sh -c 'restic snapshots --json 2>/dev/null | jq -r ".[].tags[]" | sort -u' \
     2>/dev/null | tr -d '\r')
 
@@ -52,8 +76,8 @@ TOOL=$(printf '%s\n' "$TOOLS" | sed -n "${PICKED}p")
 # ── 2. Which snapshot ────────────────────────────────────────────────
 # List snapshots for that tag, newest first. Format: "<short_id>  <time>".
 echo ""
-echo "Listing snapshots for $TOOL..."
-SNAPS=$(docker compose run --rm --no-TTY backup \
+echo "Listing snapshots for $TOOL in $REPO_LABEL..."
+SNAPS=$(docker compose run --rm --no-TTY -e RESTIC_REPOSITORY="$REPO" backup \
     sh -c "restic snapshots --tag '$TOOL' --json 2>/dev/null | jq -r '.[] | \"\\(.short_id)  \\(.time)\"' | sort -r -k2" \
     2>/dev/null | tr -d '\r')
 
@@ -104,8 +128,8 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 echo ""
-echo "Restoring to staging: $TMP"
-docker compose run --rm -v "$TMP:/restore-out" backup \
+echo "Restoring to staging: $TMP  (from $REPO_LABEL)"
+docker compose run --rm -v "$TMP:/restore-out" -e RESTIC_REPOSITORY="$REPO" backup \
     restic restore "$SNAP_ID" --target /restore-out
 
 # Where restic actually wrote the files (mirrors backup.sh's STAGING).

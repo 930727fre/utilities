@@ -1,10 +1,19 @@
 # backup
 
-Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `marker-pipeline`, `keyboard`, `immich`) to a friend's Tailscale NAS at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption).
+Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `marker-pipeline`, `keyboard`, `immich`) at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption). Fans out to **two independent offsite tiers**:
 
-For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is) into a staging area, then `restic backup`ed into the shared repo. Restic dedups against every prior snapshot chunk-by-chunk, so 90-day retention across 5 tools costs roughly base-repo-size + delta chunks, not `snapshots × tarball_size`.
+| Tier | Path | Retention | Notes |
+|---|---|---|---|
+| NAS | `rclone:nas:restic/` (friend's Tailscale WebDAV) | 90 daily / tool | Primary. `forget --prune` runs every tick. |
+| MEGA | `rclone:mega:restic/` (mega.nz free tier, 50 GB) | infinite | Second offsite. No `forget`; deltas are tiny (~100 MB/day worst case), multi-year runway on free tier. |
 
-Repo layout on NAS: `nas:restic/` (plain WebDAV path, restic encrypts contents). Retention: 90 daily snapshots per tool (`--group-by tag --keep-daily 90 --prune`).
+Both repos share `RESTIC_PASSWORD` (one keychain entry, two storage locations), but chunk keyspaces are separate — no `restic copy` between them; each backup pass pushes staging to both.
+
+For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is) into a staging area, then `restic backup`ed. Restic dedups against every prior snapshot chunk-by-chunk, so retention costs roughly base-repo-size + delta chunks, not `snapshots × tarball_size`.
+
+### MEGA opt-out (`MEGA_EXCLUDE`)
+
+`MEGA_EXCLUDE` in `docker-compose.yml` is a space-separated tool list that skips the MEGA push (NAS still gets it). Currently: `immich` — the photo library is already covered by phone-side originals + host + NAS (3-2-1 satisfied), so paying MEGA space + upload time for a fourth copy is wasteful. Any new tool that lands with a comparable independent-copy story goes here too. Default is empty (include all tools).
 
 ## Adding a tool
 
@@ -43,13 +52,22 @@ Not automated because it's rare + destructive; explicit steps prevent accidents.
 
 ## Setup — rclone.conf
 
-Restic uses rclone as its backend (`RESTIC_REPOSITORY=rclone:nas:restic/`); rclone reads `${HOME}/rclone.conf` on the host, bind-mounted read-only into the container. **This file is shared with `homelab/rclone`**; if you haven't set it up yet, see the setup section in `homelab/rclone/README.md`.
+Restic uses rclone as its backend (`rclone:<remote>:restic/`); rclone reads `${HOME}/rclone.conf` on the host, bind-mounted read-only into the container. **This file is shared with `homelab/rclone`**; if you haven't set it up yet, see the setup section in `homelab/rclone/README.md`.
 
-This container uses the plain `[nas]` remote (not `[nas-crypt]`) — restic does its own AES-256 encryption, layering rclone-crypt on top would just add CPU for no security gain.
+Two remotes are required:
+
+- **`[nas]`** — plain WebDAV to friend's Tailscale NAS. Not crypt (restic does its own AES-256; layering rclone-crypt on top would just add CPU for no security gain). Set up per `homelab/rclone/README.md`.
+- **`[mega]`** — MEGA.nz account. One-time on the host:
+  ```bash
+  cd ~/homelab/rclone   # any repo with the rclone image works
+  docker compose run --rm rclone config
+  # n → mega → user: <MEGA email> → pass: <MEGA password>
+  ```
+  MEGA CLI login uses email + password directly (no OAuth). Password gets `obscure`d into `rclone.conf` — it's reversible obfuscation, not encryption, so treat `~/rclone.conf` accordingly.
 
 ## Setup — RESTIC_PASSWORD
 
-Restic encrypts the entire repo with a password of your choosing. **Losing this password = losing all snapshots.** There's no recovery mechanism (same failure mode as rclone crypt).
+Restic encrypts each repo with a password of your choosing; the same `RESTIC_PASSWORD` unlocks both NAS and MEGA repos here. **Losing this password = losing all snapshots on BOTH repos.** There's no recovery mechanism (same failure mode as rclone crypt).
 
 Generate one and store in Bitwarden:
 
@@ -63,7 +81,7 @@ Then export in shell before `docker compose up`:
 export RESTIC_PASSWORD='<the value from Bitwarden>'
 ```
 
-First `docker compose up` triggers an implicit `restic init` inside `backup.sh` (the check is `restic snapshots >/dev/null 2>&1 || restic init`). Idempotent — later runs skip init.
+First `docker compose up` triggers an implicit `restic init` per repo inside `backup.sh` (the check is `restic --repo <URL> snapshots >/dev/null 2>&1 || restic --repo <URL> init`). Idempotent — later runs skip init.
 
 ## Deploy
 
@@ -84,34 +102,43 @@ Run the backup script immediately without waiting for 04:00:
 docker compose run --rm backup /backup.sh
 ```
 
-Inspect the repo:
+Inspect either repo (`-e RESTIC_REPOSITORY=...` picks which one; falls back to `RESTIC_REPOSITORY_NAS` if you export that at the shell first):
 
 ```bash
-# All snapshots
-docker compose run --rm backup restic snapshots
+# All snapshots on NAS
+docker compose run --rm -e RESTIC_REPOSITORY=rclone:nas:restic/ backup restic snapshots
+
+# Same on MEGA
+docker compose run --rm -e RESTIC_REPOSITORY=rclone:mega:restic/ backup restic snapshots
 
 # Snapshots for one tool
-docker compose run --rm backup restic snapshots --tag jellyfin
-
-# Diff two snapshots (spot what changed)
-docker compose run --rm backup restic diff <snap_id_a> <snap_id_b>
+docker compose run --rm -e RESTIC_REPOSITORY=rclone:nas:restic/ backup restic snapshots --tag jellyfin
 
 # Repo stats (see how well dedup is working)
-docker compose run --rm backup restic stats
+docker compose run --rm -e RESTIC_REPOSITORY=rclone:nas:restic/ backup restic stats
 
 # Mount the repo as a FUSE filesystem to browse historical files
 # without a full restore (needs privileged mode; ad-hoc peek):
-docker compose run --rm --privileged backup \
+docker compose run --rm --privileged -e RESTIC_REPOSITORY=rclone:nas:restic/ backup \
     sh -c 'mkdir -p /mnt/r && restic mount /mnt/r'
 ```
 
 ## Restore
 
-Interactive script on the host — pick a tool + snapshot from numbered menus. **Stop dependent services for the tool first** — the script writes to the live path.
+Interactive script on the host — pick a source repo (NAS / MEGA), pick a tool, pick a snapshot, done. **Stop dependent services for the tool first** — the script writes to the live path.
 
 ```bash
 ./restore.sh
 ```
+
+Menu prompts:
+
+1. Source repo (`NAS` or `MEGA`)
+2. Tool (enumerated from that repo's snapshot tags)
+3. Snapshot (newest first)
+4. Confirm
+
+NAS is the go-to for a routine restore (90-day window, tighter to the machine). Fall back to MEGA when NAS is unreachable or gone.
 
 All supported tools restore via **wipe & replace** of the tool's whole `data/` directory (or, for jellyfin, its `config/`). Files are restored to a staging temp dir first and moved into place at the end, so a restic-side error doesn't leave the target half-wiped.
 
