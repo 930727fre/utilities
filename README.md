@@ -13,8 +13,9 @@ A collection of self-hosted tools, each containerized with Docker.
 | [keyboard](./keyboard) | _(stale, see notes)_ Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
-| [backup](./backup) | Daily backup of configured tools' `data/` dirs to Cloudflare R2 at 04:00 Asia/Taipei |
-| [bitwarden-backup](./bitwarden-backup) | _(planned, spec only)_ Nightly export of Bitwarden vault, doubly encrypted (Bitwarden's own PBKDF2 + age pubkey) so the blob survives `vault.bitwarden.com` going away |
+| [backup](./backup) | Daily backup of configured tools' `data/` dirs at 04:00 Asia/Taipei via restic, fans out to NAS + MEGA with per-tool retention policy |
+| [crucial-docs](./crucial-docs) | Passive folder for hard-to-recreate personal documents (certs, transcripts, IDs). Backed up on both tiers with infinite retention. |
+| [bitwarden-backup](./bitwarden-backup) | _(planned, spec only)_ Nightly export of Bitwarden vault, doubly encrypted (PBKDF2 master password + age pubkey) and pushed to NAS + MEGA via plain `rclone copy` — self-contained blobs, no restic dependency |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 
 ## Notes

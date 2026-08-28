@@ -12,8 +12,9 @@ notify() {
 trap 'notify "Backup+FAILED+at+${STEP}"' EXIT
 
 echo "[$(date)] Starting backup for tools: ${TOOLS}"
-echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS} (forget --keep-daily 90 on: ${NAS_FORGET_TOOLS:-none})"
+echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS}"
 echo "[$(date)] MEGA repo: ${RESTIC_REPOSITORY_MEGA} (excluding: ${MEGA_EXCLUDE:-none})"
+echo "[$(date)] No-forget (infinite retention) tools: ${NO_FORGET_TOOLS:-none}"
 
 # ── One-time repo init on first run ─────────────────────────────────
 # `restic snapshots` returns non-zero when the repo doesn't exist yet.
@@ -146,23 +147,45 @@ for TOOL in $TOOLS; do
     rm -rf "$STAGING"
 done
 
-# ── Retention (NAS, per-tool opt-in via NAS_FORGET_TOOLS) ───────────
-# Only tools listed in NAS_FORGET_TOOLS get `restic forget --keep-daily
-# 90 --prune` applied on NAS. Everything else = infinite retention on
-# NAS (SQLite/config tools are tiny — even years of deltas cost almost
-# nothing under restic dedup).
+# ── Retention (both repos, per-tool opt-out via NO_FORGET_TOOLS) ────
+# Default: every tool gets `restic forget --tag $TOOL --keep-daily 90
+# --prune` applied on both repos (NAS + MEGA). Tools listed in
+# NO_FORGET_TOOLS are exempt from forget entirely → infinite retention.
 #
-# --tag $TOOL scopes the forget to that tool's snapshots only, so the
-# 90-slot budget isn't shared across tools (each tool independently
-# keeps its own 90 dailies).
+# --tag scopes each forget to that tool's snapshots so the 90-slot
+# budget isn't shared across tools (each keeps its own 90 dailies).
 #
-# MEGA repo has NO forget — retention is intentionally infinite across
-# the board. Deltas are tiny (~100 MB/day worst case) against a 50 GB
-# free tier, multi-year runway. Revisit if MEGA usage climbs past ~40 GB.
-for FTOOL in $NAS_FORGET_TOOLS; do
+# NAS_TOOLS_DONE / MEGA_TOOLS_DONE were built during the backup loop —
+# reusing them ensures we only forget on repos where the tool actually
+# has snapshots (e.g. immich never lands on MEGA, so it's absent from
+# MEGA_TOOLS_DONE — no forget call needed there).
+
+is_no_forget() {
+    for exempt in $NO_FORGET_TOOLS; do
+        [ "$exempt" = "$1" ] && return 0
+    done
+    return 1
+}
+
+for FTOOL in $NAS_TOOLS_DONE; do
+    if is_no_forget "$FTOOL"; then
+        echo "[$(date)] NAS forget SKIPPED for '${FTOOL}' (in NO_FORGET_TOOLS)"
+        continue
+    fi
     STEP="restic+forget:nas:${FTOOL}"
     echo "[$(date)] NAS forget for tag '${FTOOL}' (keep-daily 90)..."
     restic --repo "$RESTIC_REPOSITORY_NAS" \
+        forget --tag "$FTOOL" --keep-daily 90 --prune
+done
+
+for FTOOL in $MEGA_TOOLS_DONE; do
+    if is_no_forget "$FTOOL"; then
+        echo "[$(date)] MEGA forget SKIPPED for '${FTOOL}' (in NO_FORGET_TOOLS)"
+        continue
+    fi
+    STEP="restic+forget:mega:${FTOOL}"
+    echo "[$(date)] MEGA forget for tag '${FTOOL}' (keep-daily 90)..."
+    restic --repo "$RESTIC_REPOSITORY_MEGA" \
         forget --tag "$FTOOL" --keep-daily 90 --prune
 done
 

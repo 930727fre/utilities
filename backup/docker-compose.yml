@@ -59,11 +59,21 @@ services:
         target: /tools/immich/data
         bind:
           create_host_path: false
+      # crucial-docs: passive user-managed folder (certs, transcripts,
+      # IDs, tax, etc.). No service writes here — files land manually
+      # via `cp`, backup picks up the tree as-is. Special retention
+      # treatment (infinite via NO_FORGET_TOOLS) since these are the
+      # painful-to-recreate ones.
+      - type: bind
+        source: ../crucial-docs/data
+        target: /tools/crucial-docs/data
+        bind:
+          create_host_path: false
     environment:
       # Space-separated tool list — must match /tools/<name>/data mount
       # names above. transcribe / homelab-data intentionally absent
       # (user manages those manually).
-      - TOOLS=flashcard free2speak jellyfin marker-pipeline keyboard immich
+      - TOOLS=flashcard free2speak jellyfin marker-pipeline keyboard immich crucial-docs
       - RCLONE_CONFIG=/config/rclone.conf
       # Immich's Postgres. backup.sh's immich case-branch pg_dumps to
       # STAGING before the file copy — needs to authenticate to postgres
@@ -76,20 +86,20 @@ services:
       # SAME RESTIC_PASSWORD unlocks both — one keychain entry, two
       # storage locations. Both get the same daily backup pass.
       #
-      # MEGA_EXCLUDE: tools to skip from the MEGA push. Currently immich,
-      # which already has 3-2-1 via phone + host + NAS.
+      # MEGA_EXCLUDE: tools to skip from the MEGA push. Currently immich —
+      # its photo library is already 3-2-1 via phone + host + NAS, no
+      # value in a fourth copy on MEGA free tier.
       #
-      # NAS_FORGET_TOOLS: tools to apply `restic forget --keep-daily 90`
-      # to on NAS. Empty = infinite retention for all. Currently immich
-      # only — its photo/postgres data is the one that grows fast enough
-      # to matter; the SQLite/config tools are tiny even after years.
-      #
-      # MEGA has no forget at all — infinite retention across the board
-      # (50 GB free tier has multi-year runway for the tiny deltas).
+      # NO_FORGET_TOOLS: tools whose snapshots are NEVER forgotten (on
+      # either repo). Default (everything else) = keep-daily 90 --prune.
+      # Currently crucial-docs — anything you'd cry over losing gets
+      # infinite retention. Every other tool gets 90-day rolling on
+      # both repos (deltas are small, but noise piles up and the tools
+      # themselves aren't "recover state from three years ago" material).
       - RESTIC_REPOSITORY_NAS=rclone:nas:restic/
       - RESTIC_REPOSITORY_MEGA=rclone:mega:restic/
       - MEGA_EXCLUDE=immich
-      - NAS_FORGET_TOOLS=immich
+      - NO_FORGET_TOOLS=crucial-docs
       # LOSING THIS PASSWORD = LOSING ALL SNAPSHOTS on BOTH repos (restic
       # uses it as the master key for each repo's AES-256 encryption; no
       # recovery mechanism). Store in Bitwarden, export in shell before

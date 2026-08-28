@@ -1,15 +1,27 @@
 # backup
 
-Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `marker-pipeline`, `keyboard`, `immich`) at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption). Fans out to **two independent offsite tiers**:
+Daily backup of tool data directories (`flashcard`, `free2speak`, `jellyfin`, `marker-pipeline`, `keyboard`, `immich`, `crucial-docs`) at 04:00 Asia/Taipei via **restic** (content-addressable dedup + encryption). Fans out to **two independent offsite tiers**:
 
-| Tier | Path | Retention | Notes |
-|---|---|---|---|
-| NAS | `rclone:nas:restic/` (friend's Tailscale WebDAV) | infinite for most tools; 90 daily for immich only | Primary. `forget --prune` scoped to tools listed in `NAS_FORGET_TOOLS`. |
-| MEGA | `rclone:mega:restic/` (mega.nz free tier, 50 GB) | infinite (all tools) | Second offsite. No `forget`; deltas are tiny (~100 MB/day worst case), multi-year runway on free tier. |
-
-Per-tool NAS retention: immich is the only tool whose data (photos + postgres dump) grows fast enough to warrant a bounded window. SQLite/config tools produce tiny deltas — restic dedup makes infinite retention costs asymptotic to base-repo-size + a rounding error per year.
+- **NAS** — `rclone:nas:restic/`, friend's Tailscale WebDAV. Primary.
+- **MEGA** — `rclone:mega:restic/`, mega.nz free tier (50 GB). Second offsite.
 
 Both repos share `RESTIC_PASSWORD` (one keychain entry, two storage locations), but chunk keyspaces are separate — no `restic copy` between them; each backup pass pushes staging to both.
+
+### Per-tool policy (as of 2026-08-28)
+
+| Tool bucket | NAS | MEGA | Retention |
+|---|---|---|---|
+| `crucial-docs` | ✓ | ✓ | **infinite** on both (in `NO_FORGET_TOOLS`) |
+| `flashcard` / `free2speak` / `jellyfin` / `marker-pipeline` / `keyboard` | ✓ | ✓ | 90-day on both |
+| `immich` | ✓ | ✗ (in `MEGA_EXCLUDE`) | 90-day on NAS |
+
+Rationale:
+
+- **crucial-docs** — passive folder of "would cry if lost" personal documents (certs, transcripts, IDs). Both tiers, both infinite. Any bounded window here is regret waiting to happen. See [`../crucial-docs/README.md`](../crucial-docs).
+- **Selfhost tool data** — recoverable-with-effort state (SQLite scheduling, config, watch history). Both tiers for tier-loss survivability, but 90-day is plenty — nobody restores flashcard state from a year ago.
+- **Immich** — photo library already has 3-2-1 via phone originals + host + NAS, so MEGA is redundant. 90-day NAS is enough for accidental-delete recovery.
+
+Bitwarden vault backups live in [`../bitwarden-backup/`](../bitwarden-backup) with a separate encryption / distribution pipeline (age pubkey wrap + rclone copy directly, no restic) — not part of this container's TOOLS list.
 
 For each configured tool, the entire `<tool>/data/` directory is snapshotted (SQLite files via `sqlite3 .backup`, everything else copied as-is) into a staging area, then `restic backup`ed. Restic dedups against every prior snapshot chunk-by-chunk, so retention costs roughly base-repo-size + delta chunks, not `snapshots × tarball_size`.
 
