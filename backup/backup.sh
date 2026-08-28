@@ -216,6 +216,13 @@ done
 DOM=$(date +%d)
 DOW=$(date +%u)
 
+# CHECK_STATUS gets set only when a check ran and passed (set -e means
+# a failing check exits the script before reaching this point → the
+# EXIT trap fires the FAILED notify instead). Included in the success
+# Telegram message so silent successes are visible ("yes, verification
+# actually ran this week").
+CHECK_STATUS=""
+
 run_check() {
     for REPO_NAME in NAS MEGA; do
         eval "REPO_URL=\$RESTIC_REPOSITORY_$REPO_NAME"
@@ -228,8 +235,10 @@ run_check() {
 if [ "$DOM" = "01" ]; then
     run_check "restic+check-read" "monthly deep check (--read-data-subset=10%)" \
         "--read-data-subset=10%"
+    CHECK_STATUS="Monthly+deep+check+OK+(--read-data-subset=10%)"
 elif [ "$DOW" = "7" ]; then
     run_check "restic+check" "weekly structural check" ""
+    CHECK_STATUS="Weekly+structural+check+OK"
 fi
 
 ELAPSED=$(( $(date +%s) - START ))
@@ -242,6 +251,7 @@ SKIP_ENC=$(echo "$MEGA_TOOLS_SKIPPED" | tr ' ' '+')
 
 MSG="Backup+done+%7C+${ELAPSED}s%0ANAS:+${NAS_ENC}%0AMEGA:+${MEGA_ENC}"
 [ -n "$MEGA_TOOLS_SKIPPED" ] && MSG="${MSG}+(skipped+${SKIP_ENC})"
+[ -n "$CHECK_STATUS" ] && MSG="${MSG}%0A${CHECK_STATUS}"
 
 trap - EXIT
 notify "$MSG"
