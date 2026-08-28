@@ -20,7 +20,7 @@ cd "$(dirname "$0")"
 REPO_NAS="rclone:nas:restic/"
 REPO_MEGA="rclone:mega:restic/"
 
-# Secrets-vault remote paths — MUST match backup.sh's rclone copy
+# Secrets remote paths — MUST match backup.sh's rclone copy
 # destinations. Same "keep in sync" note as above.
 SECRETS_NAS="nas:secrets/"
 SECRETS_MEGA="mega:secrets/"
@@ -49,12 +49,12 @@ echo ""
 echo "What to restore?"
 echo ""
 echo "  1  Tool data (restic snapshot — flashcard / jellyfin / immich / crucial-docs / …)"
-echo "  2  Secrets vault file (single blob — bw export / hardware-encrypted archive / …)"
+echo "  2  Secrets file (single blob — bw export / hardware-encrypted archive / …)"
 echo ""
 pick_index "Which? (index; Enter to cancel): " 2
 KIND="$PICKED"
 
-# ── Branch: SECRETS-VAULT restore ────────────────────────────────────
+# ── Branch: SECRETS restore ──────────────────────────────────────────
 if [ "$KIND" = "2" ]; then
     echo ""
     echo "Restore secrets blob from which tier?"

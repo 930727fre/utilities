@@ -165,7 +165,7 @@ Interactive script on the host, dispatches by restore kind at the top.
 
 **Kind 1 — Tool data (restic snapshot)**: pick source repo (NAS / MEGA) → pick tool → pick snapshot → confirm → wipes and replaces the tool's whole `data/` directory (or, for jellyfin, its `config/`). Stop dependent services first. Files restored to a staging temp dir first and moved into place, so a restic-side error doesn't leave the target half-wiped. Restored files land root-owned (rclone in-container runs as root); `chown -R <uid>:<gid> <path>` afterward if the consuming service runs non-root. Exception: `crucial-docs` auto-chowns back to the host user because it's user-facing, not service-consumed.
 
-**Kind 2 — Secrets vault file**: pick source tier (NAS / MEGA) → pick file from the remote listing → download to a fresh `/tmp/restore-XXXXXX/` dir. Never dropped back into `data/secrets/` — you unseal / decrypt / import from `/tmp` and decide where the plaintext (if any) goes. Blob types + how to unseal each:
+**Kind 2 — Secrets file**: pick source tier (NAS / MEGA) → pick file from the remote listing → download to a fresh `/tmp/restore-XXXXXX/` dir. Never dropped back into `data/secrets/` — you unseal / decrypt / import from `/tmp` and decide where the plaintext (if any) goes. Blob types + how to unseal each:
 
 - `bw-*.encrypted.json.age` — `age --decrypt -i <private-key> ...` then import into Bitwarden Desktop / Vaultwarden with master password
 - `*.7z` — 7z + hardware key (or whatever the archive was sealed with)

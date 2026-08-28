@@ -13,7 +13,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | [keyboard](./keyboard) | _(stale, see notes)_ Push-to-talk voice input PWA — Whisper transcription + LLM cleanup |
 | [kasm-desktop](./kasm-desktop) | Browser-accessible Ubuntu desktop via Kasm Workspaces' official image (GPU passthrough, persistent home) |
 | [cloudflared](./cloudflared) | Cloudflare Tunnel — exposes all services via subdomains |
-| [backup](./backup) | Daily 04:00 pipeline, two branches under one container. Branch 1: restic snapshot of configured tools' `data/` dirs → NAS + MEGA, 90-day. Branch 2: rclone copy of pre-sealed blobs from `data/secrets-vault/` → NAS + MEGA, infinite. Data folders `data/crucial-docs/` (personal docs, restic-managed) and `data/secrets-vault/` (sealed blobs, rclone-managed) both live in-repo, gitignored. |
+| [backup](./backup) | Daily 04:00 pipeline, two branches under one container. Branch 1: restic snapshot of configured tools' `data/` dirs → NAS + MEGA, 90-day. Branch 2: rclone copy of pre-sealed blobs from `data/secrets/` → NAS + MEGA, infinite. Data folders `data/crucial-docs/` (personal docs, restic-managed) and `data/secrets/` (sealed blobs, rclone-managed) both live in-repo, gitignored. |
 | [clipboard](./clipboard) | Cross-device clipboard — sync text, images, and files between browsers in real time |
 
 ## Notes
