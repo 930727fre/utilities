@@ -167,6 +167,13 @@ is_no_forget() {
     return 1
 }
 
+# --retry-lock 30s: restic backup and forget both take exclusive
+# repo locks. Through the rclone: backend, the just-completed backup's
+# lock-file DELETE hasn't fully round-tripped to the remote by the
+# time forget starts a fraction of a second later, so a naive forget
+# fails with "waiting up to 0s for the lock". Waiting 30s handles this
+# and any transient WebDAV / MEGA API slowness without meaningfully
+# delaying the happy path (lock usually clears in <1s).
 for FTOOL in $NAS_TOOLS_DONE; do
     if is_no_forget "$FTOOL"; then
         echo "[$(date)] NAS forget SKIPPED for '${FTOOL}' (in NO_FORGET_TOOLS)"
@@ -175,7 +182,7 @@ for FTOOL in $NAS_TOOLS_DONE; do
     STEP="restic+forget:nas:${FTOOL}"
     echo "[$(date)] NAS forget for tag '${FTOOL}' (keep-daily 90)..."
     restic --repo "$RESTIC_REPOSITORY_NAS" \
-        forget --tag "$FTOOL" --keep-daily 90 --prune
+        forget --tag "$FTOOL" --keep-daily 90 --prune --retry-lock 30s
 done
 
 for FTOOL in $MEGA_TOOLS_DONE; do
@@ -186,7 +193,7 @@ for FTOOL in $MEGA_TOOLS_DONE; do
     STEP="restic+forget:mega:${FTOOL}"
     echo "[$(date)] MEGA forget for tag '${FTOOL}' (keep-daily 90)..."
     restic --repo "$RESTIC_REPOSITORY_MEGA" \
-        forget --tag "$FTOOL" --keep-daily 90 --prune
+        forget --tag "$FTOOL" --keep-daily 90 --prune --retry-lock 30s
 done
 
 ELAPSED=$(( $(date +%s) - START ))

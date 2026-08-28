@@ -39,13 +39,15 @@ pick_index() {
 }
 
 # ── 0. Which source repo ─────────────────────────────────────────────
-# NAS is primary (90-day retention). MEGA is offsite second tier
-# (infinite retention, minus MEGA_EXCLUDE tools from backup.sh).
+# NAS is primary (holds every tool including immich). MEGA is the
+# offsite mirror (everything except tools in MEGA_EXCLUDE). Per-tool
+# retention is symmetric between the two repos — no meaningful
+# retention difference to highlight here.
 echo ""
 echo "Restore from which repo?"
 echo ""
-echo "  1  NAS   ($REPO_NAS, 90-day retention)"
-echo "  2  MEGA  ($REPO_MEGA, infinite retention)"
+echo "  1  NAS   ($REPO_NAS, primary — every tool)"
+echo "  2  MEGA  ($REPO_MEGA, offsite mirror — no immich)"
 echo ""
 pick_index "Which? (index; Enter to cancel): " 2
 case "$PICKED" in

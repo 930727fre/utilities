@@ -152,7 +152,7 @@ Menu prompts:
 3. Snapshot (newest first)
 4. Confirm
 
-NAS is the go-to for a routine restore (90-day window, tighter to the machine). Fall back to MEGA when NAS is unreachable or gone.
+NAS is the go-to for a routine restore (primary, holds every tool including immich). Fall back to MEGA when NAS is unreachable or gone.
 
 All supported tools restore via **wipe & replace** of the tool's whole `data/` directory (or, for jellyfin, its `config/`). Files are restored to a staging temp dir first and moved into place at the end, so a restic-side error doesn't leave the target half-wiped.
 
