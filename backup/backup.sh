@@ -194,7 +194,7 @@ for FTOOL in $MEGA_TOOLS_DONE; do
         forget --tag "$FTOOL" --keep-daily 90 --prune --retry-lock 30s
 done
 
-# ── par2 sidecar maintenance for secrets ─────────────────────
+# ── par2 sidecar generation for secrets ──────────────────────
 # For each user-dropped blob in /secrets/, keep a par2 sidecar file
 # alongside it (10% Reed-Solomon parity, single volume). par2 is the
 # only tool in this pipeline that witnesses the blob at a specific
@@ -203,28 +203,21 @@ done
 # tier byte-compare, par2 does the "did this blob change since we
 # first saw it" check. Both matter.
 #
-# Two passes:
-# 1. Cleanup: any orphan .par2 whose source blob is gone gets deleted
-#    (user removed the blob but not the sidecar). Prevents next tick's
-#    par2 create from re-appearing and next weekly par2 verify from
-#    failing on a source-missing sidecar.
-# 2. Create: any blob without a matching .par2 index gets one made.
-#    Idempotent — existing sidecars are left alone. Subshell cd so par2
-#    writes its output next to the source, not into /.
+# Idempotent: blobs with an existing .par2 index are skipped, so the
+# steady-state cost is just the find + a per-file exists check. Adding
+# a new blob → next tick generates its sidecar → shipped to both tiers
+# on the same pass. Subshell cd so par2 writes its output next to the
+# source, not into /.
+#
+# No orphan cleanup by design — this pipeline is add-only. If a blob
+# vanishes from /secrets/ we WANT the next weekly par2 verify to fail
+# on the source-missing sidecar: silent auto-cleanup would paper over
+# what's more likely a bug than an intentional deletion.
 #
 # -r10 parity fraction chosen to cover realistic bit-rot (single-bit
 # flips, occasional sector failures). -n1 = single recovery volume,
 # fine for small blobs. -q suppresses progress noise. Sidecar naming:
 #   foo.age            → foo.age.par2 (index) + foo.age.vol*+*.par2
-STEP="par2+cleanup:secrets"
-find /secrets -maxdepth 1 -type f -name '*.par2' 2>/dev/null | while IFS= read -r p; do
-    src=$(echo "$p" | sed -E 's/(\.vol[0-9]+\+[0-9]+)?\.par2$//')
-    if [ ! -f "$src" ]; then
-        echo "[$(date)] orphan par2 cleanup: $(basename "$p")"
-        rm -f "$p"
-    fi
-done
-
 STEP="par2+create:secrets"
 find /secrets -maxdepth 1 -type f ! -name '.*' ! -name '*.par2' 2>/dev/null | while IFS= read -r f; do
     if [ ! -f "${f}.par2" ]; then

@@ -19,7 +19,7 @@ Restic dedups per-snapshot chunk-by-chunk, so 90-day retention costs roughly bas
 
 Location: `data/secrets/` (bind-mounted to `/secrets/` in the container). Holds pre-sealed monolithic blobs — user drops them in already-sealed and this container just mirrors bytes out. Never generates or unseals anything.
 
-Per tick, for each new blob the container generates a `par2` sidecar (10% Reed-Solomon parity, single volume): `foo.age` → `foo.age.par2` + `foo.age.vol*+*.par2`. Idempotent — existing sidecars are left alone; orphan sidecars whose source blob has been removed are cleaned up first so the folder stays coherent.
+Per tick, for each new blob the container generates a `par2` sidecar (10% Reed-Solomon parity, single volume): `foo.age` → `foo.age.par2` + `foo.age.vol*+*.par2`. Idempotent — existing sidecars are left alone. Add-only pipeline: if a blob vanishes from the folder, the sidecar stays and the next weekly `par2 verify` deliberately fails on the source-missing sidecar (silent cleanup would paper over what's more likely a bug than intent).
 
 Push: plain `rclone copy /secrets/ nas:secrets/` + `rclone copy /secrets/ mega:secrets/`, ships blob + par2 sidecars together, no encryption applied at this layer (sources supply their own strong seal). No retention pruning — blobs accumulate forever (they're tiny, updates infrequent).
 
