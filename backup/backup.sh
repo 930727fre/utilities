@@ -194,12 +194,52 @@ for FTOOL in $MEGA_TOOLS_DONE; do
         forget --tag "$FTOOL" --keep-daily 90 --prune --retry-lock 30s
 done
 
+# ── par2 sidecar maintenance for secrets ─────────────────────
+# For each user-dropped blob in /secrets/, keep a par2 sidecar file
+# alongside it (10% Reed-Solomon parity, single volume). par2 is the
+# only tool in this pipeline that witnesses the blob at a specific
+# point in time and can detect within-tier rot without needing to
+# cross-compare against the other tier — rclone check does the cross-
+# tier byte-compare, par2 does the "did this blob change since we
+# first saw it" check. Both matter.
+#
+# Two passes:
+# 1. Cleanup: any orphan .par2 whose source blob is gone gets deleted
+#    (user removed the blob but not the sidecar). Prevents next tick's
+#    par2 create from re-appearing and next weekly par2 verify from
+#    failing on a source-missing sidecar.
+# 2. Create: any blob without a matching .par2 index gets one made.
+#    Idempotent — existing sidecars are left alone. Subshell cd so par2
+#    writes its output next to the source, not into /.
+#
+# -r10 parity fraction chosen to cover realistic bit-rot (single-bit
+# flips, occasional sector failures). -n1 = single recovery volume,
+# fine for small blobs. -q suppresses progress noise. Sidecar naming:
+#   foo.age            → foo.age.par2 (index) + foo.age.vol*+*.par2
+STEP="par2+cleanup:secrets"
+find /secrets -maxdepth 1 -type f -name '*.par2' 2>/dev/null | while IFS= read -r p; do
+    src=$(echo "$p" | sed -E 's/(\.vol[0-9]+\+[0-9]+)?\.par2$//')
+    if [ ! -f "$src" ]; then
+        echo "[$(date)] orphan par2 cleanup: $(basename "$p")"
+        rm -f "$p"
+    fi
+done
+
+STEP="par2+create:secrets"
+find /secrets -maxdepth 1 -type f ! -name '.*' ! -name '*.par2' 2>/dev/null | while IFS= read -r f; do
+    if [ ! -f "${f}.par2" ]; then
+        echo "[$(date)] par2 create for $(basename "$f")"
+        (cd "$(dirname "$f")" && par2 create -r10 -n1 -q -- "$(basename "$f")")
+    fi
+done
+
 # ── secrets rclone copy branch ────────────────────────────────
 # Non-restic branch: /secrets/ holds pre-sealed monolithic blobs
 # dropped in by the user (already sealed with whatever mechanism they
-# chose — hardware key, age, gpg, etc.). Copied as-is to nas:secrets/
-# + mega:secrets/. No encryption applied here (sources supply their
-# own seal). No retention pruning either — blobs accumulate forever.
+# chose — hardware key, age, gpg, etc.) plus the .par2 sidecars this
+# container maintains for them. Copied as-is to nas:secrets/ +
+# mega:secrets/. No encryption applied here (sources supply their own
+# seal). No retention pruning either — blobs accumulate forever.
 # --exclude ".*" skips any dotfiles that might land in the directory
 # (paranoia; there shouldn't be any).
 STEP="rclone+copy:secrets:nas"
@@ -210,7 +250,10 @@ STEP="rclone+copy:secrets:mega"
 echo "[$(date)] rclone copy /secrets/ → mega:secrets/ ..."
 rclone copy /secrets/ mega:secrets/ --exclude ".*"
 
-SECRETS_COUNT=$(find /secrets -type f ! -name '.*' 2>/dev/null | wc -l)
+# SECRETS_COUNT reports the number of user-dropped blobs (excluding
+# the .par2 sidecars this container manages). Keeps the Telegram
+# summary matching what the user sees in the folder.
+SECRETS_COUNT=$(find /secrets -maxdepth 1 -type f ! -name '.*' ! -name '*.par2' 2>/dev/null | wc -l)
 
 # ── Weekly full integrity check (Sundays) ───────────────────────────
 # One unified verify cadence: every Sunday, fully verify both restic
@@ -244,7 +287,19 @@ if [ "$(date +%u)" = "7" ]; then
     echo "[$(date)] Weekly full verify secrets — MEGA..."
     rclone check --download /secrets/ mega:secrets/ --exclude ".*"
 
-    CHECK_STATUS="Weekly full verify OK (restic + secrets, both tiers)"
+    # par2 verify LOCAL. rclone check above catches divergence between
+    # tiers; par2 verify catches drift from the original state even
+    # when both tiers agree byte-wise (silently synchronized rot).
+    # Iterates only on .par2 index files (skips .vol volume files —
+    # verify with the index does the full check).
+    STEP="par2+verify:secrets"
+    echo "[$(date)] Weekly par2 verify on secrets..."
+    find /secrets -maxdepth 1 -type f -name '*.par2' ! -name '*.vol*+*.par2' 2>/dev/null \
+        | while IFS= read -r p; do
+        par2 verify -q -- "$p"
+    done
+
+    CHECK_STATUS="Weekly full verify OK (restic + secrets rclone + par2, both tiers)"
 fi
 
 ELAPSED=$(( $(date +%s) - START ))

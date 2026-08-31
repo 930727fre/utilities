@@ -70,8 +70,13 @@ if [ "$KIND" = "2" ]; then
 
     echo ""
     echo "Listing files in $SECRETS_LABEL secrets/..."
+    # Hide .par2 sidecars from the picker — they're tied to their
+    # source blob (backup container manages them) and not restorable in
+    # isolation. When you pick a blob below, its sidecars are pulled
+    # alongside it automatically.
     FILES=$(docker compose run --rm --no-TTY backup \
-        rclone lsf "$SECRETS_REMOTE" --files-only 2>/dev/null | tr -d '\r' | sort)
+        rclone lsf "$SECRETS_REMOTE" --files-only 2>/dev/null \
+        | tr -d '\r' | grep -Ev '\.par2$' | sort)
     [ -z "$FILES" ] && { echo "ERROR: no files at $SECRETS_REMOTE" >&2; exit 1; }
 
     echo ""
@@ -88,15 +93,34 @@ if [ "$KIND" = "2" ]; then
     # user handles unseal / decrypt from there. Never dropped back into
     # data/secrets — that's the source-of-truth, restore shouldn't
     # touch it.
+    #
+    # --include "${FILE}*" pulls the picked blob + any .par2 sidecars
+    # in one call: foo.age, foo.age.par2, foo.age.vol*+*.par2.
     OUT=$(mktemp -d)
     echo ""
-    echo "Downloading $FILE → $OUT/ ..."
+    echo "Downloading $FILE (+ any par2 sidecars) → $OUT/ ..."
     docker compose run --rm -v "$OUT:/restore-out" backup \
-        rclone copy "${SECRETS_REMOTE}${FILE}" /restore-out/
+        rclone copy "$SECRETS_REMOTE" /restore-out/ --include "${FILE}*"
 
     # rclone container writes as root; chown back so the user can
     # actually read the file without sudo.
     sudo chown -R "$(id -u):$(id -g)" "$OUT"
+
+    # If sidecars came along, run par2 repair (== verify + heal-if-
+    # needed) before handing off. If the downloaded blob happens to
+    # have bit-rot on this tier, par2 heals it here; if damage is
+    # beyond parity coverage, fall over to the other tier.
+    if [ -f "$OUT/${FILE}.par2" ]; then
+        echo ""
+        echo "par2 sidecar present — verifying + repairing if needed..."
+        if docker compose run --rm -v "$OUT:/restore-out" backup \
+            par2 repair -q -- "/restore-out/${FILE}.par2"; then
+            echo "✓ par2: blob intact (or healed)"
+        else
+            echo "⚠ par2: repair failed — this tier's copy is beyond parity coverage"
+            echo "  Re-run restore against the other tier."
+        fi
+    fi
 
     echo ""
     echo "✓ Downloaded"

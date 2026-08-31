@@ -19,7 +19,9 @@ Restic dedups per-snapshot chunk-by-chunk, so 90-day retention costs roughly bas
 
 Location: `data/secrets/` (bind-mounted to `/secrets/` in the container). Holds pre-sealed monolithic blobs — user drops them in already-sealed and this container just mirrors bytes out. Never generates or unseals anything.
 
-Push: plain `rclone copy /secrets/ nas:secrets/` + `rclone copy /secrets/ mega:secrets/`, no encryption applied at this layer (sources supply their own strong seal). No retention pruning — blobs accumulate forever (they're tiny, updates infrequent).
+Per tick, for each new blob the container generates a `par2` sidecar (10% Reed-Solomon parity, single volume): `foo.age` → `foo.age.par2` + `foo.age.vol*+*.par2`. Idempotent — existing sidecars are left alone; orphan sidecars whose source blob has been removed are cleaned up first so the folder stays coherent.
+
+Push: plain `rclone copy /secrets/ nas:secrets/` + `rclone copy /secrets/ mega:secrets/`, ships blob + par2 sidecars together, no encryption applied at this layer (sources supply their own strong seal). No retention pruning — blobs accumulate forever (they're tiny, updates infrequent).
 
 Why not restic for these: pre-encrypted monolithic blobs get zero benefit from restic dedup (random-looking bytes per update = unique chunks every time). Recovery is more direct through plain rclone (just download the `.age` / `.7z` file), avoiding the `restic → RESTIC_PASSWORD → Bitwarden` circular dependency for the disaster case.
 
@@ -37,11 +39,12 @@ Neither folder has a container or code of its own — pure input directories for
 Every Sunday, tacked onto the end of the daily tick — no separate cron entry:
 
 - `restic check --read-data` on both repos: downloads and decrypts every pack, verifies HMAC → catches bit-rot or password/crypto issues.
-- `rclone check --download` on secrets against both tiers: fetches every remote blob, byte-compares against local → catches bit-rot at either tier.
+- `rclone check --download` on secrets against both tiers: fetches every remote blob, byte-compares against local → catches cross-tier divergence at either tier.
+- `par2 verify` on each local secrets blob: catches drift from the original state even when both tiers agree byte-wise (silently synchronized rot). rclone check answers "are the copies still in sync"; par2 answers "is the copy still what we saved."
 
 One unified weekly cadence, no monthly/subset split — bandwidth isn't the constraint (04:00, home broadband, no quota concerns), simpler is better. Failures bubble to the outer trap → Telegram `❌ | Backup | FAILED at {step}`.
 
-Manual quarterly restore drill is still worth doing on top: pick a tool via `./restore.sh` (or a secrets blob), verify the restored bytes are actually usable end-to-end.
+Manual quarterly restore drill is still worth doing on top: pick a tool via `./restore.sh` (or a secrets blob), verify the restored bytes are actually usable end-to-end. `./restore.sh` Kind 2 pulls sidecars automatically and runs `par2 repair` on the downloaded copy, so a mildly-rotted blob on one tier auto-heals during recovery.
 
 ### MEGA opt-out (`MEGA_EXCLUDE`)
 

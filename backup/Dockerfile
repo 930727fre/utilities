@@ -17,7 +17,12 @@ FROM alpine:3.19
 # postgresql-client — pg_dump binary for the immich case in backup.sh.
 # alpine's default package pulls a matching-major client; forward-
 # compatible with Immich's postgres 14 server.
-RUN apk add --no-cache rclone restic sqlite tzdata jq postgresql-client
+# par2cmdline — Reed-Solomon parity for files in /secrets/. Backup
+# generates a .par2 sidecar (10% redundancy) for each blob the user
+# drops in, ships it alongside the blob to both tiers, weekly verify
+# runs par2 verify. Catches within-tier bit-rot even when all tiers
+# agree byte-wise (par2 witnesses the original state at seal-time).
+RUN apk add --no-cache rclone restic sqlite tzdata jq postgresql-client par2cmdline
 
 COPY backup.sh /backup.sh
 RUN chmod +x /backup.sh

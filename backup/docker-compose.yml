@@ -62,9 +62,12 @@ services:
           create_host_path: false
       # secrets: pre-sealed monolithic blobs. Everything dropped here
       # is produced OFF-BOX and arrives already sealed — this container
-      # never generates or unseals anything, just mirrors bytes out.
-      # Mounted at /secrets/ (not /tools/) because it takes a different
-      # code path — plain rclone copy at infinite retention, not restic.
+      # never unseals or re-encrypts blobs, but it DOES generate a
+      # par2 sidecar per blob (10% parity, single volume) for within-
+      # tier rot detection + repair; see backup.sh "par2 sidecar
+      # maintenance" section. Mounted at /secrets/ (not /tools/) because
+      # it takes a different code path — plain rclone copy + par2, at
+      # infinite retention, not restic.
       - type: bind
         source: ./data/secrets
         target: /secrets
