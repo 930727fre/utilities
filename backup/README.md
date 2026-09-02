@@ -116,7 +116,17 @@ Then export in shell before `docker compose up`:
 export RESTIC_PASSWORD='<the value from Bitwarden>'
 ```
 
-First `docker compose up` triggers an implicit `restic init` per repo inside `backup.sh` (the check is `restic --repo <URL> snapshots >/dev/null 2>&1 || restic --repo <URL> init`). Idempotent — later runs skip init.
+## Setup — one-time repo init
+
+Both restic repos need `restic init` run once (creates the on-disk `config` file, key hierarchy, etc.). Do this before enabling the daily backup:
+
+```bash
+docker compose run --rm backup /init-repos.sh
+```
+
+Idempotent — repos that already exist are skipped. Re-running is safe (useful when adding a new remote later — existing repos untouched, new one gets inited).
+
+Kept deliberately separate from `backup.sh` because the daily path can't reliably distinguish "repo missing" from "backend unreachable"; auto-init used to fire spuriously on transient NAS timeouts. Setup is a one-time human-driven step; the daily backup assumes it has been done.
 
 ## Deploy
 

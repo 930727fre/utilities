@@ -24,8 +24,8 @@ FROM alpine:3.19
 # agree byte-wise (par2 witnesses the original state at seal-time).
 RUN apk add --no-cache rclone restic sqlite tzdata jq postgresql-client par2cmdline
 
-COPY backup.sh /backup.sh
-RUN chmod +x /backup.sh
+COPY backup.sh init-repos.sh /
+RUN chmod +x /backup.sh /init-repos.sh
 
 RUN mkdir -p /var/spool/cron/crontabs && \
     echo "0 20 * * * /backup.sh >> /var/log/backup.log 2>&1" > /var/spool/cron/crontabs/root

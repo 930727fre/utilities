@@ -24,19 +24,14 @@ echo "[$(date)] Starting backup for tools: ${TOOLS}"
 echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS}"
 echo "[$(date)] MEGA repo: ${RESTIC_REPOSITORY_MEGA} (excluding: ${MEGA_EXCLUDE:-none})"
 
-# ── One-time repo init on first run ─────────────────────────────────
-# `restic snapshots` returns non-zero when the repo doesn't exist yet.
-# Check that specifically rather than `restic init || true` — the
-# latter would swallow real init errors (wrong password after a rekey,
-# remote unreachable, permission denied).
-for REPO_NAME in NAS MEGA; do
-    STEP="restic:init:$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]')"
-    eval "REPO_URL=\$RESTIC_REPOSITORY_$REPO_NAME"
-    if ! restic --repo "$REPO_URL" snapshots >/dev/null 2>&1; then
-        echo "[$(date)] restic repository ${REPO_NAME} missing; initializing..."
-        restic --repo "$REPO_URL" init
-    fi
-done
+# NOTE: repo init is NOT done here — it's a separate one-time setup
+# step via ./init-repos.sh. Previously this script auto-inited on any
+# `restic snapshots` failure, but that conflated "repo missing" with
+# "backend unreachable" — a transient NAS timeout during the 04:00
+# tick would trigger a spurious init that then also timed out,
+# waking the user for something self-healing. If a repo is legitimately
+# missing now, the per-tool `restic backup` calls below fail cleanly at
+# their own STEP with restic's own error message.
 
 # ── Per-tool snapshot ──────────────────────────────────────────────
 # Staging dir is the same path each iteration; restic tag (--tag $TOOL)
