@@ -18,7 +18,17 @@ notify() {
 # convention so all self-host notifications look uniform in the Telegram
 # feed. Multi-line detail (NAS/MEGA tool lists, check status) follows on
 # subsequent lines below the standard header.
-trap 'notify "❌ | Backup | FAILED at ${STEP}"' EXIT
+#
+# On failure, tail the last few lines of /var/log/backup.log (populated
+# by cron's `>> /var/log/backup.log 2>&1` redirect) so the Telegram
+# message carries the actual restic / rclone error, not just the step
+# name. Manual runs (no cron redirect, no log file) fall back to just
+# the step name — user sees the error live in stdout anyway.
+trap '
+    LOG_TAIL=$(tail -8 /var/log/backup.log 2>/dev/null | tail -c 2000)
+    notify "❌ | Backup | FAILED at ${STEP}${LOG_TAIL:+
+${LOG_TAIL}}"
+' EXIT
 
 echo "[$(date)] Starting backup for tools: ${TOOLS}"
 echo "[$(date)] NAS  repo: ${RESTIC_REPOSITORY_NAS}"
