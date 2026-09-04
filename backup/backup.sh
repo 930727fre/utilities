@@ -13,6 +13,32 @@ notify() {
     wget -qO- "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage?chat_id=${TELEGRAM_CHAT_ID}&text=${ENCODED}" > /dev/null || true
 }
 
+# Retry helper for `restic backup` — MEGA (and occasionally NAS) will
+# rate-limit or transient-hiccup during the multi-tool loop, causing
+# restic's internal HTTP RPC to rclone to "context deadline exceeded".
+# The failing tool is usually just the last one or two in the loop
+# because backend has been getting hammered. Rate-limit windows are
+# typically 30-120 seconds, so 3 spaced attempts usually rides through.
+# `until` in POSIX sh doesn't trigger set -e on the tested command, so
+# failed attempts don't abort the script — only the final give-up
+# `return 1` propagates via set -e.
+#
+# Reads $TOOL and $STAGING from the enclosing tool loop.
+retry_restic_backup() {
+    _REPO="$1"
+    _TRY=1
+    until restic --repo "$_REPO" backup "$STAGING" \
+            --tag "$TOOL" --host "utilities-backup"; do
+        if [ "$_TRY" -ge 3 ]; then
+            echo "[$(date)] ${TOOL} → ${_REPO}: gave up after 3 attempts"
+            return 1
+        fi
+        echo "[$(date)] ${TOOL} → ${_REPO}: attempt ${_TRY} failed, sleeping 60s..."
+        sleep 60
+        _TRY=$((_TRY + 1))
+    done
+}
+
 # Format: {emoji} | Backup | {details}
 # Matches the homelab/disk-watchdog + homelab/transcribe notifier
 # convention so all self-host notifications look uniform in the Telegram
@@ -132,9 +158,7 @@ for TOOL in $TOOLS; do
 
     STEP="${TOOL}:restic+backup:nas"
     echo "[$(date)] ${TOOL}: pushing to NAS repo..."
-    restic --repo "$RESTIC_REPOSITORY_NAS" backup "$STAGING" \
-        --tag "$TOOL" \
-        --host "utilities-backup"
+    retry_restic_backup "$RESTIC_REPOSITORY_NAS"
     NAS_TOOLS_DONE="${NAS_TOOLS_DONE}${NAS_TOOLS_DONE:+ }${TOOL}"
 
     # MEGA opt-out: MEGA_EXCLUDE is a space-separated list. Match on
@@ -151,9 +175,7 @@ for TOOL in $TOOLS; do
     else
         STEP="${TOOL}:restic+backup:mega"
         echo "[$(date)] ${TOOL}: pushing to MEGA repo..."
-        restic --repo "$RESTIC_REPOSITORY_MEGA" backup "$STAGING" \
-            --tag "$TOOL" \
-            --host "utilities-backup"
+        retry_restic_backup "$RESTIC_REPOSITORY_MEGA"
         MEGA_TOOLS_DONE="${MEGA_TOOLS_DONE}${MEGA_TOOLS_DONE:+ }${TOOL}"
     fi
 
