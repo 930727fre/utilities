@@ -23,7 +23,7 @@
 
 **每張 card 的品質底線**：一張 card 進 error book 前（不論 Sonnet 自動產的還是 discuss mode 討論後手動寫的）要符合這幾條，不符合就打回重寫或 skip：
 
-1. `l1_diagnosis` 要具體指名「我這次講錯是因為中文 X 直譯成英文 Y」— 不是抽象規則描述、不是講英文用法而已
+1. `l1_diagnosis` 要具體指名「我這次講錯是因為中文 X 直譯成英文 Y」— 不是抽象規則描述、不是講英文用法而已。（例外：discuss mode 主動教的新 chunk、或道地度升級建議這兩種卡沒有真實的「講錯」，`l1_diagnosis` 改寫成「直覺會講成 X，但地道講法是 Y，因為...」，`you_said` 誠實留白或標註來源）
 2. `native` 要日常慣用（`hear back`），不要 stilted 翻譯腔（`receive information`）
 3. `register` 一個短 phrase 就好，不要 slash-list 排排站（`medical appointments` 對，`medical / customer / general / insurance` 錯）
 4. 一張卡對應一條 rule，不能混（missing plural + uncountable-noun 誤用要拆兩張）
@@ -40,7 +40,15 @@
 
 **discuss**（我目前的主力）：upload 時勾 `[✓] discuss with Claude` toggle。session 只存 transcript。之後我拿 session_id 找 Claude 討論 → `apply_review.py` 從 stdin JSON 寫進 error book。對每張卡的品質底線比較踏實，適合我對 auto pipeline 還沒完全信任的階段。
 
-**auto**（fallback）：upload → Sonnet 自動分析 → 前端 tinder-swipe。快、不綁 Claude availability。目前用在 Claude 不在的時段、或想快速消化一場 session 但不追細節時。等 auto 品質累積夠多可靠 session 我才會反轉主力。
+**auto**（fallback）：upload → Sonnet 自動分析 → 前端 tinder-swipe。快、不綁 Claude availability。目前用在 Claude 不在的時段、或想快速消化一場 session 但不追細節時。
+
+> 2026-09-16 更新：實際用下來，discuss mode 的價值很大一部分來自即時判斷力（該不該收、是不是單純口誤、你當下的真實意圖是什麼），這種東西很難塞進固定 prompt。auto 有沒有可能永遠不會反轉成主力、甚至被放棄，先保留 fallback 角色觀察，不強求它進化。
+
+## discuss mode 的延伸：道地度升級建議
+
+不只抓錯誤，也可以抓「文法對、意思也對，但母語使用者有更常用講法」的句子——跟錯誤修正卡同格式（`you_said` + `native` + `l1_diagnosis`），差別是 `you_said` 不是錯的，`l1_diagnosis` 改寫成「這樣講沒錯，但更道地的講法是...」。
+
+品質門檻：native 版本要「很明顯大多數母語使用者都會這樣講」，不是「其中一種更好的選項」——排除掉見仁見智的用字選擇。這條門檻本身就會自然限制數量，不特別設上限。目前只在 discuss mode 手動做，不放進 Sonnet 的 auto-analyze prompt。
 
 ## Daily flow
 
