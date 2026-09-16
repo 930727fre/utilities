@@ -40,6 +40,8 @@
 
 **discuss**（我目前的主力）：upload 時勾 `[✓] discuss with Claude` toggle。session 只存 transcript。之後我拿 session_id 找 Claude 討論 → `apply_review.py` 從 stdin JSON 寫進 error book。對每張卡的品質底線比較踏實，適合我對 auto pipeline 還沒完全信任的階段。
 
+Review 流程：Claude 看完逐字稿先列出候選（含跳過的原因），但討論**一次只看一張**——不要列完清單就直接逐一問過去，每張都留時間給我 y/n 或開放式討論再進下一張。
+
 **auto**（fallback）：upload → Sonnet 自動分析 → 前端 tinder-swipe。快、不綁 Claude availability。目前用在 Claude 不在的時段、或想快速消化一場 session 但不追細節時。
 
 > 2026-09-16 更新：實際用下來，discuss mode 的價值很大一部分來自即時判斷力（該不該收、是不是單純口誤、你當下的真實意圖是什麼），這種東西很難塞進固定 prompt。auto 有沒有可能永遠不會反轉成主力、甚至被放棄，先保留 fallback 角色觀察，不強求它進化。
@@ -119,3 +121,9 @@ Code + prompt 會隨我英文程度跟需求一直改（這是 tool 的重點）
 - Opus fallback 每次都觸發 → 換 primary model 或改 quote convention（`"..."` → `**...**`）
 - Error book 破 150 → 認真做 Phase C
 - 我英文變好到 Claude native 建議 spot-check 大部分 pass → 開始減少 daily practice 頻率
+
+## 未來構想（尚未實作）
+
+- **用 roleplay 重講過去的內容，測 disfluency 有沒有進步、抓出「學不起來」的 error**：複雜內容的破碎感（卡頓、重組句子）很大一部分來自內容規劃、不是語言能力，同內容重講第二次通常會明顯順很多。想拿這個做 before/after 比較，但不能用 freestyle 重講——沒有腳本鎖住內容順序，AI 追問方向會飄，兩次講的根本不是同一件事，比較不公平。要做的話，用某場舊 session 的逐字稿重建成固定 AI 台詞 + 中文語意提示（不是逐字腳本，只給語意，逼我重新組織英文），格式比照現有 roleplay。
+  - 更重要的動機：分辨哪些 error 是「提點一次就記得」（例如 master's degree，#0078，有信心下次會對）、哪些是「一直提醒還是一直錯」（例如 follow up with，已經在 error book 出現兩次：#0036、#0067）。重講舊內容會自然把這種 sticky error 逼出來，比單純看 error book 累積次數更直接。
+  - 實作方式要走正式功能（backend endpoint + 前端按鈕，例如「重新練習這場舊 session」），不要每次靠 Claude 手動寫檔案——手動寫法沒有 UI、沒有 dedup，時間久了 `data/roleplays/` 會亂。有空的時候再排進去做。

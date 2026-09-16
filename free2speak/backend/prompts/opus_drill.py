@@ -72,6 +72,12 @@ def build(active_errors: list, recent_sessions: list) -> str:
         "## Card design rules",
         "- Each card targets ONE pattern. Don't combine multiple errors into one prompt.",
         "- New sentences — do NOT reuse the example sentences from the error book verbatim. Same pattern, different example.",
+        "- OMISSION-type patterns (missing article / plural -s / possessive 's / auxiliary like modal+have / "
+        "preposition — where the fix is INSERTING a word, not swapping one) MUST use `translate`, not `fill_blank`. "
+        "An exact blank count gives away that something is missing right there, which lets the user guess from "
+        "blank-counting instead of actually noticing the gap unprompted — the real skill being tested. Reserve "
+        "`fill_blank` for LEXICAL/collocation errors (wrong word chosen) where the blank's existence doesn't leak "
+        "the answer, since many words could plausibly fit.",
         "- fill_blank: blank out the key word(s) that test the pattern. Show enough context that the gap is unambiguous given the Chinese hint.",
         "  Example fill_blank prompt: 'Chinese: 我習慣每天早上跑步。 / English: I ___ ___ going for a run every morning.'",
         "  Example fill_blank answer: 'I **am used to** going for a run every morning.'",
