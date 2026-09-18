@@ -40,7 +40,11 @@
 
 **discuss**（我目前的主力）：upload 時勾 `[✓] discuss with Claude` toggle。session 只存 transcript。之後我拿 session_id 找 Claude 討論 → `apply_review.py` 從 stdin JSON 寫進 error book。對每張卡的品質底線比較踏實，適合我對 auto pipeline 還沒完全信任的階段。
 
-Review 流程：Claude 看完逐字稿先列出候選（含跳過的原因），但討論**一次只看一張**——不要列完清單就直接逐一問過去，每張都留時間給我 y/n 或開放式討論再進下一張。
+Review 流程（2026-09-18 演練驗證，取代舊的「先讀完整段列清單」做法）：**逐句對照**。Claude 吐一組 `[AI] ... [ME] ...`，兩人討論這句有沒有問題（可能零個、一個、或疊好幾個），討論完才進下一組。完全空洞的禮貌回應（"Okay, thank you" 這種沒有實質內容的句子）可以跳過不用停。用 2026-05-15 舊 session 演練過：這個方法比讀完整段再列清單抓得更全，包括抓出舊卡復發、以及同一句裡疊著的多個問題。
+
+Review 紀律（2026-09-18 加，因為漏抓過東西）：
+- 逐句進行時，先把整本 active error book 掃過一次找 recurrence，不能只靠印象比對——舊卡復發（sticky error）跟新錯誤一樣重要，常常被漏掉。
+- 改寫某句話的 native 版本時，同一句話裡如果還有別的問題，要單獨列成另一個候選，不能順手修掉、不明講——每個問題都要讓我看見、自己判斷要不要收，不能被我的 rewrite 悄悄吃掉。
 
 **auto**（fallback）：upload → Sonnet 自動分析 → 前端 tinder-swipe。快、不綁 Claude availability。目前用在 Claude 不在的時段、或想快速消化一場 session 但不追細節時。
 
