@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>stt</title>
+<link rel="icon" href="https://emojicdn.elk.sh/📝">
+<link rel="apple-touch-icon" href="https://emojicdn.elk.sh/📝">
+<style>
+  :root {
+    --bg: #1c1c1e;
+    --card: #2c2c2e;
+    --raised: #3a3a3c;
+    --text-1: #e8e3d9;
+    --text-2: #aeaeb2;
+    --text-3: #636366;
+    --honey: #c79968;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    min-height: 100vh;
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text-1);
+  }
+
+  .page {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 16px;
+  }
+
+  @media (min-width: 480px) {
+    .page { padding: 24px; }
+  }
+
+  h1 {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 12px;
+  }
+
+  /* Primary nav — which transcription flow. Deliberately more
+     prominent than .lang-select (a config toggle inside a flow):
+     bigger padding, full-width split, honey on the active tab. */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+    border: 1px solid var(--raised);
+    border-radius: 10px;
+    padding: 4px;
+  }
+  .tab-btn {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text-2);
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 600;
+    padding: 10px 12px;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .tab-btn:hover:not(.active) { color: var(--text-1); }
+  .tab-btn.active { background: var(--honey); color: #1c1c1e; }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--raised);
+    border-radius: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+    padding: 20px 24px;
+    margin-bottom: 12px;
+  }
+
+  .card h2 {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-2);
+    margin: 0;
+  }
+
+  .drop-zone {
+    border: 2px dashed var(--raised);
+    border-radius: 12px;
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--text-2);
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s, color 0.2s;
+    display: block;
+  }
+  .drop-zone:hover { border-color: var(--honey); color: var(--text-1); }
+  .drop-zone.drag { border-color: var(--honey); background: rgba(199, 153, 104, 0.05); color: var(--text-1); }
+  .drop-zone.has-file { border-style: solid; border-color: var(--raised); color: var(--text-1); }
+
+  .drop-zone .filename { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+  .drop-zone .size { color: var(--text-2); font-size: 11px; margin-top: 4px; }
+  .drop-zone .hint { font-size: 13px; }
+
+  input[type="file"] { display: none; }
+
+  .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+
+  button {
+    font-family: var(--sans);
+    font-size: 14px;
+    padding: 10px 20px;
+    border-radius: 8px;
+    border: 1px solid var(--raised);
+    background: transparent;
+    color: var(--text-1);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  button:hover:not(:disabled) { background: var(--raised); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  button.primary {
+    background: var(--honey);
+    border-color: var(--honey);
+    color: #1c1c1e;
+    font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) {
+    background: #d5a878;
+    border-color: #d5a878;
+  }
+
+  .status {
+    color: var(--text-2);
+    font-size: 13px;
+    min-height: 18px;
+    margin-top: 12px;
+  }
+  .status.working { color: var(--honey); }
+  .status.error { color: var(--text-1); }
+  .status.error::before { content: '! '; color: var(--honey); }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    gap: 8px;
+  }
+
+  .copy-btn {
+    padding: 6px 14px;
+    font-size: 12px;
+    font-family: var(--mono);
+  }
+  .copy-btn.copied { color: var(--honey); border-color: var(--honey); }
+
+  /* Segmented control for language pick. Deliberately NOT honey when
+     active — honey is reserved for primary actions (tab switch /
+     Transcribe / Copy). This is a config toggle, not a destination. */
+  .lang-select {
+    display: inline-flex;
+    gap: 0;
+    margin-top: 16px;
+    border: 1px solid var(--raised);
+    border-radius: 8px;
+    padding: 3px;
+  }
+  .lang-select button {
+    border: none;
+    background: transparent;
+    color: var(--text-2);
+    padding: 6px 14px;
+    font-size: 13px;
+    font-family: var(--sans);
+    font-weight: 400;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .lang-select button:hover:not(.active) { color: var(--text-1); background: transparent; }
+  .lang-select button.active {
+    background: var(--raised);
+    color: var(--text-1);
+    font-weight: 600;
+  }
+
+  .field {
+    margin-top: 16px;
+  }
+  .field label {
+    display: block;
+    font-size: 13px;
+    color: var(--text-2);
+    margin-bottom: 6px;
+  }
+  .field .hint-text {
+    font-size: 12px;
+    color: var(--text-3);
+    margin-top: 4px;
+  }
+  input[type="number"] {
+    width: 100px;
+    font-family: var(--mono);
+    font-size: 14px;
+    padding: 8px 12px;
+    background: var(--bg);
+    border: 1px solid var(--raised);
+    border-radius: 8px;
+    color: var(--text-1);
+  }
+  input[type="number"]:focus { outline: none; border-color: var(--honey); }
+
+  /* Dictate tab — click-to-record mic button + timer, same visual
+     language as utilities/recorder (honey circle, morphs to a pulsing
+     square while recording). No waveform canvas here — a single
+     mic-to-transcript action doesn't need the extra feedback a
+     multi-minute archival recording benefits from. */
+  .voice-recorder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    padding: 12px 0 4px;
+  }
+
+  .timer {
+    font-family: var(--mono);
+    font-size: 36px;
+    font-weight: 200;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+    color: var(--text-2);
+  }
+  .timer.recording { color: var(--honey); }
+
+  .record-btn {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    border: 3px solid var(--raised);
+    background: transparent;
+    cursor: pointer;
+    transition: border-color 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  .record-btn:hover:not(:disabled) { border-color: var(--honey); }
+  .record-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .record-btn .inner {
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--honey);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .record-btn.recording .inner {
+    border-radius: 8px;
+    width: 26px;
+    height: 26px;
+    animation: rec-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes rec-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+
+  textarea {
+    width: 100%;
+    min-height: 200px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px solid var(--raised);
+    border-radius: 8px;
+    color: var(--text-1);
+    resize: vertical;
+  }
+  textarea:focus { outline: none; border-color: var(--honey); }
+  textarea.prompt-area { min-height: 320px; }
+
+  .results { display: none; }
+  .results.visible { display: block; }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>stt</h1>
+
+    <div class="tabs" role="tablist">
+      <button type="button" class="tab-btn active" data-tab="single" role="tab" aria-selected="true">Fri seminar</button>
+      <button type="button" class="tab-btn" data-tab="meeting" role="tab" aria-selected="false">Meeting</button>
+      <button type="button" class="tab-btn" data-tab="dictate" role="tab" aria-selected="false">Dictate</button>
+    </div>
+
+    <div class="tab-panel active" data-panel="single">
+      <div class="card">
+        <label for="single-file-input" class="drop-zone" id="single-drop-zone">
+          <div class="hint">Click or drop audio file</div>
+        </label>
+        <input type="file" id="single-file-input" accept="audio/*,.m4a,.mp3,.wav,.opus,.ogg,.flac,.webm">
+
+        <div class="lang-select" role="radiogroup" aria-label="Transcription language">
+          <button type="button" data-lang="multi">Multilingual</button>
+          <button type="button" class="active" data-lang="zh-TW">中文</button>
+          <button type="button" data-lang="en">English</button>
+        </div>
+
+        <div class="actions">
+          <button id="single-transcribe-btn" class="primary" disabled>Transcribe</button>
+          <button id="single-clear-btn" disabled>Clear</button>
+        </div>
+        <div class="status" id="single-status"></div>
+      </div>
+
+      <div class="results" id="single-results">
+        <div class="card">
+          <div class="card-header">
+            <h2>LLM Correction Prompt</h2>
+            <button class="copy-btn primary" id="single-copy-prompt">Copy</button>
+          </div>
+          <textarea id="single-prompt-out" class="prompt-area" readonly></textarea>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Raw Transcript</h2>
+            <button class="copy-btn" id="single-copy-transcript">Copy</button>
+          </div>
+          <textarea id="single-transcript-out" readonly></textarea>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="meeting">
+      <div class="card">
+        <label for="meeting-file-input" class="drop-zone" id="meeting-drop-zone">
+          <div class="hint">Click or drop meeting recording</div>
+        </label>
+        <input type="file" id="meeting-file-input" accept="audio/*,.m4a,.mp3,.wav,.opus,.ogg,.flac,.webm">
+
+        <div class="lang-select" role="radiogroup" aria-label="Transcription language">
+          <button type="button" data-lang="multi">Multilingual</button>
+          <button type="button" class="active" data-lang="zh-TW">中文</button>
+          <button type="button" data-lang="en">English</button>
+        </div>
+
+        <div class="field">
+          <label for="meeting-num-speakers">Number of speakers (optional)</label>
+          <input type="number" id="meeting-num-speakers" min="1" max="32" placeholder="auto">
+          <div class="hint-text">Leave blank to auto-detect. Set it if you know the exact count — helps separate speakers who sound similar.</div>
+        </div>
+
+        <div class="actions">
+          <button id="meeting-transcribe-btn" class="primary" disabled>Transcribe</button>
+          <button id="meeting-clear-btn" disabled>Clear</button>
+        </div>
+        <div class="status" id="meeting-status"></div>
+      </div>
+
+      <div class="results" id="meeting-results">
+        <div class="card">
+          <div class="card-header">
+            <h2>LLM Correction Prompt</h2>
+            <button class="copy-btn primary" id="meeting-copy-prompt">Copy</button>
+          </div>
+          <textarea id="meeting-prompt-out" class="prompt-area" readonly></textarea>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h2>Raw Transcript</h2>
+            <button class="copy-btn" id="meeting-copy-transcript">Copy</button>
+          </div>
+          <textarea id="meeting-transcript-out" readonly></textarea>
+        </div>
+      </div>
+    </div>
+
+    <div class="tab-panel" data-panel="dictate">
+      <div class="card">
+        <div class="voice-recorder">
+          <div class="timer" id="dictate-timer">00:00</div>
+          <button class="record-btn" id="dictate-record-btn" aria-label="Record" title="Click to start / stop recording">
+            <span class="inner"></span>
+          </button>
+          <div class="lang-select" role="radiogroup" aria-label="Transcription language">
+            <button type="button" data-lang="multi">Multilingual</button>
+            <button type="button" class="active" data-lang="zh-TW">中文</button>
+            <button type="button" data-lang="en">English</button>
+          </div>
+        </div>
+        <div class="status" id="dictate-status"></div>
+      </div>
+
+      <div class="results" id="dictate-results">
+        <div class="card">
+          <div class="card-header">
+            <h2>Transcript</h2>
+            <button class="copy-btn primary" id="dictate-copy-transcript">Copy</button>
+          </div>
+          <textarea id="dictate-transcript-out" readonly></textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ── Tab switching ──────────────────────────────────────────────────
+  const tabButtons = document.querySelectorAll('.tab-btn');
+  const tabPanels = document.querySelectorAll('.tab-panel');
+  tabButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      tabButtons.forEach(b => { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
+      btn.classList.add('active');
+      btn.setAttribute('aria-selected', 'true');
+      const target = btn.dataset.tab;
+      tabPanels.forEach(p => p.classList.toggle('active', p.dataset.panel === target));
+    });
+  });
+
+  async function copyToClipboard(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (err) {
+      // Fallback for non-secure contexts (rare — CF tunnel is HTTPS).
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch { alert('Copy failed: ' + err.message); return; }
+      document.body.removeChild(ta);
+    }
+    const orig = btn.textContent;
+    btn.textContent = 'Copied';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.classList.remove('copied');
+    }, 1500);
+  }
+
+  // ── Per-tab results panel. Each tab (Fri seminar / Meeting) keeps its
+  // own prompt + transcript output — running one tab's transcription
+  // must never clobber the other tab's last result, since they're
+  // tracking two unrelated recurring use cases. ───────────────────────
+  function setupResultsPanel(prefix) {
+    const results = document.getElementById(`${prefix}-results`);
+    const promptOut = document.getElementById(`${prefix}-prompt-out`);
+    const transcriptOut = document.getElementById(`${prefix}-transcript-out`);
+    const copyPrompt = document.getElementById(`${prefix}-copy-prompt`);
+    const copyTranscript = document.getElementById(`${prefix}-copy-transcript`);
+
+    copyPrompt.addEventListener('click', () => copyToClipboard(promptOut.value, copyPrompt));
+    copyTranscript.addEventListener('click', () => copyToClipboard(transcriptOut.value, copyTranscript));
+
+    return function renderResults(data) {
+      transcriptOut.value = data.transcript;
+      promptOut.value = data.prompt;
+      results.classList.add('visible');
+    };
+  }
+
+  function fmtBytes(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  // Server always resolves "multi" to a concrete zh-TW/en bucket (see
+  // transcribe.py's _resolve_effective_language) and returns it as
+  // detected_language. Shown in the status line so picking
+  // Multilingual doesn't feel like a black box.
+  function langDisplayName(code) {
+    return code === 'zh-TW' ? '中文' : 'English';
+  }
+
+  // ── One upload panel's worth of wiring (drop zone, lang select,
+  // transcribe/clear buttons, status line) — shared between the
+  // "Transcribe" and "Meeting" tabs, which differ only in endpoint +
+  // optional extra form fields. Avoids duplicating the same ~80 lines
+  // of drag/drop + fetch plumbing twice. ──────────────────────────────
+  function setupUploadPanel({ prefix, endpoint, extraFields, renderResults }) {
+    const dropZone = document.getElementById(`${prefix}-drop-zone`);
+    const fileInput = document.getElementById(`${prefix}-file-input`);
+    const transcribeBtn = document.getElementById(`${prefix}-transcribe-btn`);
+    const clearBtn = document.getElementById(`${prefix}-clear-btn`);
+    const statusEl = document.getElementById(`${prefix}-status`);
+    const panel = document.querySelector(`.tab-panel[data-panel="${prefix}"]`);
+    const langButtons = panel.querySelectorAll('.lang-select button');
+
+    let currentFile = null;
+    let currentLang = 'zh-TW';
+
+    langButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        langButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentLang = btn.dataset.lang;
+      });
+    });
+
+    function setStatus(text, cls = '') {
+      statusEl.textContent = text;
+      statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    }
+
+    function selectFile(file) {
+      currentFile = file;
+      dropZone.classList.add('has-file');
+      // textContent-safe rendering — file.name is user-supplied, avoid
+      // injecting into innerHTML.
+      dropZone.innerHTML = '';
+      const nameDiv = document.createElement('div');
+      nameDiv.className = 'filename';
+      nameDiv.textContent = file.name;
+      const sizeDiv = document.createElement('div');
+      sizeDiv.className = 'size';
+      sizeDiv.textContent = fmtBytes(file.size);
+      dropZone.appendChild(nameDiv);
+      dropZone.appendChild(sizeDiv);
+
+      transcribeBtn.disabled = false;
+      transcribeBtn.classList.add('primary');
+      transcribeBtn.textContent = 'Transcribe';
+      clearBtn.disabled = false;
+      setStatus('');
+    }
+
+    function clearFile() {
+      currentFile = null;
+      fileInput.value = '';
+      dropZone.classList.remove('has-file');
+      dropZone.innerHTML = `<div class="hint">${dropZone.dataset.hint || 'Click or drop audio file'}</div>`;
+      transcribeBtn.disabled = true;
+      transcribeBtn.classList.add('primary');
+      transcribeBtn.textContent = 'Transcribe';
+      clearBtn.disabled = true;
+      setStatus('');
+    }
+    // Remember the panel's original placeholder hint before selectFile
+    // overwrites dropZone.innerHTML, so clearFile can restore it.
+    dropZone.dataset.hint = dropZone.querySelector('.hint')?.textContent || 'Click or drop audio file';
+
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files[0]) selectFile(e.target.files[0]);
+    });
+
+    // Drag-drop styling — must preventDefault on dragover for drop to fire.
+    ['dragenter', 'dragover'].forEach(ev => {
+      dropZone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropZone.classList.add('drag');
+      });
+    });
+    ['dragleave', 'drop'].forEach(ev => {
+      dropZone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('drag');
+      });
+    });
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      if (file) selectFile(file);
+    });
+
+    clearBtn.addEventListener('click', clearFile);
+
+    transcribeBtn.addEventListener('click', async () => {
+      if (!currentFile) return;
+      transcribeBtn.disabled = true;
+      clearBtn.disabled = true;
+      setStatus('Uploading + transcribing... (10-60s depending on length)', 'working');
+
+      try {
+        const form = new FormData();
+        form.append('file', currentFile);
+        form.append('language', currentLang);
+        if (extraFields) extraFields(form);
+        const res = await fetch(endpoint, { method: 'POST', body: form });
+        if (!res.ok) {
+          // FastAPI HTTPException returns { detail: "..." }; fall back to text.
+          let msg;
+          try { msg = (await res.json()).detail; } catch { msg = await res.text(); }
+          throw new Error(msg || ('HTTP ' + res.status));
+        }
+        const data = await res.json();
+        renderResults(data);
+        // Demote transcribe once we have results — copy is now the primary
+        // action; keeping both honey would violate the one-primary rule.
+        transcribeBtn.classList.remove('primary');
+        transcribeBtn.textContent = 'Transcribe again';
+        const langNote = data.detected_language ? ` (${langDisplayName(data.detected_language)})` : '';
+        setStatus(`Done.${langNote} ${data.transcript.length} chars transcribed.`);
+      } catch (err) {
+        console.error(err);
+        setStatus('Failed: ' + (err.message || err), 'error');
+      } finally {
+        transcribeBtn.disabled = false;
+        clearBtn.disabled = false;
+      }
+    });
+  }
+
+  setupUploadPanel({
+    prefix: 'single',
+    endpoint: '/transcribe',
+    renderResults: setupResultsPanel('single'),
+  });
+  setupUploadPanel({
+    prefix: 'meeting',
+    endpoint: '/transcribe-meeting',
+    renderResults: setupResultsPanel('meeting'),
+    extraFields: (form) => {
+      const raw = document.getElementById('meeting-num-speakers').value.trim();
+      if (raw !== '') form.append('num_speakers', raw);
+    },
+  });
+
+  // ── Dictate tab: click-to-record mic → upload on stop → plain text.
+  // Separate from setupUploadPanel (file-drop based) since this one
+  // drives its own MediaRecorder instead of <input type=file>, and
+  // only has one result (transcript, not a prompt+transcript pair —
+  // /transcribe-voice skips diarization + correction-prompt entirely,
+  // see server.py). Same mic-capture shape as utilities/keyboard's
+  // push-to-talk (audio/webm;codecs=opus, MediaRecorder, POST on
+  // stop), minus the hold-to-talk gesture — click-to-toggle instead,
+  // since a dictated note can run longer than a push-to-talk phrase.
+  function setupDictatePanel() {
+    const recordBtn = document.getElementById('dictate-record-btn');
+    const timerEl = document.getElementById('dictate-timer');
+    const statusEl = document.getElementById('dictate-status');
+    const panel = document.querySelector('.tab-panel[data-panel="dictate"]');
+    const langButtons = panel.querySelectorAll('.lang-select button');
+    const results = document.getElementById('dictate-results');
+    const transcriptOut = document.getElementById('dictate-transcript-out');
+    const copyTranscript = document.getElementById('dictate-copy-transcript');
+
+    copyTranscript.addEventListener('click', () => copyToClipboard(transcriptOut.value, copyTranscript));
+
+    let currentLang = 'zh-TW';
+    langButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        langButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentLang = btn.dataset.lang;
+      });
+    });
+
+    function setStatus(text, cls = '') {
+      statusEl.textContent = text;
+      statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    }
+
+    function formatTime(ms) {
+      const s = Math.floor(ms / 1000);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
+    }
+
+    let mediaRecorder = null;
+    let micStream = null;
+    let audioChunks = [];
+    let isRecording = false;
+    let startTime = 0;
+    let timerInterval = null;
+    let recordedMimeType = '';
+
+    // Safari's MediaRecorder support for webm/opus is patchy (varies by
+    // version, sometimes throws on construction, sometimes silently
+    // records something else). Try our preferred format first, fall
+    // back through alternatives, and let the browser pick its own
+    // default as a last resort rather than hardcoding one string and
+    // hoping. Picking a format MediaRecorder doesn't support used to
+    // either throw uncaught (recording visibly never starts) or in
+    // some browsers record anyway in a different format than the
+    // Blob's declared type — the latter can produce bytes the server
+    // can't parse, which surfaces as a bare browser-level fetch
+    // failure ("Load failed" in Safari) with no useful detail.
+    const MIME_CANDIDATES = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+      'audio/mp4;codecs=mp4a.40.2',
+    ];
+
+    function pickSupportedMimeType() {
+      if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
+      return MIME_CANDIDATES.find((t) => MediaRecorder.isTypeSupported(t)) || '';
+    }
+
+    async function startRecording() {
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        console.error(err);
+        setStatus('Microphone access denied', 'error');
+        return;
+      }
+
+      const mimeType = pickSupportedMimeType();
+      try {
+        mediaRecorder = mimeType
+          ? new MediaRecorder(micStream, { mimeType })
+          : new MediaRecorder(micStream);  // no candidate matched — let the browser use its own default
+      } catch (err) {
+        console.error(err);
+        setStatus('Recording not supported in this browser', 'error');
+        micStream.getTracks().forEach((t) => t.stop());
+        micStream = null;
+        return;
+      }
+      // `mediaRecorder.mimeType` is the browser's own report of what
+      // it's actually recording — more trustworthy than what we asked
+      // for, since a browser can silently substitute a close match.
+      recordedMimeType = mediaRecorder.mimeType || mimeType || 'audio/webm';
+      audioChunks = [];
+      mediaRecorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) audioChunks.push(ev.data);
+      };
+      mediaRecorder.start(250);
+      isRecording = true;
+      startTime = Date.now();
+      recordBtn.classList.add('recording');
+      timerEl.classList.add('recording');
+      setStatus('Recording... click to stop');
+      results.classList.remove('visible');
+      timerInterval = setInterval(() => {
+        timerEl.textContent = formatTime(Date.now() - startTime);
+      }, 100);
+    }
+
+    async function stopRecording() {
+      if (!isRecording || !mediaRecorder) return;
+      isRecording = false;
+      clearInterval(timerInterval);
+      recordBtn.classList.remove('recording');
+      timerEl.classList.remove('recording');
+      recordBtn.disabled = true;
+
+      const stopped = new Promise((resolve) => { mediaRecorder.onstop = resolve; });
+      try { mediaRecorder.requestData(); } catch {}
+      mediaRecorder.stop();
+      await stopped;
+      micStream.getTracks().forEach(t => t.stop());
+      micStream = null;
+
+      const blob = new Blob(audioChunks, { type: recordedMimeType || 'audio/webm' });
+      audioChunks = [];
+      timerEl.textContent = '00:00';
+
+      if (blob.size === 0) {
+        setStatus('No audio captured', 'error');
+        recordBtn.disabled = false;
+        return;
+      }
+
+      // Extension should match what was actually recorded (see
+      // recordedMimeType above) — the backend only uses this for a
+      // format hint, but a wrong extension on a format mismatch is
+      // one more variable removed when something's already gone
+      // sideways with the recording.
+      const ext = recordedMimeType.includes('mp4') ? 'm4a' : 'webm';
+
+      setStatus('Transcribing...', 'working');
+      try {
+        const form = new FormData();
+        form.append('file', blob, `dictate.${ext}`);
+        form.append('language', currentLang);
+        const res = await fetch('/transcribe-voice', { method: 'POST', body: form });
+        if (!res.ok) {
+          let msg;
+          try { msg = (await res.json()).detail; } catch { msg = await res.text(); }
+          throw new Error(msg || ('HTTP ' + res.status));
+        }
+        const data = await res.json();
+        transcriptOut.value = data.transcript;
+        results.classList.add('visible');
+        const langNote = data.detected_language ? ` (${langDisplayName(data.detected_language)})` : '';
+        setStatus(`Done.${langNote} ${data.transcript.length} chars transcribed.`);
+      } catch (err) {
+        console.error(err);
+        setStatus('Failed: ' + (err.message || err), 'error');
+      } finally {
+        recordBtn.disabled = false;
+      }
+    }
+
+    recordBtn.addEventListener('click', () => {
+      if (isRecording) stopRecording();
+      else startRecording();
+    });
+  }
+
+  setupDictatePanel();
+})();
+</script>
+</body>
+</html>

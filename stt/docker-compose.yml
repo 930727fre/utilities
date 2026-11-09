@@ -1,0 +1,14 @@
+services:
+  stt:
+    build: .
+    container_name: stt
+    restart: unless-stopped
+    environment:
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:?ELEVENLABS_API_KEY not exported in shell — get one at https://elevenlabs.io/app/settings/api-keys}
+    networks:
+      - default
+      - my_network
+
+networks:
+  my_network:
+    external: true
