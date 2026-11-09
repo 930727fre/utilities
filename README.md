@@ -5,7 +5,7 @@ A collection of self-hosted tools, each containerized with Docker.
 | Tool | Description |
 |------|-------------|
 | [clock](./clock) | Workout interval timer (1 min work / 30 sec rest) |
-| [recorder](./recorder) | In-browser MP3 recorder (16 kHz / 64 kbps, speech-optimised) |
+| [stt](./stt) | ElevenLabs Scribe v2-backed transcription, four tabs: Fri seminar / Meeting (upload → diarized transcript + LLM correction prompt), Dictate (click-to-record mic → auto-transcribe, ChatGPT-voice-input style), Record (in-browser MP3 recorder, 16 kHz / 64 kbps — absorbed from the now-retired `recorder` tool). FastAPI + static HTML, wraps a standalone `transcribe.py` CLI. |
 | [marker-pipeline](./marker-pipeline) | _(stale, see notes)_ Upload PDF or EPUB, get a zip of clean markdown + extracted images + metadata |
 | _transcribe_ | Moved to `~/homelab/transcribe/` — BT stack (transcribe + qBit + gluetun + jellyfin + rclone) now lives in its own `homelab/` repo since it grew beyond a single tool |
 | [xyt](./xyt) | _(stale, see notes)_ Fork of transcribe |

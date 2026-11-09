@@ -2,15 +2,16 @@
 
 Upload an audio file → get a diarized transcript + ready-to-paste LLM correction prompt.
 
-Backend is **ElevenLabs Scribe v2**. History: started as `deepgram-transcribe` (Deepgram-backed), migrated backend to ElevenLabs (2026-11), then renamed the whole tool to `stt` since the old name named a vendor that's no longer in use. Directory, docker service/container name, and on-page title are now all `stt`, in sync.
+Backend is **ElevenLabs Scribe v2**. History: started as `deepgram-transcribe` (Deepgram-backed), migrated backend to ElevenLabs (2026-11), then renamed the whole tool to `stt` since the old name named a vendor that's no longer in use. Directory, docker service/container name, and on-page title are now all `stt`, in sync. The standalone `utilities/recorder` tool was later absorbed in as the Record tab (below) and retired — favicon switched to 🎤 to match.
 
-Thin web wrapper (FastAPI + one static HTML file) around `transcribe.py`, which is also standalone runnable via `uv`.
+Thin web wrapper (FastAPI + one static HTML file) around `transcribe.py`, which is also standalone runnable via `uv`. The Record tab is the one exception to "thin wrapper": it's fully client-side (Web Audio API → MP3 via [lamejs](https://github.com/zhuker/lamejs), loaded from a CDN — the only external script this app loads; every other tab has zero external deps), never calls the backend at all.
 
-## Three tabs
+## Four tabs
 
 - **Fri seminar** — the original flow, renamed for its actual recurring use case. Upload → pick 中文/English → diarized transcript + LLM correction prompt. Speaker count always auto-detected.
 - **Meeting** — same pipeline, plus an optional "number of speakers" field. Leave blank to auto-detect (same as Fri seminar); set it if you know the exact headcount — helps Scribe separate speakers who sound similar. Capped at 32 (Scribe's own ceiling).
-- **Dictate** — click the mic button to record, click again to stop, it auto-uploads and transcribes. No diarization, no correction prompt — just the text, like the voice-input button in the ChatGPT/Claude/Gemini apps. Built for the "it's just me talking" case. Browser-side capture matches `utilities/keyboard`'s push-to-talk (`MediaRecorder`, `audio/webm;codecs=opus`), except click-to-toggle instead of hold-to-talk since a dictated note can run longer than a single held phrase.
+- **Dictate** — click the mic button to record, click again to stop, it auto-uploads and transcribes. No diarization, no correction prompt — just the text, like the voice-input button in the ChatGPT/Claude/Gemini apps. Built for the "it's just me talking" case. Browser-side capture matches `utilities/keyboard`'s push-to-talk (`MediaRecorder`), except click-to-toggle instead of hold-to-talk since a dictated note can run longer than a single held phrase. Picks the first browser-supported mimeType from a candidate list (webm/opus, webm, mp4, mp4/aac) rather than hardcoding one — a mismatch between the declared Blob type and what the browser actually recorded was the root cause of an iOS Safari "Load failed" fetch error during testing.
+- **Record** — absorbed from the now-retired `utilities/recorder`. Plain in-browser recorder: live waveform while capturing, encodes to MP3 (16 kHz / 64 kbps, speech-optimized) client-side, auto-downloads on stop and keeps a playable copy in an on-page list for the rest of the session. No transcription, no backend call, no diarization — just a recording you get to keep. The one tab that still works if `ELEVENLABS_API_KEY` is wrong or ElevenLabs is down.
 
 Each tab has its own results panel — running one tab never overwrites another's last output, since they track unrelated recurring use cases.
 
@@ -51,6 +52,11 @@ Raw transcript has its own copy button too if you don't want the prompt wrapper.
 4. It uploads + transcribes automatically; plain text appears below, click **Copy**
 
 Needs a secure context (`https://` or `localhost`) for `getUserMedia` to work at all — fine via the cloudflared tunnel, won't work over a bare `http://` LAN IP.
+
+**Record** (keep the audio, no transcription):
+
+1. Open the Record tab, click the mic button, talk, click again to stop
+2. MP3 downloads automatically and also appears in the Recordings list below with its own play/download controls — list is session-only (reloading the page clears it, the downloaded file is the only thing that survives)
 
 ## Chinese output (Traditional vs Simplified)
 

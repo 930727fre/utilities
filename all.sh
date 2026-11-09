@@ -14,7 +14,7 @@ SERVICES=(
   keyboard
   free2speak
   clock
-  recorder
+  stt
   clipboard
   backup
   monitor
