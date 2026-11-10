@@ -75,6 +75,14 @@
   }
   .tab-btn:hover:not(.active) { color: var(--text-1); }
   .tab-btn.active { background: var(--honey); color: #1c1c1e; }
+  /* Without this, hovering the already-active tab shows grey instead
+     of honey — the generic `button:hover:not(:disabled)` rule further
+     down (0,2,1 specificity: 2 pseudo-classes + 1 type selector) beats
+     `.tab-btn.active` (0,2,0: 2 classes, no type selector) on the type-
+     selector tiebreak, even though .active is visually what should
+     win. Matching the hover state's specificity up explicitly
+     (0,3,0) is simpler than restructuring the generic button rule. */
+  .tab-btn.active:hover { background: var(--honey); }
 
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
@@ -394,13 +402,13 @@
     <h1>stt</h1>
 
     <div class="tabs" role="tablist">
-      <button type="button" class="tab-btn active" data-tab="single" role="tab" aria-selected="true">Fri seminar</button>
+      <button type="button" class="tab-btn active" data-tab="dictate" role="tab" aria-selected="true">Dictate</button>
+      <button type="button" class="tab-btn" data-tab="single" role="tab" aria-selected="false">Fri seminar</button>
       <button type="button" class="tab-btn" data-tab="meeting" role="tab" aria-selected="false">Meeting</button>
-      <button type="button" class="tab-btn" data-tab="dictate" role="tab" aria-selected="false">Dictate</button>
       <button type="button" class="tab-btn" data-tab="record" role="tab" aria-selected="false">Record</button>
     </div>
 
-    <div class="tab-panel active" data-panel="single">
+    <div class="tab-panel" data-panel="single">
       <div class="card">
         <label for="single-file-input" class="drop-zone" id="single-drop-zone">
           <div class="hint">Click or drop audio file</div>
@@ -484,7 +492,7 @@
       </div>
     </div>
 
-    <div class="tab-panel" data-panel="dictate">
+    <div class="tab-panel active" data-panel="dictate">
       <div class="card">
         <div class="voice-recorder">
           <div class="timer" id="dictate-timer">00:00</div>
